@@ -4,11 +4,14 @@ This demo drives the supplied FANUC/SMC Isaac Sim twin through three physical
 pick-and-place sequences: red, yellow, and blue cubes are placed into matching
 bins made from the supplied `manipbench-bin-50x50x55.stl` model.
 
-This is a scripted simulation smoke test, not the final sorting system. It uses
-configured simulator poses and simulator ground truth; it does not use camera
-perception, Cosmos, a learned selector, or a real-robot control interface. Its
-purpose is to validate scene assets, inverse kinematics, contact-based grasping,
-placement, verification, and rendering before those missing layers are added.
+The **default mode** is a scripted simulation smoke test, not the final sorting
+system. It uses configured simulator poses and simulator ground truth; it does
+not use camera perception, Cosmos, a learned selector, or a real-robot control
+interface. Its purpose is to preserve the known-good scene, inverse-kinematics,
+contact-grasping, placement, verification, and rendering regression path. The
+explicit `--camera-perception` and `--training-data` modes described below add
+camera-derived decisions without changing that default; neither mode uses
+Cosmos.
 
 The simulator and FANUC hardware adapter share
 `config/colour_bucket_sort.json` for the colour order, cube size and starting
@@ -20,11 +23,11 @@ hover/contact test before any real descent. Every run prints the assumption and
 records it, the config hash, and the shared semantic phase sequence in
 `execution_report.json`.
 
-The semantic pre-descent revalidation gate is also present here. Because this
-is still a scripted Isaac smoke test, it checks simulator ground truth and says
-so in the report. The hardware adapter must satisfy the same gate with a fresh
-camera observation; simulation truth must never be used to make a real-robot
-decision.
+The semantic pre-descent revalidation gate is also present here. Default mode
+checks simulator ground truth and says so in the report; the opt-in camera
+modes satisfy the same gate with a fresh raw-camera observation. The hardware
+adapter must likewise use a fresh camera observation. Simulation truth must
+never be used to make a real-robot decision.
 
 ## Prerequisites
 
@@ -68,3 +71,52 @@ verified pickups, and three verified placements. A prior development run of
 this exact script completed 3/3 pickups and 3/3 placements on the verified
 runtime for commit `5bca8bd`; each new committed runtime still needs its own
 validation.
+
+## Camera parity and training-data modes
+
+Do not use the default presentation run's `frames/` directory as training
+data: it is 1280×720, contains burned-in text, uses fixed studio appearance,
+and is driven by configured simulator poses.  That known-good default remains
+the physics/rendering regression path.
+
+Use raw native-resolution RGB for runtime selection and fresh pre-descent
+revalidation without Cosmos or simulator-truth decisions:
+
+```bash
+"$ISAAC/python.sh" \
+  /workspace/rockwell-hackathon/demos/scripted_colour_bucket_sort/colour_bucket_demo.py \
+  --run "$ROCKWELL_RUNS_ROOT/camera_bucket_sort_01" \
+  --camera-perception
+```
+
+Add seeded, provisional domain randomization and synchronized training-data
+artifacts with:
+
+```bash
+"$ISAAC/python.sh" \
+  /workspace/rockwell-hackathon/demos/scripted_colour_bucket_sort/colour_bucket_demo.py \
+  --run "$ROCKWELL_RUNS_ROOT/training_bucket_sort_seed_7" \
+  --training-data --seed 7 --dataset-stride 15
+```
+
+Training mode implies camera perception and native 1920×1080 rendering. It
+keeps presentation overlays under `frames/`, lossless unannotated renderer
+images under `raw_frames/`, derived distorted/sensor-augmented images under
+`sensor_frames/`, and synchronized JSON under `frame_labels/`. It also writes
+requested and finalized randomization manifests, hashed USD/PhysX evidence in
+`isaac_randomization_readback.json`, and hashed live-camera intrinsics plus
+world/base-frame extrinsics in `effective_camera.json`. Each frame label embeds
+the effective camera readback and both evidence hashes. A run fails rather than
+claiming a sampled parameter that was not actually applied and read back. Each
+label keeps six measured arm-joint angles separate from measured gripper
+opening/closure, derives the measured TCP from articulation readback through
+FK, and records the last commanded state separately.
+
+The [synthetic-data contract](../../docs/SYNTHETIC_DATA.md) explains the
+provisional ranges and remaining gaps. In particular, the available 2D boxes
+are explicitly **amodal, image-clipped projections of the simulator-truth 3D
+cuboids**. They are not visible-pixel boxes and do not measure occlusion. The
+pipeline distorts the eight projected cuboid vertices before computing the
+derived-image box. Timestamped 3D poses are present, but visibility fractions,
+instance masks, depth, normals, motion blur, rolling shutter, and a measured
+real-camera response are not yet available.

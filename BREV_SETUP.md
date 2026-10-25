@@ -32,8 +32,69 @@ git status --porcelain
 
 The final command must print nothing. The setup deliberately refuses to use an
 unclean checkout so it cannot depend on files teammates do not have.
-If GitHub requests access, authenticate through the teammate's own approved
-Git credential flow; never place a personal token in this repository or chat.
+
+On a fresh Brev instance, first verify that GitHub CLI is available inside the
+`vscode` container:
+
+```bash
+command -v gh
+```
+
+If that prints no path, run this once from the Brev host, then repeat the check
+inside the `vscode` terminal:
+
+```bash
+docker exec --user root vscode bash -lc \
+  'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y gh'
+```
+
+For every fresh clone, and whenever a resumed Brev session will fetch from or
+push to GitHub, initialize the repository's GitHub credential helper from an
+interactive terminal in the clone:
+
+```bash
+cd /workspace/rockwell-hackathon
+bash scripts/ensure_github_auth.sh
+```
+
+The command is idempotent. If no valid login is available, the agent must tell
+the human that authorization is required and start GitHub CLI's browser/device
+flow in that interactive terminal. The human approves the displayed ephemeral
+URL and one-time code through GitHub; the agent must not ask the human to paste
+a reusable token. The script then reports the active account, verifies through
+GitHub's API that it has push permission to this clone's `origin`, and only
+then runs `gh auth setup-git`. A valid login on a resumed instance is reused,
+but account and repository permission are checked again. A successful login
+without push permission is intentionally not reported as ready.
+
+The script does not copy a token into the checkout. Never copy authentication
+files from another computer or put a personal token, GitHub CLI configuration
+file, device-flow output, or credential output in this repository, logs, or
+chat. If a noninteractive invocation reports that human authorization is
+required, reopen the clone in an interactive Brev terminal and run the same
+script there.
+
+The script also reports credential persistence without printing the secret.
+`GH_TOKEN` and `GITHUB_TOKEN` are transient environment credentials. A login
+created by `gh auth login` persists beyond the shell and, on a headless Brev
+container without a secure credential store, may be stored in plaintext in
+`~/.config/gh/hosts.yml`. Anyone able to read that file can reuse the token.
+Do not automatically log out while authorized work is running. Before handing
+a shared instance to an untrusted user, use the cleanup command printed by the
+gate:
+
+```bash
+# Stored login (replace ACCOUNT with the account printed by the gate):
+gh auth logout --hostname github.com --user ACCOUNT
+
+# Environment-provided login:
+unset GH_TOKEN GITHUB_TOKEN
+```
+
+After cleanup, `gh auth status --hostname github.com >/dev/null 2>&1` must no
+longer succeed for the removed login. The `gh auth setup-git` helper contains
+no token itself and may remain configured; without a valid GitHub CLI login it
+cannot supply credentials.
 
 ## 2. Install the small system prerequisite when necessary
 

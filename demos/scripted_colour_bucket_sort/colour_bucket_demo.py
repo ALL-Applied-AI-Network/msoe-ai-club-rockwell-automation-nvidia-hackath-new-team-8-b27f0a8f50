@@ -1,9 +1,11 @@
 """Scripted Isaac Sim demo: sort red, yellow, and blue cubes into matching bins.
 
-This is deliberately a *scripted simulation demonstration*.  It uses configured
-simulator poses to exercise the existing FANUC/SMC inverse kinematics, physical
-grasping, contact, and rendering stack.  It is not a Cosmos or camera-perception
-result and must not be presented as one.
+The default mode is deliberately a *scripted simulation demonstration*.  It
+uses configured simulator poses to exercise the existing FANUC/SMC inverse
+kinematics, physical grasping, contact, and rendering stack.  That default is
+not a Cosmos or camera-perception result and must not be presented as one.  The
+explicit ``--camera-perception`` and ``--training-data`` modes instead make
+runtime target decisions from raw rendered pixels; neither mode uses Cosmos.
 
 The visual bin mesh is loaded directly from the supplied
 ``manipbench-bin-50x50x55.stl`` reference asset.  Simple static floor/wall box
@@ -55,9 +57,24 @@ from sorting_core import (  # noqa: E402
     CubeDetection,
     DEFAULT_CONFIG_PATH,
     SceneDetections,
+    TipPoseBase,
+    augment_sensor_rgb,
+    base_tip_pose_to_uf0_tcp,
     build_colour_sort_plans,
+    build_synchronized_frame_record,
+    finalize_application_status,
+    load_capture_calibration,
     load_config,
+    load_synthetic_data_spec,
+    sample_randomization,
     semantic_phase_plan,
+)
+from sorting_core.synthetic_data import distort_points_uv, write_json_atomic  # noqa: E402
+from isaac_bridge import CalibratedPinholeCamera, IsaacCameraSortAdapter  # noqa: E402
+from isaac_bridge.training_episode import (  # noqa: E402
+    apply_postbuild_randomization,
+    prepare_prebuild_randomization,
+    readback_effective_camera,
 )
 
 
@@ -111,6 +128,7 @@ BIN_MATERIALS = {
     "blue": "plastic_blue",
 }
 VIDEO_RESOLUTION = (1280, 720)
+NATIVE_TABLE_RESOLUTION = (1920, 1080)
 FPS = 30
 
 
@@ -126,6 +144,34 @@ def parse_args() -> argparse.Namespace:
         "--physics-only",
         action="store_true",
         help="run and verify physics without rendering PNG frames",
+    )
+    parser.add_argument(
+        "--camera-perception",
+        action="store_true",
+        help=(
+            "select and revalidate picks from raw table-camera RGB using the "
+            "same deterministic detector/planner as hardware"
+        ),
+    )
+    parser.add_argument(
+        "--training-data",
+        action="store_true",
+        help=(
+            "enable native-resolution seeded domain randomization, lossless raw "
+            "frames, derived sensor frames, and synchronized labels"
+        ),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=20261025,
+        help="episode seed used only with --training-data",
+    )
+    parser.add_argument(
+        "--dataset-stride",
+        type=int,
+        default=15,
+        help="save one training record every N rendered presentation frames",
     )
     return parser.parse_args()
 
@@ -273,8 +319,80 @@ def rotation_matrix_from_quat(quat) -> np.ndarray:
     )
 
 
+def _clipped_amodal_bbox(
+    projected_vertices_uv: np.ndarray,
+    resolution: tuple[int, int],
+) -> tuple[list[float] | None, str]:
+    """Bound a projected full 3D cuboid without implying visible pixels.
+
+    The result is clipped to image boundaries.  A cuboid whose projection has
+    no positive-area intersection with the image is explicitly invalid rather
+    than emitted as a degenerate box.
+    """
+
+    vertices = np.asarray(projected_vertices_uv, dtype=float)
+    if vertices.ndim != 2 or vertices.shape[1:] != (2,) or not np.all(
+        np.isfinite(vertices)
+    ):
+        raise ValueError("projected cuboid vertices must be finite Nx2 values")
+    width, height = (float(value) for value in resolution)
+    unbounded = np.array(
+        [
+            vertices[:, 0].min(),
+            vertices[:, 1].min(),
+            vertices[:, 0].max(),
+            vertices[:, 1].max(),
+        ],
+        dtype=float,
+    )
+    if (
+        unbounded[2] <= 0.0
+        or unbounded[3] <= 0.0
+        or unbounded[0] >= width
+        or unbounded[1] >= height
+    ):
+        return None, "invalid_outside_image"
+    clipped = np.array(
+        [
+            np.clip(unbounded[0], 0.0, width),
+            np.clip(unbounded[1], 0.0, height),
+            np.clip(unbounded[2], 0.0, width),
+            np.clip(unbounded[3], 0.0, height),
+        ],
+        dtype=float,
+    )
+    if clipped[2] <= clipped[0] or clipped[3] <= clipped[1]:
+        return None, "invalid_outside_image"
+    status = "valid" if np.array_equal(clipped, unbounded) else "valid_clipped"
+    return clipped.tolist(), status
+
+
 def main() -> None:
     args = parse_args()
+    if args.dataset_stride < 1:
+        raise SystemExit("--dataset-stride must be at least 1")
+    camera_perception = bool(args.camera_perception or args.training_data)
+    if args.physics_only and camera_perception:
+        raise SystemExit(
+            "--physics-only cannot be combined with camera perception or training-data capture"
+        )
+    render_resolution = (
+        NATIVE_TABLE_RESOLUTION if camera_perception else VIDEO_RESOLUTION
+    )
+    synthetic_spec = None
+    randomization = None
+    capture_calibration = None
+    applied_randomization: set[str] = set()
+    stage_randomization_readback = None
+    effective_camera = None
+    if args.training_data:
+        synthetic_spec = load_synthetic_data_spec()
+        randomization = sample_randomization(
+            synthetic_spec,
+            episode_seed=args.seed,
+            episode_id=Path(args.run).resolve().name,
+        )
+        capture_calibration = load_capture_calibration(synthetic_spec)
     print(
         f"[bucket-demo] shared config schema={TASK_CONFIG.schema_version}; "
         f"cube edge={TASK_CONFIG.cube_edge_m * 1000.0:.1f} mm",
@@ -292,9 +410,11 @@ def main() -> None:
     )
     run = Path(args.run).resolve()
     frames = run / "frames"
-    if frames.exists() and any(frames.glob("*.png")):
-        raise SystemExit(f"Refusing to overwrite rendered frames in {frames}")
+    if run.exists() and any(run.iterdir()):
+        raise SystemExit(f"Refusing to mix outputs in non-empty run directory {run}")
     run.mkdir(parents=True, exist_ok=True)
+    if randomization is not None:
+        write_json_atomic(run / "randomization_requested.json", randomization.as_dict())
     bin_model = resolve_bin_model(args.bin_model)
     triangles_mm = load_stl_triangles(bin_model)
     bounds_mm = [
@@ -332,12 +452,10 @@ def main() -> None:
     C.SORT_VIALS = []
     C.SORT_CAPS = []
     C.CAP_ORIENTATIONS = []
-    C.SORT_CUBES = [(*CUBE_SPAWNS[colour][:2], colour) for colour in COLOURS]
-    C.SORT_CUBE_YAWS_DEG = [CUBE_SPAWNS[colour][2] for colour in COLOURS]
     C.SHOW_BINS = False
     C.SHOW_FIXTURE = False
     C.TABLE_CAM = dict(C.TABLE_CAM)
-    C.TABLE_CAM["resolution"] = VIDEO_RESOLUTION
+    C.TABLE_CAM["resolution"] = render_resolution
 
     from isaacsim import SimulationApp
 
@@ -353,6 +471,16 @@ def main() -> None:
         from isaacsim.sensors.camera import Camera
         import cell
 
+        active_spawns = dict(CUBE_SPAWNS)
+        if randomization is not None:
+            active_spawns, prebuild_applied = prepare_prebuild_randomization(
+                C, cell, randomization, CUBE_SPAWNS
+            )
+            applied_randomization.update(prebuild_applied)
+        C.TABLE_CAM["resolution"] = render_resolution
+        C.SORT_CUBES = [(*active_spawns[colour][:2], colour) for colour in COLOURS]
+        C.SORT_CUBE_YAWS_DEG = [active_spawns[colour][2] for colour in COLOURS]
+
         world = World(
             stage_units_in_meters=1.0,
             physics_dt=1 / 60,
@@ -360,6 +488,16 @@ def main() -> None:
         )
         stage = omni.usd.get_context().get_stage()
         cell.build(stage)
+        if randomization is not None:
+            (
+                postbuild_applied,
+                stage_randomization_readback,
+            ) = apply_postbuild_randomization(stage, cell, randomization)
+            applied_randomization.update(postbuild_applied)
+            write_json_atomic(
+                run / "isaac_randomization_readback.json",
+                stage_randomization_readback,
+            )
 
         def add_bin(colour: str) -> None:
             bx, by = BIN_CENTRES[colour]
@@ -411,7 +549,7 @@ def main() -> None:
         if not args.physics_only:
             camera = Camera(
                 prim_path=cell.TABLE_CAM_PATH,
-                resolution=VIDEO_RESOLUTION,
+                resolution=render_resolution,
             )
 
         cell.enable_ccd(world)
@@ -419,11 +557,62 @@ def main() -> None:
         if camera is not None:
             camera.initialize()
 
+        camera_model = None
+        camera_adapter = None
+        if camera is not None:
+            if randomization is not None:
+                effective_camera, camera_applied = readback_effective_camera(
+                    stage,
+                    camera_prim_path=cell.TABLE_CAM_PATH,
+                    resolution_px=render_resolution,
+                    robot_base_origin_world_m=(0.0, 0.0, C.TABLE_TOP_Z),
+                    expected_camera=C.TABLE_CAM,
+                    base_camera=C._TRAINING_RANDOMIZATION_BASE["camera"],
+                    manifest=randomization,
+                )
+                applied_randomization.update(camera_applied)
+                write_json_atomic(run / "effective_camera.json", effective_camera)
+                intrinsics = effective_camera["intrinsics"]
+                camera_to_base = effective_camera["extrinsics"]["robot_base"][
+                    "camera_to_robot_base_row_major"
+                ]
+                camera_model = CalibratedPinholeCamera(
+                    resolution_px=tuple(intrinsics["resolution_px"]),
+                    focal_length_mm=intrinsics["focal_length_mm"],
+                    horizontal_aperture_mm=intrinsics[
+                        "horizontal_aperture_mm"
+                    ],
+                    vertical_aperture_mm=intrinsics["vertical_aperture_mm"],
+                    camera_to_base_row_major=tuple(
+                        tuple(row) for row in camera_to_base
+                    ),
+                    default_plane_base_z_m=C.SURFACE_DZ,
+                )
+            else:
+                eye_base = np.asarray(C.TABLE_CAM["eye"], dtype=float)
+                look_at_base = np.asarray(C.TABLE_CAM["look_at"], dtype=float)
+                # The supplied USD stage places the robot-base origin at world
+                # TABLE_TOP_Z.  The shared policy contract uses robot-base Z=0.
+                eye_base[2] -= C.TABLE_TOP_Z
+                look_at_base[2] -= C.TABLE_TOP_Z
+                camera_model = CalibratedPinholeCamera.from_look_at(
+                    eye_base_m=eye_base,
+                    look_at_base_m=look_at_base,
+                    up_base=C.TABLE_CAM["up"],
+                    resolution_px=render_resolution,
+                    focal_length_mm=C.TABLE_CAM["focal_length"],
+                    horizontal_aperture_mm=C.TABLE_CAM["horiz_aperture"],
+                    default_plane_base_z_m=C.SURFACE_DZ,
+                )
+            camera_adapter = IsaacCameraSortAdapter(camera_model, TASK_CONFIG)
+
         arm = SingleArticulation(prim_path=C.ROBOT_PRIM, name="er4ia")
         arm.initialize()
         dof_names = list(arm.dof_names)
         arm_indices = [dof_names.index(f"J{i}") for i in range(1, 7)]
         joint_index = {name: i for i, name in enumerate(dof_names)}
+        jaw_open_joint_targets = cell.jaw_targets(C.JAW_OPEN)
+        jaw_closed_joint_targets = cell.jaw_targets(C.JAW_CLOSED)
         limits = np.deg2rad([C.JOINT_LIMITS_DEG[f"J{i}"] for i in range(1, 7)])
         ik.set_tool_axis(C.TOOL_AXIS)
         ik.set_spread_axis(C.FINGER_SPREAD_AXIS)
@@ -441,6 +630,69 @@ def main() -> None:
             for joint, value in cell.jaw_targets(jaw).items():
                 full[joint_index[joint]] = value
             arm.apply_action(ArticulationAction(joint_positions=full))
+
+        def fk_tip_pose(q6):
+            rotation, tip_xyz = fk.tool_pose(q6, tool)
+            spread_xy = (
+                rotation @ np.asarray(C.FINGER_SPREAD_AXIS, dtype=float)
+            )[:2]
+            if np.linalg.norm(spread_xy) <= 1e-9:
+                raise RuntimeError("FK has no horizontal finger-spread axis")
+            return TipPoseBase(
+                tuple(float(value) for value in tip_xyz),
+                math.atan2(-float(spread_xy[0]), float(spread_xy[1])),
+            )
+
+        def articulation_readback():
+            """Read measured joints/gripper and derive the measured FK tip pose."""
+
+            full = np.asarray(arm.get_joint_positions(), dtype=float)
+            if full.shape != (len(dof_names),) or not np.all(np.isfinite(full)):
+                raise RuntimeError("Isaac articulation returned invalid joint positions")
+            measured_q = full[arm_indices]
+            closure_samples = []
+            for joint, open_target in jaw_open_joint_targets.items():
+                closed_target = jaw_closed_joint_targets[joint]
+                span = closed_target - open_target
+                if abs(span) <= 1e-12:
+                    raise RuntimeError(f"Jaw joint {joint} has zero configured stroke")
+                closure_samples.append(
+                    (full[joint_index[joint]] - open_target) / span
+                )
+            raw_closure_fraction = float(np.mean(closure_samples))
+            # PhysX drive readback can exceed an authored endpoint by a tiny
+            # floating-point epsilon. Preserve that raw value in the label,
+            # but normalize only within a deliberately small tolerance.
+            closure_tolerance = 1e-4
+            if not -closure_tolerance <= raw_closure_fraction <= 1.0 + closure_tolerance:
+                raise RuntimeError(
+                    "Measured jaw closure is outside the configured open/closed "
+                    f"stroke: {raw_closure_fraction:.6f}"
+                )
+            closure_fraction = float(np.clip(raw_closure_fraction, 0.0, 1.0))
+            jaw_half_opening_m = float(
+                C.JAW_OPEN - closure_fraction * (C.JAW_OPEN - C.JAW_CLOSED)
+            )
+
+            measured_tip = fk_tip_pose(measured_q)
+            protocol_gripper = (
+                TASK_CONFIG.gripper.open_command
+                + closure_fraction
+                * (
+                    TASK_CONFIG.gripper.closed_command
+                    - TASK_CONFIG.gripper.open_command
+                )
+            )
+            tcp = base_tip_pose_to_uf0_tcp(
+                measured_tip, protocol_gripper, TASK_CONFIG
+            )
+            return (
+                measured_q,
+                jaw_half_opening_m,
+                closure_fraction,
+                raw_closure_fraction,
+                tcp[:6],
+            )
 
         full = arm.get_joint_positions().copy()
         full[arm_indices] = q
@@ -475,28 +727,134 @@ def main() -> None:
                 "tilt_deg": tilt,
             }
 
+        def capture_rgb() -> np.ndarray:
+            if camera is None:
+                raise RuntimeError("Camera capture requested in physics-only mode")
+            rgba = camera.get_rgba()
+            if rgba is None:
+                raise RuntimeError("Table camera returned no image")
+            return rgba[:, :, :3].astype(np.uint8)
+
         initial = {colour: cube_pose(colour) for colour in COLOURS}
+        initial_camera_decision = None
+        observed_targets = {}
+        if camera_perception:
+            initial_camera_decision = camera_adapter.observe_and_plan(
+                capture_rgb(),
+                scene_id="isaac-camera-initial",
+                capture_time_s=float(world.current_time),
+            )
+            observed_targets = {
+                plan.target.colour: plan.target
+                for plan in initial_camera_decision.plans
+            }
+            print(
+                "[bucket-demo] camera perception found "
+                + ", ".join(
+                    f"{item.colour}@({item.position_base_m[0]:.4f},"
+                    f"{item.position_base_m[1]:.4f})"
+                    for item in initial_camera_decision.scene.cubes
+                ),
+                flush=True,
+            )
         events = []
         frame_number = 0
         frames.mkdir(parents=True, exist_ok=True)
+        raw_frames = run / "raw_frames"
+        sensor_frames = run / "sensor_frames"
+        frame_labels = run / "frame_labels"
+        if randomization is not None:
+            raw_frames.mkdir(parents=True, exist_ok=True)
+            sensor_frames.mkdir(parents=True, exist_ok=True)
+            frame_labels.mkdir(parents=True, exist_ok=True)
+        frame_tip_pose = TipPoseBase(tuple(float(v) for v in home), 0.0)
+        frame_jaw_target = C.JAW_OPEN
+        frame_gripper_command = TASK_CONFIG.gripper.open_command
+
+        def truth_object_labels():
+            labels = []
+            half = C.CUBE_EDGE / 2.0
+            for name in COLOURS:
+                pose = cube_pose(name)
+                centre_world = np.asarray(pose["centre"], dtype=float)
+                centre_base = centre_world.copy()
+                centre_base[2] -= C.TABLE_TOP_Z
+                rotation = rotation_matrix_from_quat(pose["orientation_wxyz"])
+                corners_base = []
+                for dx in (-half, half):
+                    for dy in (-half, half):
+                        for dz in (-half, half):
+                            corner_world = centre_world + rotation @ np.array(
+                                [dx, dy, dz], dtype=float
+                            )
+                            corner_base = corner_world.copy()
+                            corner_base[2] -= C.TABLE_TOP_Z
+                            corners_base.append(corner_base)
+                pixels = [camera_model.project(point) for point in corners_base]
+                raw_bbox = None
+                raw_bbox_status = "invalid_behind_camera"
+                derived_bbox = None
+                derived_bbox_status = "invalid_behind_camera"
+                if all(pixel is not None for pixel in pixels):
+                    pixel_array = np.asarray(pixels, dtype=float)
+                    raw_bbox, raw_bbox_status = _clipped_amodal_bbox(
+                        pixel_array, render_resolution
+                    )
+                    if capture_calibration is not None:
+                        distorted = distort_points_uv(
+                            pixel_array,
+                            width=render_resolution[0],
+                            height=render_resolution[1],
+                            fx=float(capture_calibration["fx"]),
+                            k1=float(capture_calibration["k1"]),
+                        )
+                        distorted = np.asarray(distorted, dtype=float)
+                        derived_bbox, derived_bbox_status = _clipped_amodal_bbox(
+                            distorted, render_resolution
+                        )
+                    else:
+                        derived_bbox_status = "not_generated"
+                labels.append(
+                    {
+                        "track_id": f"isaac-{name}-0",
+                        "class_name": "cube",
+                        "colour": name,
+                        "position_base_m": centre_base.tolist(),
+                        "quaternion_base_wxyz": pose["orientation_wxyz"],
+                        "dimensions_m": [C.CUBE_EDGE] * 3,
+                        # Occlusion requires an instance render pass.  Do not
+                        # pretend a projected 3D box measured visibility.
+                        "visible_fraction": None,
+                        "visibility_status": "unknown_not_annotated",
+                        "amodal_bbox_type": (
+                            "projected_3d_cuboid_clipped_to_image"
+                        ),
+                        "raw_amodal_bbox_xyxy_px": raw_bbox,
+                        "raw_amodal_bbox_status": raw_bbox_status,
+                        "derived_amodal_bbox_xyxy_px": derived_bbox,
+                        "derived_amodal_bbox_status": derived_bbox_status,
+                        "instance_mask_relpath": None,
+                    }
+                )
+            return labels
 
         def save_frame(colour: str, phase: str) -> None:
             nonlocal frame_number
             if camera is None:
                 return
-            rgba = camera.get_rgba()
-            if rgba is None:
-                raise RuntimeError("Table camera returned no image")
-            image = cv2.cvtColor(
-                rgba[:, :, :3].astype(np.uint8), cv2.COLOR_RGB2BGR
-            )
+            raw_rgb = capture_rgb()
+            image = cv2.cvtColor(raw_rgb, cv2.COLOR_RGB2BGR)
             cv2.rectangle(image, (18, 16), (610, 102), (18, 18, 18), -1)
             cv2.putText(
                 image,
-                "SCRIPTED PHYSICS SIMULATION",
+                (
+                    "CAMERA-PERCEPTION PHYSICS SIMULATION"
+                    if camera_perception
+                    else "SCRIPTED PHYSICS SIMULATION"
+                ),
                 (34, 48),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.72,
+                0.62 if camera_perception else 0.72,
                 (255, 255, 255),
                 2,
                 cv2.LINE_AA,
@@ -511,17 +869,135 @@ def main() -> None:
                 2,
                 cv2.LINE_AA,
             )
-            cv2.imwrite(str(frames / f"f{frame_number:05d}.png"), image)
+            presentation_path = frames / f"f{frame_number:05d}.png"
+            if not cv2.imwrite(str(presentation_path), image):
+                raise RuntimeError(f"OpenCV could not write {presentation_path}")
+
+            if randomization is not None and frame_number % args.dataset_stride == 0:
+                raw_relative = f"raw_frames/f{frame_number:05d}.png"
+                sensor_relative = f"sensor_frames/f{frame_number:05d}.png"
+                raw_path = run / raw_relative
+                if not cv2.imwrite(
+                    str(raw_path), cv2.cvtColor(raw_rgb, cv2.COLOR_RGB2BGR)
+                ):
+                    raise RuntimeError(f"OpenCV could not write {raw_path}")
+                sensor_result = augment_sensor_rgb(
+                    raw_rgb,
+                    randomization,
+                    camera_calibration=capture_calibration,
+                )
+                applied_randomization.update(sensor_result.applied_parameters)
+                sensor_path = run / sensor_relative
+                if not cv2.imwrite(
+                    str(sensor_path),
+                    cv2.cvtColor(sensor_result.image_rgb, cv2.COLOR_RGB2BGR),
+                ):
+                    raise RuntimeError(f"OpenCV could not write {sensor_path}")
+                capture_time = float(world.current_time)
+                (
+                    measured_q,
+                    measured_jaw_half_opening_m,
+                    measured_closure_fraction,
+                    measured_closure_fraction_raw,
+                    measured_tcp,
+                ) = articulation_readback()
+                robot_state_time = float(world.current_time)
+                object_labels = truth_object_labels()
+                scene_state_time = float(world.current_time)
+                commanded_tip = fk_tip_pose(q)
+                commanded_mechanical_closure_fraction = float(
+                    (C.JAW_OPEN - frame_jaw_target)
+                    / max(C.JAW_OPEN - C.JAW_CLOSED, 1e-12)
+                )
+                commanded_protocol_gripper = (
+                    TASK_CONFIG.gripper.open_command
+                    + frame_gripper_command
+                    * (
+                        TASK_CONFIG.gripper.closed_command
+                        - TASK_CONFIG.gripper.open_command
+                    )
+                )
+                commanded_tcp = base_tip_pose_to_uf0_tcp(
+                    commanded_tip, commanded_protocol_gripper, TASK_CONFIG
+                )
+                record = build_synchronized_frame_record(
+                    synthetic_spec,
+                    randomization,
+                    frame_index=frame_number,
+                    raw_image_relpath=raw_relative,
+                    derived_image_relpath=sensor_relative,
+                    capture_time_s=capture_time,
+                    robot_state_time_s=robot_state_time,
+                    scene_state_time_s=scene_state_time,
+                    measured_arm_joints_deg=np.rad2deg(measured_q),
+                    measured_gripper_half_opening_m=(
+                        measured_jaw_half_opening_m
+                    ),
+                    measured_gripper_closure_fraction=(
+                        measured_closure_fraction
+                    ),
+                    measured_tcp_pose_uf0_mm_deg=measured_tcp,
+                    commanded_arm_joints_deg=np.rad2deg(q),
+                    commanded_gripper_half_opening_m=frame_jaw_target,
+                    commanded_gripper_closure_fraction=(
+                        commanded_mechanical_closure_fraction
+                    ),
+                    commanded_tcp_pose_uf0_mm_deg=commanded_tcp[:6],
+                    scene_version=f"{run.name}:frame-{frame_number}",
+                    phase=phase,
+                    objects=object_labels,
+                )
+                record["camera"]["sensor_processing"] = dict(
+                    sensor_result.processing
+                )
+                record["policy_input"]["measured_robot_state"]["gripper"].update(
+                    {
+                        "raw_closure_fraction": measured_closure_fraction_raw,
+                        "endpoint_tolerance": 1e-4,
+                        "normalized_within_endpoint_tolerance": bool(
+                            measured_closure_fraction_raw
+                            != measured_closure_fraction
+                        ),
+                    }
+                )
+                record["camera"]["effective_isaac_readback"] = effective_camera
+                record["randomization"].update(
+                    {
+                        "isaac_stage_readback_relpath": (
+                            "isaac_randomization_readback.json"
+                        ),
+                        "isaac_stage_readback_sha256": (
+                            stage_randomization_readback["sha256"]
+                        ),
+                        "effective_camera_relpath": "effective_camera.json",
+                        "effective_camera_sha256": effective_camera["sha256"],
+                    }
+                )
+                record["synchronization"]["clock_source"] = (
+                    "Isaac world.current_time; image, articulation readback, and "
+                    "scene truth sampled without advancing the simulation tick"
+                )
+                write_json_atomic(
+                    frame_labels / f"f{frame_number:05d}.json", record
+                )
             frame_number += 1
 
         for colour in COLOURS:
             start_all = {name: cube_pose(name) for name in COLOURS}
             start = start_all[colour]
-            yaw = start["yaw_deg"]
+            runtime_detection = observed_targets.get(colour)
+            if camera_perception:
+                if runtime_detection is None:
+                    raise RuntimeError(f"Camera perception did not find {colour} cube")
+                pick_xy = list(runtime_detection.position_base_m[:2])
+                yaw = math.degrees(runtime_detection.yaw_rad)
+            else:
+                pick_xy = start["centre"][:2]
+                yaw = start["yaw_deg"]
             theta = math.radians(yaw)
             pick = {
                 "colour": colour,
-                "xy": start["centre"][:2],
+                "xy": pick_xy,
                 "pick_z": TASK_CONFIG.pick_tip_base_z_m,
                 "spread_dir": [-math.sin(theta), math.cos(theta), 0.0],
                 "place_xy": list(BIN_CENTRES[colour]),
@@ -545,7 +1021,23 @@ def main() -> None:
             pick["place_spread_dir"] = destination_spread.tolist()
             event = {
                 "colour": colour,
+                # Keep the original key for report consumers while making the
+                # evaluator-only role explicit in the new alias.
                 "source": start,
+                "source_truth_evaluator_only": start,
+                "runtime_observation": (
+                    None
+                    if runtime_detection is None
+                    else {
+                        "source": "raw_isaac_table_camera_rgb",
+                        "track_id": runtime_detection.track_id,
+                        "capture_time_s": runtime_detection.capture_time_s,
+                        "position_base_m": list(runtime_detection.position_base_m),
+                        "yaw_rad": runtime_detection.yaw_rad,
+                        "confidence": runtime_detection.confidence,
+                        "pixel_center_uv": list(runtime_detection.pixel_center_uv),
+                    }
+                ),
                 "destination_bin": {
                     "colour": colour,
                     "centre_xy_m": list(BIN_CENTRES[colour]),
@@ -555,6 +1047,18 @@ def main() -> None:
                 "trajectory_ik_failures": 0,
                 "shared_semantic_phases": list(SHARED_SEMANTIC_PHASE_NAMES),
             }
+            if runtime_detection is not None:
+                truth_xy = np.asarray(start["centre"][:2], dtype=float)
+                detected_xy = np.asarray(
+                    runtime_detection.position_base_m[:2], dtype=float
+                )
+                event["perception_evaluation_truth_only"] = {
+                    "xy_error_mm": float(
+                        np.linalg.norm(detected_xy - truth_xy) * 1000.0
+                    ),
+                    "truth_xy_m": truth_xy.tolist(),
+                    "detected_xy_m": detected_xy.tolist(),
+                }
 
             segments = motion_segments(pick, home, C)
             actual_semantic_names = tuple(segment[0] for segment in segments[:-1])
@@ -565,20 +1069,49 @@ def main() -> None:
                 )
             for phase, p0, p1, duration, jaw0, jaw1, spread in segments:
                 if phase == "revalidate_before_descent":
-                    current = cube_pose(colour)
-                    moved_xy_m = float(
-                        np.linalg.norm(
-                            np.asarray(current["centre"][:2])
-                            - np.asarray(start["centre"][:2])
-                        )
-                    )
-                    # This smoke demo has no perception backend.  Preserve the
-                    # shared stop/revalidate gate using simulator truth and label
-                    # that limitation explicitly; the hardware policy must use a
-                    # fresh camera observation instead.
                     tolerance_m = min(0.002, TASK_CONFIG.cube_edge_m / 4.0)
+                    if camera_perception:
+                        refreshed_scene = camera_adapter.observe(
+                            capture_rgb(),
+                            scene_id=f"isaac-camera-{colour}-pre-descent",
+                            capture_time_s=float(world.current_time),
+                        )
+                        refreshed = [
+                            item
+                            for item in refreshed_scene.cubes
+                            if item.colour == colour
+                        ]
+                        if len(refreshed) != 1:
+                            raise RuntimeError(
+                                f"Fresh camera observation has {len(refreshed)} "
+                                f"{colour} detections; refusing descent"
+                            )
+                        reference_xy = np.asarray(
+                            runtime_detection.position_base_m[:2], dtype=float
+                        )
+                        refreshed_xy = np.asarray(
+                            refreshed[0].position_base_m[:2], dtype=float
+                        )
+                        moved_xy_m = float(np.linalg.norm(refreshed_xy - reference_xy))
+                        revalidation_source = "fresh_raw_isaac_table_camera_rgb"
+                        event["pre_descent_revalidation_detection"] = {
+                            "track_id": refreshed[0].track_id,
+                            "capture_time_s": refreshed[0].capture_time_s,
+                            "position_base_m": list(refreshed[0].position_base_m),
+                            "yaw_rad": refreshed[0].yaw_rad,
+                            "confidence": refreshed[0].confidence,
+                        }
+                    else:
+                        current = cube_pose(colour)
+                        moved_xy_m = float(
+                            np.linalg.norm(
+                                np.asarray(current["centre"][:2])
+                                - np.asarray(start["centre"][:2])
+                            )
+                        )
+                        revalidation_source = "simulator_ground_truth_not_camera"
                     event["pre_descent_revalidation"] = {
-                        "source": "simulator_ground_truth_not_camera",
+                        "source": revalidation_source,
                         "target_movement_xy_m": moved_xy_m,
                         "maximum_allowed_m": tolerance_m,
                         "passed": bool(moved_xy_m <= tolerance_m),
@@ -586,7 +1119,7 @@ def main() -> None:
                     if moved_xy_m > tolerance_m:
                         raise RuntimeError(
                             f"{colour} target moved {moved_xy_m * 1000.0:.2f} mm "
-                            "before descent; refusing stale scripted pick"
+                            "before descent; refusing stale pick"
                         )
                     continue
 
@@ -639,7 +1172,21 @@ def main() -> None:
                             f"IK failed for {colour} during {phase} frame {step}; "
                             "refusing off-target motion"
                         )
-                    command(q, jaw0 + (jaw1 - jaw0) * t)
+                    frame_jaw_target = jaw0 + (jaw1 - jaw0) * t
+                    close_span = max(C.JAW_OPEN - C.CUBE_JAW_HALF_TARGET, 1e-9)
+                    frame_gripper_command = float(
+                        np.clip((C.JAW_OPEN - frame_jaw_target) / close_span, 0.0, 1.0)
+                    )
+                    if direction is not None:
+                        frame_yaw = math.atan2(
+                            -float(direction[0]), float(direction[1])
+                        )
+                    else:
+                        frame_yaw = frame_tip_pose.yaw_rad
+                    frame_tip_pose = TipPoseBase(
+                        tuple(float(value) for value in target), frame_yaw
+                    )
+                    command(q, frame_jaw_target)
                     for _ in range(2):
                         world.step(render=camera is not None)
                     save_frame(colour, phase)
@@ -683,9 +1230,24 @@ def main() -> None:
                 break
 
         final = {colour: cube_pose(colour) for colour in COLOURS}
+        finalized_randomization = None
+        if randomization is not None:
+            finalized_randomization = finalize_application_status(
+                randomization,
+                applied=applied_randomization,
+                skipped={},
+            )
+            write_json_atomic(
+                run / "randomization_manifest.json", finalized_randomization
+            )
         report = {
             "task": "scripted_colour_bucket_sort",
-            "decision_source": "configured simulator poses; no camera perception or AI",
+            "decision_source": (
+                "raw Isaac table-camera RGB through shared deterministic HSV geometry"
+                if camera_perception
+                else "configured simulator poses; no camera perception or AI"
+            ),
+            "decision_uses_simulator_truth": not camera_perception,
             "physics": "Isaac Sim rigid-body contact; cubes are not attached to the gripper",
             "shared_task_contract": {
                 "config_path": DEFAULT_CONFIG_PATH.relative_to(REPO_ROOT).as_posix(),
@@ -697,7 +1259,7 @@ def main() -> None:
                 "cube_edge_m": TASK_CONFIG.cube_edge_m,
                 "cube_size_note": TASK_CONFIG.cube_size_note,
                 "cube_spawns_base_xy_yaw_deg": {
-                    colour: list(CUBE_SPAWNS[colour]) for colour in COLOURS
+                    colour: list(active_spawns[colour]) for colour in COLOURS
                 },
                 "bin_centres_base_m": {
                     colour: list(BIN_CENTRES[colour]) for colour in COLOURS
@@ -720,7 +1282,11 @@ def main() -> None:
                 "tcp_conflict_note": TASK_CONFIG.frames.tcp_conflict_note,
                 "semantic_phase_names": list(SHARED_SEMANTIC_PHASE_NAMES),
                 "isaac_adapter_extension_phases": ["home"],
-                "isaac_revalidation_source": "simulator ground truth, not camera",
+                "isaac_revalidation_source": (
+                    "fresh raw Isaac table-camera RGB"
+                    if camera_perception
+                    else "simulator ground truth, not camera"
+                ),
             },
             "bin_model": {
                 "path": str(bin_model),
@@ -736,11 +1302,65 @@ def main() -> None:
             "video": {
                 "rendered": not args.physics_only,
                 "fps": FPS,
-                "resolution": list(VIDEO_RESOLUTION),
+                "resolution": list(render_resolution),
                 "frames": frame_number,
+            },
+            "training_data": {
+                "enabled": randomization is not None,
+                "episode_seed": args.seed if randomization is not None else None,
+                "raw_frame_count": (
+                    len(list(raw_frames.glob("*.png")))
+                    if randomization is not None
+                    else 0
+                ),
+                "sensor_frame_count": (
+                    len(list(sensor_frames.glob("*.png")))
+                    if randomization is not None
+                    else 0
+                ),
+                "label_record_count": (
+                    len(list(frame_labels.glob("*.json")))
+                    if randomization is not None
+                    else 0
+                ),
+                "raw_frames_have_overlays": False,
+                "sensor_frames_have_overlays": False,
+                "simulator_truth_role": "evaluator-only labels",
+                "visibility_and_instance_masks": "not yet annotated",
+                "ranges": (
+                    None if randomization is None else synthetic_spec.range_status
+                ),
+                "range_warning": (
+                    None if randomization is None else synthetic_spec.range_warning
+                ),
+                "manifest_finalized": finalized_randomization is not None,
+                "isaac_stage_readback": (
+                    None
+                    if stage_randomization_readback is None
+                    else {
+                        "path": "isaac_randomization_readback.json",
+                        "sha256": stage_randomization_readback["sha256"],
+                    }
+                ),
+                "effective_camera_readback": (
+                    None
+                    if effective_camera is None
+                    else {
+                        "path": "effective_camera.json",
+                        "sha256": effective_camera["sha256"],
+                        "coordinate_frames": ["usd_world", "robot_base"],
+                    }
+                ),
+                "camera_decision_input": (
+                    "raw pinhole render; derived sensor images are dataset artifacts"
+                    if camera_perception
+                    else None
+                ),
             },
             "initial": initial,
             "final": final,
+            "initial_truth_evaluator_only": initial,
+            "final_truth_evaluator_only": final,
             "events": events,
             "verified_pickups": sum(e["pickup_verified"] for e in events),
             "verified_placements": sum(e["placement_verified"] for e in events),

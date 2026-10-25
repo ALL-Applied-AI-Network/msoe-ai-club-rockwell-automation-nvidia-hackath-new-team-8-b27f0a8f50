@@ -41,6 +41,25 @@ _LAZY_EXPORTS = {
     "interpolate_tcp_rows": (".trajectory", "interpolate_tcp_rows"),
     "VisionError": (".vision", "VisionError"),
     "detect_coloured_cubes": (".vision", "detect_coloured_cubes"),
+    "SyntheticDataError": (".synthetic_data", "SyntheticDataError"),
+    "augment_sensor_rgb": (".synthetic_data", "augment_sensor_rgb"),
+    "build_synchronized_frame_record": (
+        ".synthetic_data",
+        "build_synchronized_frame_record",
+    ),
+    "finalize_application_status": (
+        ".synthetic_data",
+        "finalize_application_status",
+    ),
+    "load_capture_calibration": (
+        ".synthetic_data",
+        "load_capture_calibration",
+    ),
+    "load_synthetic_data_spec": (
+        ".synthetic_data",
+        "load_synthetic_data_spec",
+    ),
+    "sample_randomization": (".synthetic_data", "sample_randomization"),
 }
 
 
@@ -64,18 +83,25 @@ __all__ = [
     "PlanningError",
     "SceneDetections",
     "SortConfig",
+    "SyntheticDataError",
     "TipPoseBase",
     "TrajectoryChunk",
     "VisionError",
     "base_tip_pose_to_uf0_tcp",
     "build_colour_sort_plans",
     "build_trajectory_chunks",
+    "build_synchronized_frame_record",
     "config_from_dict",
     "detect_coloured_cubes",
+    "augment_sensor_rgb",
+    "finalize_application_status",
     "interpolate_tcp_rows",
     "load_config",
+    "load_capture_calibration",
+    "load_synthetic_data_spec",
     "normalise_square_yaw_rad",
     "semantic_phase_plan",
+    "sample_randomization",
     "uf0_tcp_to_base_tip",
     "validate_tcp_chunk",
 ]

@@ -1,5 +1,68 @@
 # Repository instructions for coding agents
 
+## Brev GitHub authentication startup gate
+
+On a fresh Brev instance or fresh clone, establish GitHub CLI access before the
+first authenticated GitHub operation. First locate the CLI inside the `vscode`
+container:
+
+```bash
+command -v gh
+```
+
+If that prints no path, install the distro's GitHub CLI package from the Brev
+host, then verify that `command -v gh` succeeds in the `vscode` terminal:
+
+```bash
+docker exec --user root vscode bash -lc \
+  'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y gh'
+```
+
+Then run this from the repository root in an interactive Brev terminal:
+
+```bash
+bash scripts/ensure_github_auth.sh
+```
+
+The agent must explicitly tell the human when GitHub authorization is needed,
+start the interactive `gh auth login --web` browser/device flow, and wait for
+the human to approve it through GitHub. Only the ephemeral GitHub URL and
+one-time device code may be shown, and only in the intended human's visible
+interactive terminal. Do not report GitHub access as ready merely because login
+succeeded. The gate must identify the active account, verify through GitHub's
+API that it has push permission to this clone's `origin`, and then run
+`gh auth setup-git` so HTTPS Git operations use GitHub CLI's credential helper.
+On a resumed Brev instance, the same gate may reuse a valid existing login, but
+it must repeat the account and push-permission checks.
+
+If the check is being run without an interactive terminal and authorization is
+needed, stop and ask the human to open the interactive Brev terminal; do not
+replace the device flow with a token prompt. After the human authorizes the
+displayed one-time code, rerun the script if the login command was interrupted.
+
+Never put a GitHub token, the contents of `hosts.yml`, credential-helper output,
+or another reusable credential in the repository, command history, logs, chat,
+or agent messages. Suppress `gh auth status` output in automation because some
+versions disclose credential-source details; the gate prints only the account
+name and storage category.
+Never attempt an unattended login by copying credentials from the local
+computer. The one-time device code is entered only into GitHub's authorization
+page as directed by the CLI; it is not a reusable credential and must not be
+committed or preserved. GitHub authorization is user-specific: the gate may
+reuse a login already stored by GitHub CLI on that Brev instance, but it cannot
+safely create one without the human's interactive approval.
+
+An environment-provided `GH_TOKEN` or `GITHUB_TOKEN` is transient, while
+`gh auth login` normally persists beyond the current shell and may fall back to
+plaintext `~/.config/gh/hosts.yml` when no secure credential store is available.
+The gate reports which case applies without printing the credential. On a
+shared Brev instance, tell the human about that risk and give the cleanup
+command printed by the gate. For a stored login this is
+`gh auth logout --hostname github.com --user <reported-account>`; for an
+environment credential it is `unset GH_TOKEN GITHUB_TOKEN`. Never log the user
+out automatically, because the same instance may still be doing authorized
+work.
+
 ## Default response to "Set this up"
 
 When the user says `Set this up`, `Get this running`, or an equivalent setup
