@@ -63,6 +63,7 @@ class ConfigTests(unittest.TestCase):
         self.assertAlmostEqual(c.bin.pocket_depth_m, 0.025)
         self.assertAlmostEqual(c.frames.surface_base_z_m, -0.0051)
         self.assertAlmostEqual(c.hardware.maximum_radial_reach_m, 0.55)
+        self.assertAlmostEqual(c.vision.minimum_detection_confidence, 0.20)
 
     def test_smc_and_tcp_conventions_are_explicit(self):
         c = self.config
@@ -206,6 +207,16 @@ class PlanningTests(unittest.TestCase):
             ):
                 build_colour_sort_plans(scene, self.config)
 
+    def test_low_confidence_target_is_rejected_by_shared_planner(self):
+        low_blue = replace(self.good.cubes[0], confidence=0.19)
+        scene = SceneDetections(
+            self.good.scene_id,
+            self.good.capture_time_s,
+            (low_blue,) + self.good.cubes[1:],
+        )
+        with self.assertRaisesRegex(PlanningError, "low-confidence blue"):
+            build_colour_sort_plans(scene, self.config)
+
     def test_semantic_plan_stops_for_reobservation_before_descent(self):
         plan = build_colour_sort_plans(self.good, self.config)[0]
         phases = semantic_phase_plan(plan, self.config)
@@ -327,6 +338,58 @@ class VisionTests(unittest.TestCase):
         )
         self.assertEqual(len(scene.cubes), 3)
         self.assertGreater(camera.calls, 0)
+
+    def test_oblique_side_silhouette_uses_edge_matching_known_cube_size(self):
+        image = np.full((180, 320, 3), 235, dtype=np.uint8)
+        # The coloured silhouette includes a projected side face: its longer
+        # image dimension back-projects to 16 mm while the other dimension
+        # still matches the declared 10 mm cube footprint.  Choosing the
+        # longest image edge would incorrectly reject this valid target.
+        cv2.rectangle(image, (135, 80), (160, 100), (0, 0, 255), -1)
+
+        def project(uv, z):
+            return np.array(
+                [
+                    0.35 + (uv[0] - 147.5) / 1562.5,
+                    (uv[1] - 90) / 2000.0,
+                    z,
+                ]
+            )
+
+        scene = detect_coloured_cubes(
+            image,
+            project,
+            self.config,
+            scene_id="oblique-blue",
+            capture_time_s=26.5,
+        )
+        self.assertEqual([item.colour for item in scene.cubes], ["blue"])
+        self.assertAlmostEqual(scene.cubes[0].position_base_m[0], 0.35, places=4)
+
+    def test_zero_confidence_aspect_boundary_is_rejected(self):
+        image = np.full((180, 320, 3), 235, dtype=np.uint8)
+        # One projected dimension matches 10 mm, but this is a genuine 10x16
+        # mm rectangle at the configured aspect boundary rather than a compact
+        # cube silhouette. It must not reach planning with zero shape score.
+        cv2.rectangle(image, (128, 80), (160, 100), (0, 0, 255), -1)
+
+        def project(uv, z):
+            return np.array(
+                [
+                    0.35 + (uv[0] - 144) / 2000.0,
+                    (uv[1] - 90) / 2000.0,
+                    z,
+                ]
+            )
+
+        scene = detect_coloured_cubes(
+            image,
+            project,
+            self.config,
+            scene_id="rectangular-distractor",
+            capture_time_s=26.75,
+        )
+        self.assertEqual(scene.cubes, ())
 
     def test_larger_same_colour_bin_shape_is_not_a_cube(self):
         image = np.full((300, 500, 3), 235, dtype=np.uint8)

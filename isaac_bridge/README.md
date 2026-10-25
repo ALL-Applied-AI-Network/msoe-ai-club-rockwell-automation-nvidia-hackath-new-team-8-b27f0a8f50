@@ -62,6 +62,12 @@ leaving the default path unchanged.
 - The image must be raw RGB without the demo's text overlay.
 - It assumes one unambiguous cube of each configured colour. Missing, merged,
   duplicate, wrongly sized, or unknown detections fail closed in the planner.
+- Size filtering uses the projected silhouette edge closest to the declared
+  cube dimension. This tolerates the visible side face in an oblique view;
+  the dimension is a checked configuration input, not simulator pose truth.
+- The shared planner enforces the checked-in minimum detection confidence for
+  both Isaac and hardware. Hardware may raise that threshold through its
+  bounded environment override, but it cannot lower the shared safety floor.
 - It uses the ideal pinhole model rendered by Isaac. The hardware projection
   still uses the measured real-camera distortion calibration.
 - It does not provide a complete swept-volume collision planner, temporal

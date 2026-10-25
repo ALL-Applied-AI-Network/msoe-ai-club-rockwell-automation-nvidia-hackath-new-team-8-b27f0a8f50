@@ -141,7 +141,9 @@ class Policy:
             "ROCKWELL_MIN_HARDWARE_CENTRE_CLEARANCE_M", 0.030, minimum=0.030
         )
         self._minimum_confidence = _finite_environment_float(
-            "ROCKWELL_MIN_DETECTION_CONFIDENCE", 0.20, minimum=0.0
+            "ROCKWELL_MIN_DETECTION_CONFIDENCE",
+            self.config.vision.minimum_detection_confidence,
+            minimum=self.config.vision.minimum_detection_confidence,
         )
         if self._maximum_observation_age_s > 3.0:
             raise ValueError("ROCKWELL_MAX_OBSERVATION_AGE_S cannot exceed 3.0")
@@ -149,8 +151,15 @@ class Policy:
             raise ValueError("ROCKWELL_MAX_TARGET_MOTION_M cannot exceed 0.005")
         if self._maximum_yaw_motion_deg > 15.0:
             raise ValueError("ROCKWELL_MAX_TARGET_YAW_MOTION_DEG cannot exceed 15.0")
-        if not 0.20 <= self._minimum_confidence <= 1.0:
-            raise ValueError("ROCKWELL_MIN_DETECTION_CONFIDENCE must be in [0.20, 1]")
+        if not (
+            self.config.vision.minimum_detection_confidence
+            <= self._minimum_confidence
+            <= 1.0
+        ):
+            raise ValueError(
+                "ROCKWELL_MIN_DETECTION_CONFIDENCE must be in "
+                f"[{self.config.vision.minimum_detection_confidence:.2f}, 1]"
+            )
         self._position_tolerance_mm = 2.0
         self._angle_tolerance_deg = 2.0
 

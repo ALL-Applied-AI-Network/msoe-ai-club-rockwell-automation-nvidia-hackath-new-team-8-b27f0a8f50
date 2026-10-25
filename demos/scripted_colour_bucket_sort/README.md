@@ -89,6 +89,11 @@ revalidation without Cosmos or simulator-truth decisions:
   --camera-perception
 ```
 
+Both camera modes retain the exact unannotated RGB observations used for the
+initial plan and each pre-descent revalidation under `decision_frames/`. The
+execution report links those files, so a failed or questionable decision can
+be reproduced from pixels instead of inferred from presentation video.
+
 Add seeded, provisional domain randomization and synchronized training-data
 artifacts with:
 

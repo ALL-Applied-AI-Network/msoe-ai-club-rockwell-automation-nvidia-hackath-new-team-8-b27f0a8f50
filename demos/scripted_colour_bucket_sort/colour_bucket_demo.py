@@ -413,6 +413,9 @@ def main() -> None:
     if run.exists() and any(run.iterdir()):
         raise SystemExit(f"Refusing to mix outputs in non-empty run directory {run}")
     run.mkdir(parents=True, exist_ok=True)
+    decision_frames = run / "decision_frames"
+    if camera_perception:
+        decision_frames.mkdir(parents=True, exist_ok=True)
     if randomization is not None:
         write_json_atomic(run / "randomization_requested.json", randomization.as_dict())
     bin_model = resolve_bin_model(args.bin_model)
@@ -735,12 +738,25 @@ def main() -> None:
                 raise RuntimeError("Table camera returned no image")
             return rgba[:, :, :3].astype(np.uint8)
 
+        def save_decision_frame(filename: str, rgb: np.ndarray) -> str:
+            """Persist the exact unannotated RGB used for a runtime decision."""
+
+            path = decision_frames / filename
+            if not cv2.imwrite(str(path), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)):
+                raise RuntimeError(f"OpenCV could not write {path}")
+            return path.relative_to(run).as_posix()
+
         initial = {colour: cube_pose(colour) for colour in COLOURS}
         initial_camera_decision = None
+        initial_camera_observation_relpath = None
         observed_targets = {}
         if camera_perception:
+            initial_rgb = capture_rgb()
+            initial_camera_observation_relpath = save_decision_frame(
+                "initial.png", initial_rgb
+            )
             initial_camera_decision = camera_adapter.observe_and_plan(
-                capture_rgb(),
+                initial_rgb,
                 scene_id="isaac-camera-initial",
                 capture_time_s=float(world.current_time),
             )
@@ -1036,6 +1052,7 @@ def main() -> None:
                         "yaw_rad": runtime_detection.yaw_rad,
                         "confidence": runtime_detection.confidence,
                         "pixel_center_uv": list(runtime_detection.pixel_center_uv),
+                        "observation_relpath": initial_camera_observation_relpath,
                     }
                 ),
                 "destination_bin": {
@@ -1071,8 +1088,12 @@ def main() -> None:
                 if phase == "revalidate_before_descent":
                     tolerance_m = min(0.002, TASK_CONFIG.cube_edge_m / 4.0)
                     if camera_perception:
+                        refreshed_rgb = capture_rgb()
+                        refreshed_observation_relpath = save_decision_frame(
+                            f"{colour}-pre-descent.png", refreshed_rgb
+                        )
                         refreshed_scene = camera_adapter.observe(
-                            capture_rgb(),
+                            refreshed_rgb,
                             scene_id=f"isaac-camera-{colour}-pre-descent",
                             capture_time_s=float(world.current_time),
                         )
@@ -1085,6 +1106,16 @@ def main() -> None:
                             raise RuntimeError(
                                 f"Fresh camera observation has {len(refreshed)} "
                                 f"{colour} detections; refusing descent"
+                            )
+                        if (
+                            refreshed[0].confidence
+                            < TASK_CONFIG.vision.minimum_detection_confidence
+                        ):
+                            raise RuntimeError(
+                                f"Fresh {colour} camera detection confidence "
+                                f"{refreshed[0].confidence:.2f} is below "
+                                f"{TASK_CONFIG.vision.minimum_detection_confidence:.2f}; "
+                                "refusing descent"
                             )
                         reference_xy = np.asarray(
                             runtime_detection.position_base_m[:2], dtype=float
@@ -1100,6 +1131,7 @@ def main() -> None:
                             "position_base_m": list(refreshed[0].position_base_m),
                             "yaw_rad": refreshed[0].yaw_rad,
                             "confidence": refreshed[0].confidence,
+                            "observation_relpath": refreshed_observation_relpath,
                         }
                     else:
                         current = cube_pose(colour)
@@ -1304,6 +1336,16 @@ def main() -> None:
                 "fps": FPS,
                 "resolution": list(render_resolution),
                 "frames": frame_number,
+            },
+            "camera_observations": {
+                "enabled": camera_perception,
+                "initial_observation_relpath": initial_camera_observation_relpath,
+                "raw_unannotated": True,
+                "count": (
+                    len(list(decision_frames.glob("*.png")))
+                    if camera_perception
+                    else 0
+                ),
             },
             "training_data": {
                 "enabled": randomization is not None,

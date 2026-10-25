@@ -122,6 +122,7 @@ class VisionSpec:
     maximum_component_aspect_ratio: float
     cube_edge_minimum_factor: float
     cube_edge_maximum_factor: float
+    minimum_detection_confidence: float
     morphology_kernel_px: int
 
 
@@ -254,6 +255,8 @@ class SortConfig:
             raise ConfigurationError("cube edge maximum factor must be greater than 1")
         if self.vision.cube_edge_minimum_factor >= self.vision.cube_edge_maximum_factor:
             raise ConfigurationError("cube edge factors are reversed")
+        if not 0.0 <= self.vision.minimum_detection_confidence <= 1.0:
+            raise ConfigurationError("minimum detection confidence must be in [0, 1]")
         if self.vision.morphology_kernel_px < 1 or self.vision.morphology_kernel_px % 2 == 0:
             raise ConfigurationError("morphology kernel must be a positive odd integer")
         for colour, ranges in self.vision.hsv_ranges_opencv.items():
@@ -417,6 +420,10 @@ def config_from_dict(raw: Mapping[str, Any]) -> SortConfig:
             cube_edge_maximum_factor=_finite(
                 vision_raw["cube_edge_maximum_factor"],
                 "cube_edge_maximum_factor",
+            ),
+            minimum_detection_confidence=_finite(
+                vision_raw["minimum_detection_confidence"],
+                "minimum_detection_confidence",
             ),
             morphology_kernel_px=int(vision_raw["morphology_kernel_px"]),
         ),

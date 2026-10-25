@@ -105,9 +105,10 @@ def detect_coloured_cubes(
             if min(rect_width, rect_height) <= 0:
                 continue
             aspect = max(rect_width, rect_height) / min(rect_width, rect_height)
-            if aspect > config.vision.maximum_component_aspect_ratio:
+            if aspect >= config.vision.maximum_component_aspect_ratio:
                 # A stretched component commonly means two touching cubes or a
-                # distractor.  Rejecting it is safer than inventing two targets.
+                # distractor. Rejecting the boundary too prevents constructing
+                # a zero-shape-confidence detection in the first place.
                 continue
             moments = cv2.moments(contour)
             if moments["m00"] <= 0:
@@ -119,12 +120,31 @@ def detect_coloured_cubes(
             centre_base = _pixel_to_base(projector, centre_uv, top_z)
 
             box = cv2.boxPoints(rect).astype(float)
-            pixel_edges = np.roll(box, -1, axis=0) - box
-            edge_index = int(np.argmax(np.linalg.norm(pixel_edges, axis=1)))
-            start = _pixel_to_base(projector, tuple(box[edge_index]), top_z)
-            end = _pixel_to_base(projector, tuple(box[(edge_index + 1) % 4]), top_z)
-            world_edge = end[:2] - start[:2]
-            edge_length = float(np.linalg.norm(world_edge))
+            projected_edges: list[tuple[float, np.ndarray]] = []
+            for edge_index in range(len(box)):
+                start = _pixel_to_base(projector, tuple(box[edge_index]), top_z)
+                end = _pixel_to_base(
+                    projector,
+                    tuple(box[(edge_index + 1) % len(box)]),
+                    top_z,
+                )
+                world_edge = end[:2] - start[:2]
+                projected_edges.append(
+                    (float(np.linalg.norm(world_edge)), world_edge)
+                )
+
+            # A colour mask contains the visible sides as well as the top face.
+            # In an oblique camera view that makes one minimum-area-rectangle
+            # dimension longer than the known cube footprint.  Selecting the
+            # longest image edge therefore rejected a real blue cube in the
+            # Isaac table-camera view.  Select the projected edge that best
+            # agrees with the configured physical cube size instead.  This is
+            # still camera geometry plus a declared part dimension; it never
+            # consumes a simulator pose or other evaluator-only truth.
+            edge_length, world_edge = min(
+                projected_edges,
+                key=lambda item: abs(item[0] - config.cube_edge_m),
+            )
             if edge_length <= 1e-9:
                 continue
             minimum_edge = config.cube_edge_m * config.vision.cube_edge_minimum_factor

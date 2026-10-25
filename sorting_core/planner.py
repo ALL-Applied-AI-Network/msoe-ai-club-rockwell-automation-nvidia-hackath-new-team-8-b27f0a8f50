@@ -36,6 +36,14 @@ def build_colour_sort_plans(
     if unknown:
         raise PlanningError(f"unknown cube colours: {', '.join(unknown)}")
 
+    for cube in scene.cubes:
+        if cube.confidence < config.vision.minimum_detection_confidence:
+            raise PlanningError(
+                f"low-confidence {cube.colour} detection "
+                f"({cube.confidence:.2f} < "
+                f"{config.vision.minimum_detection_confidence:.2f})"
+            )
+
     by_colour: dict[str, list[CubeDetection]] = {colour: [] for colour in known}
     track_ids: set[str] = set()
     for cube in scene.cubes:
