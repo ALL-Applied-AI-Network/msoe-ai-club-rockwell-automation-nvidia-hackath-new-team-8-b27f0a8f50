@@ -8,6 +8,11 @@ setup uses a
 commit-specific disposable copy and stores environments, weights, caches,
 captures, runs, and videos outside the repository.
 
+This setup is terminal-only and headless. It does not open the Isaac Sim GUI or
+browser viewer and does not require the user to operate an interactive window.
+The supplied twin documents an optional interactive scene command, but that is
+not part of this setup workflow.
+
 Coding agents must also read `AGENTS.md`, `digital-twin-setup/AGENTS.md`,
 `digital-twin-setup/SETUP.md`, and
 `digital-twin-setup/docs/MODEL_NOTES.md` before acting. Read

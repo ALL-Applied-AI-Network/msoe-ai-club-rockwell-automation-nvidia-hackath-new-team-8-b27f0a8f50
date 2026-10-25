@@ -7,6 +7,11 @@ request without naming a different target, treat it as authorization to perform
 the complete clean-clone Brev setup. Do not ask the user to restate these
 instructions or confirm routine setup steps.
 
+Default setup is terminal-only and headless. Do not open the Isaac Sim GUI,
+browser viewer, or another interactive simulator window, and do not ask the
+user to operate one. The optional interactive command in the supplied twin's
+`SETUP.md` is for a later explicitly requested inspection, not setup.
+
 1. Read `BREV_SETUP.md`, then the nested agent/setup/model notes named below.
 2. Require a clean Git checkout. Never discard, stash, overwrite, or silently
    include local changes. If the checkout is not clean, report the exact paths
