@@ -10,6 +10,13 @@ This is your team's repository for the four-week physical AI hackathon run by Ro
 
 See [BREV_SETUP.md](BREV_SETUP.md). Coding agents can simply be told: “Set this up.”
 
+## Simulation demos
+
+- [Scripted colour bucket sort](demos/scripted_colour_bucket_sort/README.md):
+  a headless Isaac Sim smoke test that places three coloured cubes into matching
+  supplied bin models. It intentionally uses configured simulator poses, not
+  camera perception or AI, and is not yet a real-robot controller.
+
 ## Key dates
 
 | When | What |
