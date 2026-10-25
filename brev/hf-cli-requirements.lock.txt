@@ -1,0 +1,17 @@
+# Exact Hugging Face download-tool environment validated on the Brev launchable.
+anyio==4.15.1
+click==8.5.0
+filelock==4.2.4
+fsspec==2026.9.0
+h11==0.16.0
+hf-xet==1.7.0
+httpcore2==2.16.0
+httpx2==2.16.0
+huggingface-hub==2.3.0
+idna==3.20
+packaging==26.3
+pip==26.2.2
+pyyaml==6.0.3
+tqdm==4.70.1
+truststore==0.10.5
+typing-extensions==4.16.0

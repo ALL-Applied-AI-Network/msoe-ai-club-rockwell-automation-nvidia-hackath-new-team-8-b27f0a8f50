@@ -1,0 +1,16 @@
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.env text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.usda text eol=lf
+
+# The supplied twin has a SHA-256 manifest over its original bytes. Preserve it
+# exactly, including existing line endings; setup runs only from an external copy.
+digital-twin-setup/** -text -eol
+
+# The reference-asset manifest also validates exact source bytes across hosts.
+reference-assets/** -text -eol
+

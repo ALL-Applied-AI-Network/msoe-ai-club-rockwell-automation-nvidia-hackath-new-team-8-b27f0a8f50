@@ -1,0 +1,83 @@
+{
+  "package": "ManipBench reference assets",
+  "added_by_project_member": "2026-10-24",
+  "source_host": "hackathon.sidclab.org",
+  "license_status": "Approved by project owner for redistribution in this repository on 2026-10-24; retain source attribution",
+  "files": [
+    {
+      "path": "models/csi-vial-cap.stl",
+      "size_bytes": 38284,
+      "sha256": "f9dc647dcf47f91cffcf78764877b74cc219d414334c9691a00338b71e9b4a10"
+    },
+    {
+      "path": "models/csi-vial-cap.usda",
+      "size_bytes": 91339,
+      "sha256": "3f28870da156f53452b8d5c5bb306b4688ecede2f24faf29af9ec0a3ec0bd09a"
+    },
+    {
+      "path": "models/csi-vial.stl",
+      "size_bytes": 19084,
+      "sha256": "33ead3653ac0e73969456c74628d432816bfbf7c1b4ad499a05c9fc78387528f"
+    },
+    {
+      "path": "models/csi-vial.usda",
+      "size_bytes": 46071,
+      "sha256": "8b0b4470e13f3c401ce77b0cea8d5fb72d8c76a0619c97cd2567712dc294ac32"
+    },
+    {
+      "path": "models/ISO10642-M6x30-countersunk-screw.step",
+      "size_bytes": 34447,
+      "sha256": "8a9fb00b8983813814f11c160725aa0e77941434ac7b43b47696a70f6b47a264"
+    },
+    {
+      "path": "models/ISO10642-M6x30-countersunk-screw.stl",
+      "size_bytes": 95584,
+      "sha256": "6a842f1de0923083b0eb2a3a209eacae87cc83d4b62e15b768a0a8cd277cec2a"
+    },
+    {
+      "path": "models/manipbench-bin-50x50x55.step",
+      "size_bytes": 44544,
+      "sha256": "6eb4547cd1d44643a04be424537f9e7a388eac714badc7716ba3adc5592dda16"
+    },
+    {
+      "path": "models/manipbench-bin-50x50x55.stl",
+      "size_bytes": 27084,
+      "sha256": "8dac2115a696239671cc8136ebcaeefe6ae91951717fa405e4ae8c03d9a07579"
+    },
+    {
+      "path": "models/manipbench-cube-10mm.step",
+      "size_bytes": 63528,
+      "sha256": "620ac226b302ae31f92e1a058a0b2bd336f956d04e9e886626b88295a066d190"
+    },
+    {
+      "path": "models/manipbench-cube-10mm.stl",
+      "size_bytes": 473084,
+      "sha256": "9f8088987793081b7cb90eef0e7e473e98922f67ff6bc1f619de0a7c383af595"
+    },
+    {
+      "path": "models/manipbench-cube-16mm.step",
+      "size_bytes": 63288,
+      "sha256": "e23f98e382e0d5b37d65b836e789f4ddcdf49b8c3fb3b5bf8145b3c787f91df3"
+    },
+    {
+      "path": "models/manipbench-cube-16mm.stl",
+      "size_bytes": 473084,
+      "sha256": "4be0f0a17adaed70f28297628dc0b069b788751f5b26cb82623c4aae026d2935"
+    },
+    {
+      "path": "models/SMC-MHZL2-16D2.step",
+      "size_bytes": 243057,
+      "sha256": "a348a19a31a537429f46b471c1bb46bcb993707bb735a80ced08ad5a038fce52"
+    },
+    {
+      "path": "README.md",
+      "size_bytes": 4252,
+      "sha256": "cd322089080745e3923fc227cbb5e298c132b6243959ef255a0a50683855983e"
+    },
+    {
+      "path": "table/manipbench-table-surface.png",
+      "size_bytes": 3250066,
+      "sha256": "24d512740c43aa03aa4cfc193cc75262b5988ec941194b184af4c0d31e98e9f4"
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+# Generated Python/runtime state
+**/.venv/
+**/__pycache__/
+*.py[cod]
+/digital-twin-setup/textures/
+
+# These belong outside the checkout; guard against accidental local placement.
+/models/
+/envs/
+/vendor/
+/tools/
+/runs/
+/outputs/
+/.cache/
+
+# Model weights, archives, and credentials
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.zip
+.env
+.env.*
+!.env.example
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+
