@@ -1,0 +1,42 @@
+# DRAFT ONLY. Do not run --submit until every TODO is replaced and the
+# organizers confirm that three coloured 10 mm cubes, three matching bins, and
+# the generic cube/bin labels in placement.yaml are accepted for this cell.
+# Then submit from this directory with: uv run run.py --submit
+
+team: TODO_TEAM_NAME
+contact: TODO_CONTACT_NAME_AND_EMAIL
+policy: ColourBucketSortV1
+
+# Choose the closest model type. This does not affect scoring.
+model_type: Hybrid
+# VA          Images -> actions (ACT, Diffusion Policy)
+# VLA         Images + instructions -> actions (NVIDIA GR00T)
+# WAM         Predicts future states to guide robot actions
+# VLM + BM    A VLM decides what to do; a behavior model executes actions
+# TAMP + FMs  Foundation models assist task and motion planning
+# Hybrid      Combines multiple approaches, or choose this if unsure
+
+# --- Task ---
+task_id: colour-sort-TODO_TEAM_LETTER
+                                  # TODO: replace suffix with assigned team letter
+task: Sort the red, yellow, and blue 10 mm cubes into their matching bins.
+                                  # Describe your task in one short sentence
+
+# --- Test Setup ---
+# Tell us how to prepare the workspace for each rollout.
+# Objects and layout can stay the same or change between rollouts.
+
+objects: same
+# same: Use the same set of objects for every rollout.
+# different: May use different objects across rollouts.
+
+layout: same
+# same: Place objects in the same positions for every rollout.
+# different: May change object positions across rollouts.
+
+# --- Evaluation ---
+rollouts: 10                      # Number of attempts in this test
+                                  # Each attempt is scored success or failure
+
+# --- Hardware ---
+custom_hardware: none            # Describe any hardware changes (e.g., 3D-printed fingers)

@@ -10,6 +10,22 @@ perception, Cosmos, a learned selector, or a real-robot control interface. Its
 purpose is to validate scene assets, inverse kinematics, contact-based grasping,
 placement, verification, and rendering before those missing layers are added.
 
+The simulator and FANUC hardware adapter share
+`config/colour_bucket_sort.json` for the colour order, cube size and starting
+poses, bin centres and dimensions, clearances, and frame assumptions. The
+active choice is a **10 mm cube** and **UTOOL1/TCP at the fingertips**. The live
+event site has separately described the TCP as 10 mm beyond the fingertips;
+that conflict is unresolved and must be checked with a supervised physical
+hover/contact test before any real descent. Every run prints the assumption and
+records it, the config hash, and the shared semantic phase sequence in
+`execution_report.json`.
+
+The semantic pre-descent revalidation gate is also present here. Because this
+is still a scripted Isaac smoke test, it checks simulator ground truth and says
+so in the report. The hardware adapter must satisfy the same gate with a fresh
+camera observation; simulation truth must never be used to make a real-robot
+decision.
+
 ## Prerequisites
 
 Run the repository's verified Brev setup first:
@@ -36,6 +52,10 @@ cd "$ROCKWELL_TWIN_RUNTIME"
   /workspace/rockwell-hackathon/demos/scripted_colour_bucket_sort/colour_bucket_demo.py \
   --run "$ROCKWELL_RUNS_ROOT/scripted_colour_bucket_sort_01"
 ```
+
+The script locates the repository from its own absolute path, so changing into
+the runtime twin does not hide `sorting_core`. If the script itself is copied
+outside the checkout, set `ROCKWELL_REPO_ROOT` to the clean repository root.
 
 The `--run` directory must be new. Use `--physics-only` to skip PNG rendering
 while retaining physics and placement verification. A rendered run writes PNG

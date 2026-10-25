@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "assumptions": {
+    "cube_edge_m": 0.01,
+    "cube_size_note": "ACTIVE ASSUMPTION: use 10 mm cubes for simulation and hardware until the physical parts are measured; do not silently switch to the supplied 16 mm asset.",
+    "tcp_beyond_fingertips_mm": 0.0,
+    "tcp_conflict_note": "The checked-in FANUC client and mock define UTOOL1 at the fingertips (0 mm beyond them), while the live event site has also stated 10 mm beyond the fingertips. This configuration deliberately uses the repository/mock convention. Confirm the live controller before a physical descent and change this one field only after validation."
+  },
+  "task": {
+    "colour_order": [
+      "red",
+      "yellow",
+      "blue"
+    ],
+    "cube_spawns_base_xy_yaw_deg": {
+      "red": [0.44, -0.19, 0.0],
+      "yellow": [0.44, 0.0, 22.0],
+      "blue": [0.44, 0.19, -28.0]
+    },
+    "bin_centres_base_m": {
+      "red": [0.24, -0.19],
+      "yellow": [0.24, 0.0],
+      "blue": [0.24, 0.19]
+    },
+    "pick_tip_clearance_m": 0.0025,
+    "approach_clearance_m": 0.13,
+    "bin_release_clearance_m": 0.015,
+    "minimum_distinct_centres_m": 0.012
+  },
+  "bin": {
+    "outer_m": 0.05,
+    "pocket_m": 0.035,
+    "height_m": 0.055,
+    "floor_m": 0.03
+  },
+  "frames": {
+    "surface_base_z_m": -0.0051,
+    "uf0_z_offset_mm": -330.0,
+    "tool_down_wpr_deg": [-180.0, 0.0, 0.0]
+  },
+  "gripper": {
+    "model": "SMC MHZL2-16D2",
+    "jaw_travel_per_side_m": 0.006,
+    "straight_open_gap_m": 0.012,
+    "hook_closed_gap_m": 0.00399,
+    "hook_open_gap_m": 0.01599,
+    "finger_length_m": 0.076,
+    "finger_width_m": 0.012,
+    "finger_thickness_m": 0.006,
+    "j6_to_fingertip_m": 0.293,
+    "open_command": 0.0,
+    "closed_command": 1.0
+  },
+  "hardware": {
+    "tcp_bounds_uf0_mm": {
+      "x": [150.0, 650.0],
+      "y": [-450.0, 450.0],
+      "z": [-334.0, 300.0]
+    },
+    "angle_limit_deg": 360.0,
+    "dt_range_s": [0.1, 1.0],
+    "max_chunk_actions": 100,
+    "maximum_radial_reach_m": 0.55,
+    "default_dt_s": 0.1,
+    "max_linear_step_mm": 5.0,
+    "max_angular_step_deg": 5.0
+  },
+  "vision": {
+    "hsv_ranges_opencv": {
+      "red": [[0, 12, 45, 35], [170, 179, 45, 35]],
+      "yellow": [[14, 42, 45, 35]],
+      "blue": [[95, 135, 45, 35]]
+    },
+    "minimum_component_area_px": 20.0,
+    "maximum_component_area_fraction": 0.02,
+    "maximum_component_aspect_ratio": 1.6,
+    "cube_edge_minimum_factor": 0.6,
+    "cube_edge_maximum_factor": 1.4,
+    "morphology_kernel_px": 3
+  }
+}

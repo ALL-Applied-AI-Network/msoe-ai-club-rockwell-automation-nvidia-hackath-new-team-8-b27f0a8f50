@@ -20,26 +20,91 @@ import math
 import os
 from pathlib import Path
 import struct
+import sys
 
 import numpy as np
 
 
-COLOURS = ("red", "yellow", "blue")
-CUBE_SPAWNS = {
-    "red": (0.44, -0.19, 0.0),
-    "yellow": (0.44, 0.0, 22.0),
-    "blue": (0.44, 0.19, -28.0),
-}
-BIN_CENTRES = {
-    "red": (0.24, -0.19),
-    "yellow": (0.24, 0.0),
-    "blue": (0.24, 0.19),
-}
-BIN_OUTER_M = 0.050
-BIN_POCKET_M = 0.035
-BIN_HEIGHT_M = 0.055
-BIN_FLOOR_M = 0.030
-BIN_POCKET_DEPTH_M = BIN_HEIGHT_M - BIN_FLOOR_M
+def _find_repo_root() -> Path:
+    """Find the checkout even when the runtime twin is the current directory."""
+    candidates = []
+    configured = os.environ.get("ROCKWELL_REPO_ROOT")
+    if configured:
+        candidates.append(Path(configured).expanduser().resolve())
+    candidates.extend(Path(__file__).resolve().parents)
+    for candidate in candidates:
+        if (
+            (candidate / "sorting_core" / "__init__.py").is_file()
+            and (candidate / "config" / "colour_bucket_sort.json").is_file()
+        ):
+            return candidate
+    raise RuntimeError(
+        "Cannot locate the repository root containing sorting_core and "
+        "config/colour_bucket_sort.json; set ROCKWELL_REPO_ROOT"
+    )
+
+
+# The demo is normally invoked by absolute path after ``cd`` into the disposable
+# twin runtime.  Import the backend-neutral task package from the checkout, not
+# from the current working directory or from the pristine twin source.
+REPO_ROOT = _find_repo_root()
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from sorting_core import (  # noqa: E402
+    CubeDetection,
+    DEFAULT_CONFIG_PATH,
+    SceneDetections,
+    build_colour_sort_plans,
+    load_config,
+    semantic_phase_plan,
+)
+
+
+TASK_CONFIG = load_config()
+COLOURS = TASK_CONFIG.task.colour_order
+CUBE_SPAWNS = dict(TASK_CONFIG.task.cube_spawns_base_xy_yaw_deg)
+BIN_CENTRES = dict(TASK_CONFIG.task.bin_centres_base_m)
+BIN_OUTER_M = TASK_CONFIG.bin.outer_m
+BIN_POCKET_M = TASK_CONFIG.bin.pocket_m
+BIN_HEIGHT_M = TASK_CONFIG.bin.height_m
+BIN_FLOOR_M = TASK_CONFIG.bin.floor_m
+BIN_POCKET_DEPTH_M = TASK_CONFIG.bin.pocket_depth_m
+
+
+def _shared_semantic_phase_names() -> tuple[str, ...]:
+    """Resolve names through the same planner contract used by hardware."""
+    capture_time_s = 0.0
+    scene = SceneDetections(
+        scene_id="configured-isaac-smoke-scene",
+        capture_time_s=capture_time_s,
+        cubes=tuple(
+            CubeDetection(
+                track_id=f"configured-{colour}",
+                colour=colour,
+                capture_time_s=capture_time_s,
+                position_base_m=(
+                    CUBE_SPAWNS[colour][0],
+                    CUBE_SPAWNS[colour][1],
+                    TASK_CONFIG.cube_centre_base_z_m,
+                ),
+                yaw_rad=math.radians(CUBE_SPAWNS[colour][2]),
+            )
+            for colour in COLOURS
+        ),
+    )
+    plans = build_colour_sort_plans(scene, TASK_CONFIG)
+    phase_sequences = {
+        tuple(phase.name for phase in semantic_phase_plan(plan, TASK_CONFIG))
+        for plan in plans
+    }
+    if len(phase_sequences) != 1:
+        raise RuntimeError("Shared planner produced inconsistent semantic phases")
+    return phase_sequences.pop()
+
+
+SHARED_SEMANTIC_PHASE_NAMES = _shared_semantic_phase_names()
+
 BIN_MATERIALS = {
     "red": "plastic_red",
     "yellow": "plastic_yellow",
@@ -115,26 +180,84 @@ def turn(a, b, t):
     return np.array([a[0] * c - a[1] * s, a[0] * s + a[1] * c, 0.0])
 
 
-def motion_segments(pick, home, config):
+def motion_segments(pick, home, scene_config):
     source = np.array([*pick["xy"], pick["pick_z"]], dtype=float)
     destination = np.array([*pick["place_xy"], pick["place_z"]], dtype=float)
-    source_above = source + [0.0, 0.0, 0.13]
-    destination_above = destination + [0.0, 0.0, 0.13]
+    clearance = TASK_CONFIG.task.approach_clearance_m
+    source_above = source + [0.0, 0.0, clearance]
+    destination_above = destination + [0.0, 0.0, clearance]
     spread = pick["spread_dir"]
     destination_spread = pick["place_spread_dir"]
-    shut = config.CUBE_JAW_HALF_TARGET
+    shut = scene_config.CUBE_JAW_HALF_TARGET
     return [
-        ("approach", home, source_above, 1.2, config.JAW_OPEN, config.JAW_OPEN, spread),
-        ("descend", source_above, source, 0.8, config.JAW_OPEN, config.JAW_OPEN, spread),
-        ("close", source, source, 0.6, config.JAW_OPEN, shut, spread),
+        (
+            "approach_pick",
+            home,
+            source_above,
+            1.2,
+            scene_config.JAW_OPEN,
+            scene_config.JAW_OPEN,
+            spread,
+        ),
+        (
+            "revalidate_before_descent",
+            source_above,
+            source_above,
+            0.0,
+            scene_config.JAW_OPEN,
+            scene_config.JAW_OPEN,
+            spread,
+        ),
+        (
+            "descend_pick",
+            source_above,
+            source,
+            0.8,
+            scene_config.JAW_OPEN,
+            scene_config.JAW_OPEN,
+            spread,
+        ),
+        ("close", source, source, 0.6, scene_config.JAW_OPEN, shut, spread),
         ("dwell", source, source, 0.5, shut, shut, spread),
         ("lift", source, source_above, 0.8, shut, shut, spread),
         ("carry", source_above, destination_above, 1.4, shut, shut, destination_spread),
         ("lower", destination_above, destination, 0.8, shut, shut, destination_spread),
-        ("release", destination, destination, 0.6, shut, config.JAW_OPEN, destination_spread),
-        ("settle", destination, destination, 0.6, config.JAW_OPEN, config.JAW_OPEN, destination_spread),
-        ("retreat", destination, destination_above, 0.8, config.JAW_OPEN, config.JAW_OPEN, destination_spread),
-        ("home", destination_above, home, 1.1, config.JAW_OPEN, config.JAW_OPEN, None),
+        (
+            "release",
+            destination,
+            destination,
+            0.6,
+            shut,
+            scene_config.JAW_OPEN,
+            destination_spread,
+        ),
+        (
+            "settle",
+            destination,
+            destination,
+            0.6,
+            scene_config.JAW_OPEN,
+            scene_config.JAW_OPEN,
+            destination_spread,
+        ),
+        (
+            "retreat",
+            destination,
+            destination_above,
+            0.8,
+            scene_config.JAW_OPEN,
+            scene_config.JAW_OPEN,
+            destination_spread,
+        ),
+        (
+            "home",
+            destination_above,
+            home,
+            1.1,
+            scene_config.JAW_OPEN,
+            scene_config.JAW_OPEN,
+            None,
+        ),
     ]
 
 
@@ -152,6 +275,21 @@ def rotation_matrix_from_quat(quat) -> np.ndarray:
 
 def main() -> None:
     args = parse_args()
+    print(
+        f"[bucket-demo] shared config schema={TASK_CONFIG.schema_version}; "
+        f"cube edge={TASK_CONFIG.cube_edge_m * 1000.0:.1f} mm",
+        flush=True,
+    )
+    print(f"[bucket-demo] {TASK_CONFIG.cube_size_note}", flush=True)
+    print(
+        "[bucket-demo] ACTIVE TCP CONVENTION: UTOOL1/TCP is at the fingertips "
+        f"({TASK_CONFIG.frames.tcp_beyond_fingertips_mm:.1f} mm beyond).",
+        flush=True,
+    )
+    print(
+        f"[bucket-demo] UNRESOLVED TCP CONFLICT: {TASK_CONFIG.frames.tcp_conflict_note}",
+        flush=True,
+    )
     run = Path(args.run).resolve()
     frames = run / "frames"
     if frames.exists() and any(frames.glob("*.png")):
@@ -163,7 +301,13 @@ def main() -> None:
         triangles_mm.reshape(-1, 3).min(axis=0).tolist(),
         triangles_mm.reshape(-1, 3).max(axis=0).tolist(),
     ]
-    expected_bounds = np.array([[-25.0, -25.0, 0.0], [25.0, 25.0, 55.0]])
+    half_outer_mm = BIN_OUTER_M * 500.0
+    expected_bounds = np.array(
+        [
+            [-half_outer_mm, -half_outer_mm, 0.0],
+            [half_outer_mm, half_outer_mm, BIN_HEIGHT_M * 1000.0],
+        ]
+    )
     if not np.allclose(np.asarray(bounds_mm), expected_bounds, atol=0.05):
         raise ValueError(f"Unexpected bin model bounds in millimetres: {bounds_mm}")
 
@@ -174,6 +318,17 @@ def main() -> None:
 
     # Isolate this demo from the starter's six-cube stacking scene.  These are
     # runtime-only overrides; the supplied source and reference assets stay clean.
+    C.SURFACE_DZ = TASK_CONFIG.frames.surface_base_z_m
+    C.CUBE_EDGE = TASK_CONFIG.cube_edge_m
+    C.CUBE_TIP_CLEARANCE = TASK_CONFIG.task.pick_tip_clearance_m
+    C.CUBE_JAW_HALF_TARGET = max(
+        C.JAW_CLOSED,
+        C.CUBE_EDGE / 2.0 - C.FINGER_INNER_TIP - 0.0003,
+    )
+    if 2.0 * (C.JAW_OPEN + C.FINGER_INNER_TIP) <= C.CUBE_EDGE * math.sqrt(2.0):
+        raise RuntimeError(
+            "Configured cube diagonal does not fit the simulated open jaws"
+        )
     C.SORT_VIALS = []
     C.SORT_CAPS = []
     C.CAP_ORIENTATIONS = []
@@ -198,7 +353,11 @@ def main() -> None:
         from isaacsim.sensors.camera import Camera
         import cell
 
-        world = World(stage_units_in_meters=1.0, physics_dt=1 / 60, rendering_dt=1 / FPS)
+        world = World(
+            stage_units_in_meters=1.0,
+            physics_dt=1 / 60,
+            rendering_dt=1 / FPS,
+        )
         stage = omni.usd.get_context().get_stage()
         cell.build(stage)
 
@@ -303,7 +462,9 @@ def main() -> None:
         def cube_pose(colour: str):
             pos, quat = wrappers[colour].get_world_pose()
             rotation = rotation_matrix_from_quat(quat)
-            centre = np.asarray(pos, float) + rotation @ np.array([0.0, 0.0, C.CUBE_EDGE / 2])
+            centre = np.asarray(pos, float) + rotation @ np.array(
+                [0.0, 0.0, C.CUBE_EDGE / 2]
+            )
             yaw = math.degrees(math.atan2(rotation[1, 0], rotation[0, 0]))
             tilt = math.degrees(math.acos(float(np.clip(rotation[2, 2], -1.0, 1.0))))
             return {
@@ -361,12 +522,12 @@ def main() -> None:
             pick = {
                 "colour": colour,
                 "xy": start["centre"][:2],
-                "pick_z": C.SURFACE_DZ + C.CUBE_TIP_CLEARANCE,
+                "pick_z": TASK_CONFIG.pick_tip_base_z_m,
                 "spread_dir": [-math.sin(theta), math.cos(theta), 0.0],
                 "place_xy": list(BIN_CENTRES[colour]),
                 # Release above the 55 mm rim.  The cube then falls under
                 # gravity into the 25 mm-deep pocket.
-                "place_z": C.SURFACE_DZ + BIN_HEIGHT_M + 0.015,
+                "place_z": TASK_CONFIG.bin_release_tip_base_z_m,
                 "place_spread_dir": [0.0, 1.0, 0.0],
             }
             # Pick one of each direction's equivalent signs once for the entire
@@ -392,13 +553,45 @@ def main() -> None:
                 "pickup_verified": False,
                 "placement_verified": False,
                 "trajectory_ik_failures": 0,
+                "shared_semantic_phases": list(SHARED_SEMANTIC_PHASE_NAMES),
             }
 
-            for phase, p0, p1, duration, jaw0, jaw1, spread in motion_segments(
-                pick, home, C
-            ):
+            segments = motion_segments(pick, home, C)
+            actual_semantic_names = tuple(segment[0] for segment in segments[:-1])
+            if actual_semantic_names != SHARED_SEMANTIC_PHASE_NAMES:
+                raise RuntimeError(
+                    "Isaac adapter semantic phases differ from the shared planner: "
+                    f"{actual_semantic_names!r} != {SHARED_SEMANTIC_PHASE_NAMES!r}"
+                )
+            for phase, p0, p1, duration, jaw0, jaw1, spread in segments:
+                if phase == "revalidate_before_descent":
+                    current = cube_pose(colour)
+                    moved_xy_m = float(
+                        np.linalg.norm(
+                            np.asarray(current["centre"][:2])
+                            - np.asarray(start["centre"][:2])
+                        )
+                    )
+                    # This smoke demo has no perception backend.  Preserve the
+                    # shared stop/revalidate gate using simulator truth and label
+                    # that limitation explicitly; the hardware policy must use a
+                    # fresh camera observation instead.
+                    tolerance_m = min(0.002, TASK_CONFIG.cube_edge_m / 4.0)
+                    event["pre_descent_revalidation"] = {
+                        "source": "simulator_ground_truth_not_camera",
+                        "target_movement_xy_m": moved_xy_m,
+                        "maximum_allowed_m": tolerance_m,
+                        "passed": bool(moved_xy_m <= tolerance_m),
+                    }
+                    if moved_xy_m > tolerance_m:
+                        raise RuntimeError(
+                            f"{colour} target moved {moved_xy_m * 1000.0:.2f} mm "
+                            "before descent; refusing stale scripted pick"
+                        )
+                    continue
+
                 spread_start = None
-                if spread is not None and phase in ("approach", "carry"):
+                if spread is not None and phase in ("approach_pick", "carry"):
                     rotation, _ = fk.fk(q)
                     current = rotation @ np.asarray(C.FINGER_SPREAD_AXIS)
                     current[2] = 0.0
@@ -494,6 +687,41 @@ def main() -> None:
             "task": "scripted_colour_bucket_sort",
             "decision_source": "configured simulator poses; no camera perception or AI",
             "physics": "Isaac Sim rigid-body contact; cubes are not attached to the gripper",
+            "shared_task_contract": {
+                "config_path": DEFAULT_CONFIG_PATH.relative_to(REPO_ROOT).as_posix(),
+                "config_sha256": hashlib.sha256(
+                    DEFAULT_CONFIG_PATH.read_bytes()
+                ).hexdigest(),
+                "schema_version": TASK_CONFIG.schema_version,
+                "colour_order": list(COLOURS),
+                "cube_edge_m": TASK_CONFIG.cube_edge_m,
+                "cube_size_note": TASK_CONFIG.cube_size_note,
+                "cube_spawns_base_xy_yaw_deg": {
+                    colour: list(CUBE_SPAWNS[colour]) for colour in COLOURS
+                },
+                "bin_centres_base_m": {
+                    colour: list(BIN_CENTRES[colour]) for colour in COLOURS
+                },
+                "surface_base_z_m": TASK_CONFIG.frames.surface_base_z_m,
+                "pick_tip_clearance_m": (
+                    TASK_CONFIG.task.pick_tip_clearance_m
+                ),
+                "approach_clearance_m": (
+                    TASK_CONFIG.task.approach_clearance_m
+                ),
+                "bin_release_clearance_m": (
+                    TASK_CONFIG.task.bin_release_clearance_m
+                ),
+                "tcp_convention": "UTOOL1/TCP at fingertips",
+                "tcp_beyond_fingertips_mm": (
+                    TASK_CONFIG.frames.tcp_beyond_fingertips_mm
+                ),
+                "tcp_conflict_unresolved": True,
+                "tcp_conflict_note": TASK_CONFIG.frames.tcp_conflict_note,
+                "semantic_phase_names": list(SHARED_SEMANTIC_PHASE_NAMES),
+                "isaac_adapter_extension_phases": ["home"],
+                "isaac_revalidation_source": "simulator ground truth, not camera",
+            },
             "bin_model": {
                 "path": str(bin_model),
                 "sha256": hashlib.sha256(bin_model.read_bytes()).hexdigest(),

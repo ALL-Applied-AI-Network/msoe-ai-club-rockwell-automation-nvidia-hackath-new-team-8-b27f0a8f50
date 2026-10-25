@@ -17,6 +17,21 @@ See [BREV_SETUP.md](BREV_SETUP.md). Coding agents can simply be told: “Set thi
   supplied bin models. It intentionally uses configured simulator poses, not
   camera perception or AI, and is not yet a real-robot controller.
 
+## FANUC hardware path
+
+The project now includes a wrapper for the event's official supervised FANUC
+client under [`hardware/fanuc_cell`](hardware/fanuc_cell). Start with the
+[`hardware/README.md`](hardware/README.md) onboarding and the more detailed
+[`docs/HARDWARE_TRANSFER.md`](docs/HARDWARE_TRANSFER.md) validation ladder.
+The official mock checks the client contract and action limits; it does **not**
+prove that perception, motion, grasping, collision avoidance, or the physical
+sort works. No physical run has been completed by this project yet.
+
+Current shared assumption: **10 mm cubes and UTOOL1/TCP at the fingertips**.
+The live event site has also described the TCP as 10 mm beyond the fingertips,
+so that frame must be confirmed during a supervised hover check before physical
+descent is enabled. Do not treat a policy-issued hold as an emergency stop.
+
 ## Key dates
 
 | When | What |

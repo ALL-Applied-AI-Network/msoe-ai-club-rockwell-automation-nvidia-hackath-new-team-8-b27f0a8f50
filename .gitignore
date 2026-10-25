@@ -19,9 +19,13 @@
 *.pt
 *.pth
 *.zip
+**/.request.json
 .env
 .env.*
 !.env.example
+
+# Physical-cell observations and policy logs are runtime data, not source.
+/hardware/fanuc_cell/hardware_runs/
 
 # OS/editor noise
 .DS_Store
