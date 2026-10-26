@@ -120,6 +120,7 @@ class VisionSpec:
     hsv_ranges_opencv: Mapping[str, tuple[tuple[int, int, int, int], ...]]
     minimum_component_area_px: float
     maximum_component_area_fraction: float
+    minimum_component_fill_ratio: float
     maximum_component_aspect_ratio: float
     cube_edge_minimum_factor: float
     cube_edge_maximum_factor: float
@@ -266,8 +267,10 @@ class SortConfig:
             raise ConfigurationError("maximum component area fraction must be in (0, 1]")
         if self.vision.minimum_component_area_px <= 0:
             raise ConfigurationError("minimum component area must be positive")
-        if self.vision.maximum_component_aspect_ratio < 1:
-            raise ConfigurationError("maximum component aspect ratio must be >= 1")
+        if not 0 < self.vision.minimum_component_fill_ratio <= 1:
+            raise ConfigurationError("minimum component fill ratio must be in (0, 1]")
+        if self.vision.maximum_component_aspect_ratio <= 1:
+            raise ConfigurationError("maximum component aspect ratio must be > 1")
         if not 0 < self.vision.cube_edge_minimum_factor < 1:
             raise ConfigurationError("cube edge minimum factor must be in (0, 1)")
         if self.vision.cube_edge_maximum_factor <= 1:
@@ -433,6 +436,10 @@ def config_from_dict(raw: Mapping[str, Any]) -> SortConfig:
             maximum_component_area_fraction=_finite(
                 vision_raw["maximum_component_area_fraction"],
                 "maximum_component_area_fraction",
+            ),
+            minimum_component_fill_ratio=_finite(
+                vision_raw["minimum_component_fill_ratio"],
+                "minimum_component_fill_ratio",
             ),
             maximum_component_aspect_ratio=_finite(
                 vision_raw["maximum_component_aspect_ratio"],

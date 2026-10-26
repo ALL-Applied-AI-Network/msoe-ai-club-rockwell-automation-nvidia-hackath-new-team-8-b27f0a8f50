@@ -110,6 +110,15 @@ def detect_coloured_cubes(
                 # distractor. Rejecting the boundary too prevents constructing
                 # a zero-shape-confidence detection in the first place.
                 continue
+            rectangular_area = rect_width * rect_height
+            fill = min(1.0, area / max(rectangular_area, 1e-9))
+            if fill < config.vision.minimum_component_fill_ratio:
+                # Coloured hoses, lettering and gripper fittings can project
+                # into the pickup region while the arm is at hover. Their
+                # sparse/concave masks are not compact upright-cube
+                # silhouettes. Reject the shape before target counting rather
+                # than resolving a same-colour ambiguity by proximity.
+                continue
             moments = cv2.moments(contour)
             if moments["m00"] <= 0:
                 continue
@@ -155,8 +164,6 @@ def detect_coloured_cubes(
             yaw = normalise_square_yaw_rad(
                 math.atan2(float(world_edge[1]), float(world_edge[0]))
             )
-            rectangular_area = rect_width * rect_height
-            fill = min(1.0, area / max(rectangular_area, 1e-9))
             shape_score = max(
                 0.0,
                 1.0

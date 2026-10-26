@@ -72,6 +72,8 @@ class ConfigTests(unittest.TestCase):
         self.assertAlmostEqual(c.frames.surface_base_z_m, -0.0051)
         self.assertAlmostEqual(c.hardware.maximum_radial_reach_m, 0.55)
         self.assertAlmostEqual(c.vision.minimum_detection_confidence, 0.20)
+        self.assertAlmostEqual(c.vision.minimum_component_fill_ratio, 0.60)
+        self.assertAlmostEqual(c.vision.maximum_component_aspect_ratio, 1.50)
 
     def test_smc_and_tcp_conventions_are_explicit(self):
         c = self.config
@@ -115,6 +117,20 @@ class ConfigTests(unittest.TestCase):
             "outside", "red", timestamp, (0.2999, 0.0, -0.0001), 0.0, 0.9
         )
         self.assertFalse(detection_in_pickup_region(outside, self.config))
+
+    def test_degenerate_vision_shape_limits_are_rejected(self):
+        no_fill = replace(
+            self.config,
+            vision=replace(self.config.vision, minimum_component_fill_ratio=0.0),
+        )
+        with self.assertRaisesRegex(ConfigurationError, "fill ratio"):
+            no_fill.validate()
+        square_only = replace(
+            self.config,
+            vision=replace(self.config.vision, maximum_component_aspect_ratio=1.0),
+        )
+        with self.assertRaisesRegex(ConfigurationError, "aspect ratio"):
+            square_only.validate()
 
 
 class FrameAndProtocolTests(unittest.TestCase):
@@ -527,15 +543,15 @@ class VisionTests(unittest.TestCase):
 
     def test_zero_confidence_aspect_boundary_is_rejected(self):
         image = np.full((180, 320, 3), 235, dtype=np.uint8)
-        # One projected dimension matches 10 mm, but this is a genuine 10x16
+        # One projected dimension matches 10 mm, but this is a genuine 10x15
         # mm rectangle at the configured aspect boundary rather than a compact
         # cube silhouette. It must not reach planning with zero shape score.
-        cv2.rectangle(image, (128, 80), (160, 100), (0, 0, 255), -1)
+        cv2.rectangle(image, (130, 80), (160, 100), (0, 0, 255), -1)
 
         def project(uv, z):
             return np.array(
                 [
-                    0.35 + (uv[0] - 144) / 2000.0,
+                    0.35 + (uv[0] - 145) / 2000.0,
                     (uv[1] - 90) / 2000.0,
                     z,
                 ]
@@ -547,6 +563,35 @@ class VisionTests(unittest.TestCase):
             self.config,
             scene_id="rectangular-distractor",
             capture_time_s=26.75,
+        )
+        self.assertEqual(scene.cubes, ())
+
+    def test_sparse_same_size_robot_colour_patch_is_rejected(self):
+        image = np.full((180, 320, 3), 235, dtype=np.uint8)
+        # This concave red patch has a square 30 px bounding box and a 10 mm
+        # projected edge, but fills less than 60% of that box. It models a
+        # cable/fitting silhouette, not a compact upright cube.
+        patch = np.array(
+            [[130, 75], [141, 75], [141, 94], [160, 94], [160, 105], [130, 105]],
+            dtype=np.int32,
+        )
+        cv2.fillPoly(image, [patch], (255, 0, 0))
+
+        def project(uv, z):
+            return np.array(
+                [
+                    0.35 + (uv[0] - 145) / 3000.0,
+                    (uv[1] - 90) / 3000.0,
+                    z,
+                ]
+            )
+
+        scene = detect_coloured_cubes(
+            image,
+            project,
+            self.config,
+            scene_id="sparse-robot-colour-patch",
+            capture_time_s=26.8,
         )
         self.assertEqual(scene.cubes, ())
 

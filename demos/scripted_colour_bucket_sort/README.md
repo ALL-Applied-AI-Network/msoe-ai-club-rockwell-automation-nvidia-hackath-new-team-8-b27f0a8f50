@@ -106,10 +106,19 @@ of runtime control while making the parity gap with the hardware policy
 explicit; do not interpret a truth score as deployable outcome sensing.
 The raw detector retains cube-like colour components across the calibrated
 image. The camera adapter promotes only components inside the configured
-base-frame pickup region to pick targets; the robot's coloured hoses and the
-destination-bin region are outside that provisional region. The physical cell
-must validate those bounds and boundary uncertainty before operation. This is
-not an obstacle map or a guarantee that the arm's swept volume is clear.
+base-frame pickup region to pick targets. The destination bins are outside that
+provisional region, but moving robot, hose, and gripper colours can project
+inside it because the image is back-projected onto the cube-top plane. The
+physical cell must validate the bounds and boundary uncertainty before
+operation. This is not an obstacle map or a guarantee that the arm's swept
+volume is clear.
+Known-cube silhouette gates also reject sparse or elongated colour patches
+from the robot, hoses, lettering, and gripper before target counting. Their
+fill/aspect thresholds are shared with the hardware adapter, preserve
+fail-closed ambiguity handling for shapes that pass the gates, and are only
+provisional until checked against native 1920x1080 images from the real cell.
+They can also reject a partially occluded or damaged real cube, so a missing
+detection is not by itself proof that a placed or dropped part is absent.
 
 Add seeded, provisional domain randomization and synchronized training-data
 artifacts with:
