@@ -73,6 +73,9 @@ end. The configured lanes put the screws 8 mm apart, point their heads toward
 opposite ends of the bin, and release them 16.5 mm above the floor so the held
 CAD clears the already-sorted red cube. The jaws open only enough to release the
 6 mm shank while inside the pocket and open fully after retreating above it.
+After all five actions, the demo samples every object's pose again and repeats
+the geometry and stability checks, so a later insertion cannot silently leave
+an earlier success counted after it has been disturbed.
 
 The model has no geometric threads, and the 7.5 g steel mass is CAD-volume based,
 not a measurement of the event's physical screws. Passing this simulation does

@@ -872,10 +872,133 @@ def main() -> None:
             if not event["placement_verified"]:
                 break
 
-        completion = build_completion_report(scenario, events)
+        # Re-check the whole scene after the final action. Per-item success at
+        # an earlier time is not enough: a later insertion can disturb a cube
+        # or screw that was already accepted.
+        for _ in range(45):
+            command(q, C.JAW_OPEN)
+            world.step(render=camera is not None)
+        final_samples: dict[str, list[dict]] = {
+            item.item_id: [] for item in items
+        }
+        for _ in range(15):
+            command(q, C.JAW_OPEN)
+            world.step(render=camera is not None)
+            for item in items:
+                final_samples[item.item_id].append(
+                    object_pose(item.item_id, item.kind)
+                )
+
         final = {
             item.item_id: object_pose(item.item_id, item.kind) for item in items
         }
+        final_scene_items: dict[str, dict] = {}
+        for item in items:
+            samples = final_samples[item.item_id]
+            positions = [
+                np.asarray(sample["origin_world_m"], dtype=float)
+                for sample in samples
+            ]
+            axes = [
+                np.asarray(sample["axis_world"], dtype=float)
+                for sample in samples
+            ]
+            position_span_m = max(
+                float(np.linalg.norm(first - second))
+                for first in positions
+                for second in positions
+            )
+            axis_span_deg = max(
+                _axis_delta_degrees(first, second)
+                for first in axes
+                for second in axes
+            )
+            stability = {
+                "position_span_m": position_span_m,
+                "maximum_allowed_position_span_m": 0.001,
+                "axis_span_deg": axis_span_deg,
+                "maximum_allowed_axis_span_deg": 3.0,
+                "passed": bool(
+                    position_span_m <= 0.001 and axis_span_deg <= 3.0
+                ),
+            }
+
+            pose = final[item.item_id]
+            bin_x, bin_y = bin_centres[item.destination_colour]
+            if item.kind == "cube":
+                centre = np.asarray(pose["reference_world_m"], dtype=float)
+                half_clearance = (
+                    task_config.bin.pocket_m - C.CUBE_EDGE
+                ) / 2.0
+                expected_z = (
+                    C.TABLE_TOP_Z
+                    + C.SURFACE_DZ
+                    + task_config.bin.floor_m
+                    + C.CUBE_EDGE / 2.0
+                )
+                geometry = {
+                    "inside_matching_bin_xy": bool(
+                        abs(centre[0] - bin_x) <= half_clearance
+                        and abs(centre[1] - bin_y) <= half_clearance
+                    ),
+                    "resting_on_bin_floor": bool(
+                        abs(centre[2] - expected_z) <= 0.004
+                    ),
+                }
+                geometry_passed = all(geometry.values())
+            else:
+                position = np.asarray(pose["origin_world_m"], dtype=float)
+                rotation = _rotation_matrix_from_quat(
+                    pose["orientation_wxyz"]
+                )
+                vertices_world = screw_points_m @ rotation.T + position
+                containment = verify_vertices_inside_bin(
+                    vertices_world,
+                    bin_centre_xy_m=(bin_x, bin_y),
+                    pocket_m=task_config.bin.pocket_m,
+                    floor_z_m=(
+                        C.TABLE_TOP_Z + C.SURFACE_DZ + task_config.bin.floor_m
+                    ),
+                    rim_z_m=(
+                        C.TABLE_TOP_Z + C.SURFACE_DZ + task_config.bin.height_m
+                    ),
+                    corner_radius_m=0.004,
+                    tolerance_m=0.001,
+                )
+                geometry = {
+                    "full_cad_bin_containment": containment.as_dict(),
+                    "verification_uses_every_cad_vertex": True,
+                }
+                geometry_passed = containment.passed
+            item_passed = bool(stability["passed"] and geometry_passed)
+            final_scene_items[item.item_id] = {
+                "object_type": item.kind,
+                "destination_colour": item.destination_colour,
+                "stability": stability,
+                "geometry": geometry,
+                "passed": item_passed,
+            }
+
+        final_scene_verified = sum(
+            int(result["passed"]) for result in final_scene_items.values()
+        )
+        final_scene_verification = {
+            "warmup_physics_steps": 45,
+            "sampled_physics_steps": 15,
+            "items": final_scene_items,
+            "verified_items": final_scene_verified,
+            "expected_items": len(items),
+            "passed": final_scene_verified == len(items),
+        }
+        completion = build_completion_report(scenario, events)
+        completion["task_complete"] = bool(
+            completion["task_complete"]
+            and final_scene_verification["passed"]
+        )
+        completion["completion_summary"] = (
+            f"{completion['completion_summary']} "
+            f"final_scene={final_scene_verified}/{len(items)}"
+        )
         report = {
             "task": "scripted_cube_screw_bucket_sort",
             "scope": (
@@ -920,6 +1043,7 @@ def main() -> None:
             },
             "initial_truth": initial,
             "final_truth": final,
+            "final_scene_verification": final_scene_verification,
             "events": events,
             **completion,
         }
