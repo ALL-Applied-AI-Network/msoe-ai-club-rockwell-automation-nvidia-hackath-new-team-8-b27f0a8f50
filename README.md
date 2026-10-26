@@ -14,8 +14,9 @@ See [BREV_SETUP.md](BREV_SETUP.md). Coding agents can simply be told: “Set thi
 
 - [Scripted colour bucket sort](demos/scripted_colour_bucket_sort/README.md):
   a headless Isaac Sim smoke test that places three coloured cubes into matching
-  supplied bin models. It intentionally uses configured simulator poses, not
-  camera perception or AI, and is not yet a real-robot controller.
+  supplied bin models. Its preserved default mode intentionally uses configured
+  simulator poses; opt-in camera/training modes make decisions from rendered RGB.
+  None of these modes uses Cosmos, and the demo is not proof of real-robot use.
 
 ## FANUC hardware path
 

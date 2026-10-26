@@ -82,6 +82,6 @@
     "cube_edge_minimum_factor": 0.75,
     "cube_edge_maximum_factor": 1.4,
     "minimum_detection_confidence": 0.2,
-    "morphology_kernel_px": 3
+    "morphology_kernel_px": 1
   }
 }

@@ -80,6 +80,7 @@ leaving the default path unchanged.
 - It uses the ideal pinhole model rendered by Isaac. The hardware projection
   still uses the measured real-camera distortion calibration.
 - It does not provide a complete swept-volume collision planner, temporal
-  tracking, or persistent cross-frame IDs. The demo's physical post-place
-  verification uses simulator truth strictly as evaluator output.
+  tracking, persistent cross-frame IDs, or deployable physical post-place
+  verification. The Isaac demo uses simulator truth strictly as evaluator
+  output for pickup and placement outcomes.
 - Camera-derived square yaw is only meaningful modulo 90 degrees.

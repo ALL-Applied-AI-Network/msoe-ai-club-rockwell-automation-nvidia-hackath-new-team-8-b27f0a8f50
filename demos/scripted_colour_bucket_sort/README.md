@@ -19,7 +19,7 @@ poses, bin centres and dimensions, clearances, and frame assumptions. The
 active choice is a **10 mm cube** and **UTOOL1/TCP at the fingertips**. The live
 event site has separately described the TCP as 10 mm beyond the fingertips;
 that conflict is unresolved and must be checked with a supervised physical
-hover/contact test before any real descent. Every run prints the assumption and
+  high, non-contact hover test before any real descent. Every run prints the assumption and
 records it, the config hash, and the shared semantic phase sequence in
 `execution_report.json`.
 
@@ -67,10 +67,9 @@ to video outside the repository. Never commit generated runs, frames, reports,
 videos, environments, weights, caches, or credentials.
 
 Success requires `execution_report.json` to contain `task_complete: true`, three
-verified pickups, and three verified placements. A prior development run of
-this exact script completed 3/3 pickups and 3/3 placements on the verified
-runtime for commit `5bca8bd`; each new committed runtime still needs its own
-validation.
+verified pickups, and three verified placements. Treat a report as evidence for
+only the exact clean commit and runtime recorded with that run; every new commit
+still needs its own validation.
 
 ## Camera parity and training-data modes
 

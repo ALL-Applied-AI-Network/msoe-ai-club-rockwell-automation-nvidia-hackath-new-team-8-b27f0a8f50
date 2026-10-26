@@ -3,8 +3,10 @@
 This document describes how to move the cube-sorting behavior from the supplied
 Isaac Sim twin to the event's FANUC ER-4iA cell. It is a plan and an interface
 contract, **not evidence that this repository has controlled the physical
-robot**. The existing scripted colour-bucket demo uses configured simulator
-poses and simulator truth; do not send its trajectory directly to the robot.
+robot**. The colour-bucket demo's preserved default mode uses configured
+simulator poses; its opt-in camera modes use rendered RGB for decisions but
+still use simulator truth only for evaluation. Do not send any Isaac trajectory
+directly to the robot.
 
 The physical interface described here is pinned to the official SIDC Lab client
 at commit

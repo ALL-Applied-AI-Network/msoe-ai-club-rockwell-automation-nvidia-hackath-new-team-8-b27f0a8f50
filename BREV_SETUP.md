@@ -242,17 +242,18 @@ cd "$ROCKWELL_TWIN_RUNTIME"
 The sourced file also exports `ROCKWELL_REFERENCE_ASSETS`, the verified runtime
 copy of the committed CAD and tabletop bundle.
 
-For a complete pipeline run, always choose a new empty directory outside the
-twin:
+For the supplied twin's original six-object stacking pipeline, always choose a
+new empty directory outside the twin:
 
 ```bash
 bash run_sort_pipeline.sh "$ROCKWELL_RUNS_ROOT/stack_01"
 ```
 
-Do not claim the full pipeline succeeded unless `execution_report.json` exists,
-contains `task_complete: true`, and reports six verified pickups and six
-verified placements. Inspect the perception evaluation, plan, logs, overlays,
-and videos as described by the twin's own instructions.
+Do not claim that original pipeline succeeded unless `execution_report.json`
+exists, contains `task_complete: true`, and reports six verified pickups and six
+verified placements. This is separate from the repository's three-cube
+colour-bucket demo and does not validate it. Inspect the perception evaluation,
+plan, logs, overlays, and videos as described by the twin's own instructions.
 
 ## Security and trust boundary
 

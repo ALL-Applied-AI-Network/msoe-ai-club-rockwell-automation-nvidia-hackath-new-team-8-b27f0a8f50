@@ -623,6 +623,82 @@ class VisionTests(unittest.TestCase):
         )
         self.assertEqual(scene.cubes, ())
 
+    def test_tiny_cube_yaw_does_not_snap_from_destructive_morphology(self):
+        # Exact binary yellow masks cropped from the initial and red-hover
+        # decision frames of the randomized Isaac seed-7 regression.  The cube
+        # did not move (truth yaw 17.09 deg; XY drift 0.096 mm), but a 3x3
+        # opening changed a few boundary pixels and snapped minAreaRect from
+        # 20.70 to 2.04 deg.  Preserve the native mask at this part scale.
+        masks = (
+            (
+                "................##.........",
+                "...........########........",
+                "........###########........",
+                ".......############........",
+                "......##############.......",
+                "......##############.......",
+                "......###############......",
+                "......###############......",
+                "......###############......",
+                "......###############......",
+                ".......###############.....",
+                ".......###############.....",
+                ".......###############.....",
+                "........#############......",
+                "........#############......",
+                "........#############......",
+                ".........#########.........",
+                ".........######............",
+                "..........#................",
+            ),
+            (
+                "................##.........",
+                "...........########........",
+                "........###########........",
+                ".......#############.......",
+                "......##############.......",
+                "......##############.......",
+                "......###############......",
+                "......###############......",
+                "......###############......",
+                "......###############......",
+                ".......###############.....",
+                ".......###############.....",
+                ".......##############......",
+                ".......##############......",
+                "........#############......",
+                "........#############......",
+                "........###########........",
+                ".........#####.............",
+                "..........#................",
+            ),
+        )
+
+        def project(uv, z):
+            return np.array(
+                [0.40 + (uv[0] - 13) * 0.00075, (uv[1] - 13) * 0.00075, z]
+            )
+
+        yaws = []
+        for frame_index, rows in enumerate(masks):
+            image = np.full((27, 27, 3), 235, dtype=np.uint8)
+            for row_index, row in enumerate(rows, start=5):
+                for column_index, value in enumerate(row):
+                    if value == "#":
+                        image[row_index, column_index] = (255, 255, 0)
+            scene = detect_coloured_cubes(
+                image,
+                project,
+                self.config,
+                scene_id=f"tiny-yaw-regression-{frame_index}",
+                capture_time_s=27.0 + frame_index,
+            )
+            self.assertEqual([item.colour for item in scene.cubes], ["yellow"])
+            yaws.append(scene.cubes[0].yaw_rad)
+
+        change = abs(math.degrees(yaws[0] - yaws[1])) % 90.0
+        self.assertLess(min(change, 90.0 - change), 5.0)
+
     def test_pickup_filter_preserves_raw_outside_region_detection(self):
         image = np.full((180, 320, 3), 235, dtype=np.uint8)
         cv2.rectangle(image, (145, 75), (175, 105), (0, 0, 255), -1)

@@ -94,7 +94,15 @@ def detect_coloured_cubes(
 
     for colour in config.task.colour_order:
         mask = _colour_mask(hsv, config.vision.hsv_ranges_opencv[colour])
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        # A fixed 3x3 opening erased only a few boundary pixels from the
+        # 14--16 px silhouettes produced by the table camera, but that was
+        # enough for minAreaRect to snap an unchanged cube's yaw by 18.7 deg.
+        # Kernel size 1 deliberately preserves the measured mask.  Larger
+        # kernels remain available only after calibration against the actual
+        # camera's part scale; the physical-size, fill, and aspect gates below
+        # reject small robot-colour fragments without destructive cleanup.
+        if kernel_size > 1:
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for contour in contours:
             area = float(cv2.contourArea(contour))

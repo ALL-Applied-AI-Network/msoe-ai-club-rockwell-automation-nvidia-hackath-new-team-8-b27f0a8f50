@@ -212,7 +212,13 @@ training dataset:
    hardest conditions; and
 9. record the clean project commit, Isaac/renderer build and settings, GPU, and
    driver in each episode manifest; current config/calibration/readback hashes
-   do not fully identify the generator runtime.
+   do not fully identify the generator runtime; and
+10. measure yaw accuracy at the real camera's native part scale. In the current
+    wide table view a 10 mm cube spans only about 14--16 pixels. A fixed 3x3
+    morphology opening was therefore disabled after it changed a stationary
+    seed-7 cube's estimated yaw by 18.7 degrees. The shared physical-size,
+    aspect, and fill gates rejected the observed robot-colour distractors in
+    replay, but held-out real images are still required before deployment.
 
 Path-traced imagery may improve shadows and reflections, but it does not repair
 wrong geometry, calibration, time synchronization, physics, or labels. Render
