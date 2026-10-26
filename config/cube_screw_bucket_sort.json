@@ -15,7 +15,7 @@
         "spawn_head_base_m": [0.485, -0.09, 0.0014],
         "spawn_yaw_deg": 20.0,
         "destination_colour": "red",
-        "placement_grasp_point_offset_from_bin_centre_m": [0.001, -0.009, 0.0065],
+        "placement_grasp_point_offset_from_bin_centre_m": [0.001, -0.004, 0.0165],
         "target_axis_yaw_deg": 0.0
       },
       {
@@ -23,8 +23,8 @@
         "spawn_head_base_m": [0.5, 0.09, 0.0014],
         "spawn_yaw_deg": 160.0,
         "destination_colour": "red",
-        "placement_grasp_point_offset_from_bin_centre_m": [0.001, 0.009, 0.0065],
-        "target_axis_yaw_deg": 0.0
+        "placement_grasp_point_offset_from_bin_centre_m": [-0.001, 0.004, 0.0165],
+        "target_axis_yaw_deg": 180.0
       }
     ]
   },
@@ -45,6 +45,6 @@
     "grasp_offset_from_head_m": 0.016,
     "jaw_seating_margin_m": 0.0003,
     "spawn_head_height_above_surface_m": 0.0065,
-    "placement_note": "The placement reference is the grasp point, relative to the destination bin centre in XY and to the bin floor in Z. At yaw 0 degrees, the local -Z screw axis points along world +X. Full transformed CAD vertices, not only the head or grasp point, must remain in the pocket and below the rim."
+    "placement_note": "The placement reference is the grasp point, relative to the destination bin centre in XY and to the bin floor in Z. At yaw 0 degrees, the local -Z screw axis points along world +X. The two screws use opposite axial directions at y=-4 mm and y=+4 mm, 16.5 mm above the floor, so their 12 mm heads occupy opposite ends and the held parts clear the cube before release. Full transformed CAD vertices, not only the head or grasp point, must remain in the pocket and below the rim."
   }
 }

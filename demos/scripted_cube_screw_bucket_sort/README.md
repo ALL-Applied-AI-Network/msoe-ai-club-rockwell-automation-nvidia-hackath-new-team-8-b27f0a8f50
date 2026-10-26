@@ -69,8 +69,10 @@ Screw placement is not accepted from its centre alone. The verifier transforms
 every CAD vertex using the final rigid-body pose and requires the full screw to
 be inside the 35 mm red-bin pocket, above its floor, and below its rim. This is
 important because a 30 mm screw has only 2.5 mm nominal axial clearance at each
-end. The two configured screw lanes are provisional and must pass the actual
-Isaac contact run; the red cube can cause bouncing or bridging.
+end. The configured lanes put the screws 8 mm apart, point their heads toward
+opposite ends of the bin, and release them 16.5 mm above the floor so the held
+CAD clears the already-sorted red cube. The jaws open only enough to release the
+6 mm shank while inside the pocket and open fully after retreating above it.
 
 The model has no geometric threads, and the 7.5 g steel mass is CAD-volume based,
 not a measurement of the event's physical screws. Passing this simulation does

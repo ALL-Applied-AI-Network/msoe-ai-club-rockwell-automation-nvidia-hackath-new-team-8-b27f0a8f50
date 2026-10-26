@@ -60,6 +60,24 @@ class CubeScrewScenarioTests(unittest.TestCase):
                 self.config.screw.grasp_offset_from_head_m,
                 places=12,
             )
+        red_bin_x, red_bin_y = self.config.cube_config.task.bin_centres_base_m[
+            "red"
+        ]
+        first, second = items[-2:]
+        self.assertAlmostEqual(
+            first.placement_grasp_point_base_m[1] - red_bin_y, -0.004
+        )
+        self.assertAlmostEqual(
+            second.placement_grasp_point_base_m[1] - red_bin_y, 0.004
+        )
+        self.assertAlmostEqual(first.target_axis_yaw_deg, 0.0)
+        self.assertAlmostEqual(second.target_axis_yaw_deg, 180.0)
+        self.assertAlmostEqual(
+            first.placement_grasp_point_base_m[0] - red_bin_x, 0.001
+        )
+        self.assertAlmostEqual(
+            second.placement_grasp_point_base_m[0] - red_bin_x, -0.001
+        )
 
     def test_model_resolution_requires_explicit_path_or_reference_environment(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -171,7 +189,7 @@ class CubeScrewScenarioTests(unittest.TestCase):
                 self.assertEqual(result.vertex_count, 3 * SUPPLIED_SCREW_TRIANGLES)
                 self.assertGreater(result.minimum_wall_clearance_m, 0.002)
                 self.assertGreater(result.floor_clearance_m, 0.0004)
-                self.assertGreater(result.rim_clearance_m, 0.012)
+                self.assertGreater(result.rim_clearance_m, 0.002)
 
     def test_bin_verification_checks_every_vertex_and_rim(self):
         result = verify_vertices_inside_bin(

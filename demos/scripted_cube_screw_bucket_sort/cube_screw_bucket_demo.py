@@ -581,10 +581,11 @@ def main() -> None:
                         table_top_world_z_m=C.TABLE_TOP_Z,
                     )
                 )
-                # Clear the 6 mm shank while keeping the in-bin finger
-                # envelope smaller than it would be at the 6 mm full stroke.
-                # Full opening happens only after the vertical retreat.
-                in_bin_open_jaw = min(C.JAW_OPEN, jaw_target + 0.0005)
+                # An approximately 8 mm hook gap clears the 6 mm shank while
+                # keeping the in-bin finger envelope smaller than it would be
+                # at the 6 mm full stroke. Full opening happens only after the
+                # vertical retreat.
+                in_bin_open_jaw = min(C.JAW_OPEN, jaw_target + 0.0013)
                 placement_height_plan = {
                     "mode": "configured screw grasp height",
                     "desired_grasp_point_base_z_m": float(
