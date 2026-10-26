@@ -33,6 +33,19 @@ class ReadbackMetadataTests(unittest.TestCase):
         self.assertNotEqual(first["sha256"], changed["sha256"])
         self.assertEqual(len(first["sha256"]), 64)
 
+    def test_float32_usd_round_trip_is_accepted_without_hiding_real_error(self):
+        import numpy as np
+
+        from isaac_bridge.training_episode import _assert_close
+        from sorting_core.synthetic_data import SyntheticDataError
+
+        requested = 1257.9247767124546
+        usd_readback = float(np.float32(requested))
+        _assert_close(usd_readback, requested, "dome intensity")
+
+        with self.assertRaisesRegex(SyntheticDataError, "readback mismatch"):
+            _assert_close(usd_readback + 0.01, requested, "dome intensity")
+
 
 @unittest.skipUnless(HAS_NUMPY, "NumPy is available in the pinned Isaac environment")
 class TrainingEpisodeTests(unittest.TestCase):

@@ -20,6 +20,12 @@ from sorting_core.synthetic_data import RandomizationManifest, SyntheticDataErro
 
 COLOURS = ("red", "yellow", "blue")
 
+# Most authored USD numeric attributes used below are Sdf ``float`` values.
+# Isaac therefore returns IEEE-754 binary32 values even though Python supplied
+# a binary64 float.  Keep readback fail-closed for meaningful mismatches while
+# accepting the unavoidable serialization error at large light intensities.
+USD_FLOAT32_READBACK_RTOL = float(np.finfo(np.float32).eps * 4.0)
+
 CAMERA_PARAMETER_NAMES = frozenset(
     {
         "camera.translation_x_m",
@@ -55,7 +61,10 @@ def _assert_close(actual: Any, expected: Any, name: str, *, atol: float = 1e-6) 
     actual_array = np.asarray(actual, dtype=float)
     expected_array = np.asarray(expected, dtype=float)
     if actual_array.shape != expected_array.shape or not np.allclose(
-        actual_array, expected_array, rtol=0.0, atol=atol
+        actual_array,
+        expected_array,
+        rtol=USD_FLOAT32_READBACK_RTOL,
+        atol=atol,
     ):
         raise SyntheticDataError(
             f"Isaac readback mismatch for {name}: got {actual_array.tolist()}, "
