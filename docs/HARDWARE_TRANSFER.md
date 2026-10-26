@@ -349,6 +349,14 @@ the same as end-to-end grasp accuracy.
   calibration residual and boundary jitter, and verify them throughout the
   region; projecting robot/hoses onto the cube-top plane makes this a heuristic,
   not a fixture self-mask.
+- The shared known-size gate currently accepts an inferred edge from 75% to
+  140% of the declared cube edge (7.5--14 mm under the active 10 mm
+  assumption). This rejected a compact 6.27 mm yellow robot/tool component in
+  the exact Isaac pre-descent image without weakening completed-colour checks.
+  It can also hide a partial/dim real cube, so validate it on native real images
+  across the whole pickup region and keep missing evidence fail-closed. A
+  future joint/calibration/CAD-derived robot mask must mark its dilated pixels
+  unknown, never clear; an Isaac-only semantic mask is not hardware parity.
 - The pickup region does not prove free space for the fingers or arm, does not
   see unknown-colour obstacles, and does not validate the swept motion. Keep
   those as separate collision and physical-integration gates.

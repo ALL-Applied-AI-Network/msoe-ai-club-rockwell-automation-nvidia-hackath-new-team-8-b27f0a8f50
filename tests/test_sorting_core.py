@@ -74,6 +74,7 @@ class ConfigTests(unittest.TestCase):
         self.assertAlmostEqual(c.vision.minimum_detection_confidence, 0.20)
         self.assertAlmostEqual(c.vision.minimum_component_fill_ratio, 0.60)
         self.assertAlmostEqual(c.vision.maximum_component_aspect_ratio, 1.50)
+        self.assertAlmostEqual(c.vision.cube_edge_minimum_factor, 0.75)
 
     def test_smc_and_tcp_conventions_are_explicit(self):
         c = self.config
@@ -592,6 +593,33 @@ class VisionTests(unittest.TestCase):
             self.config,
             scene_id="sparse-robot-colour-patch",
             capture_time_s=26.8,
+        )
+        self.assertEqual(scene.cubes, ())
+
+    def test_compact_undersize_robot_colour_patch_is_rejected(self):
+        image = np.full((180, 320, 3), 235, dtype=np.uint8)
+        # Regression for the yellow FANUC/tool detail seen in the exact
+        # blue-pre-descent Isaac frame.  That compact component passed the
+        # fill/aspect gates but back-projected to only 6.27 mm.  A 6.25 mm
+        # square here must not become evidence that a declared 10 mm cube has
+        # reappeared; the shared known-size gate is used by both backends.
+        cv2.rectangle(image, (150, 80), (170, 100), (255, 255, 0), -1)
+
+        def project(uv, z):
+            return np.array(
+                [
+                    0.40 + (uv[0] - 160) / 3200.0,
+                    (uv[1] - 90) / 3200.0,
+                    z,
+                ]
+            )
+
+        scene = detect_coloured_cubes(
+            image,
+            project,
+            self.config,
+            scene_id="compact-undersize-robot-colour-patch",
+            capture_time_s=26.85,
         )
         self.assertEqual(scene.cubes, ())
 

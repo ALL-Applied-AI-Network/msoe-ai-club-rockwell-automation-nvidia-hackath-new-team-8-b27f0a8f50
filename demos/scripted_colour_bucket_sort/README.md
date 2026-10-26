@@ -112,13 +112,21 @@ inside it because the image is back-projected onto the cube-top plane. The
 physical cell must validate the bounds and boundary uncertainty before
 operation. This is not an obstacle map or a guarantee that the arm's swept
 volume is clear.
-Known-cube silhouette gates also reject sparse or elongated colour patches
-from the robot, hoses, lettering, and gripper before target counting. Their
-fill/aspect thresholds are shared with the hardware adapter, preserve
-fail-closed ambiguity handling for shapes that pass the gates, and are only
-provisional until checked against native 1920x1080 images from the real cell.
-They can also reject a partially occluded or damaged real cube, so a missing
-detection is not by itself proof that a placed or dropped part is absent.
+Known-cube silhouette gates also reject sparse, elongated, or physically
+undersize colour patches from the robot, hoses, lettering, and gripper before
+target counting. The current shared size window is 75% to 140% of the declared
+10 mm edge. It rejected a compact yellow tool detail that back-projected to
+6.27 mm in the exact blue-pre-descent Isaac frame; raising a pixel-area cutoff
+would have been camera-resolution dependent. These size/fill/aspect thresholds
+are shared with the hardware adapter, preserve fail-closed ambiguity handling
+for shapes that pass the gates, and are only provisional until checked against
+native 1920x1080 images from the real cell. They can also reject a partially
+occluded, dim, damaged, or genuinely undersize real cube, so a missing
+detection is not by itself proof that a placed or dropped part is absent. Park
+the arm in a validated clear observation pose for outcome checks; longer term,
+derive a conservatively dilated robot self-mask from synchronized joints,
+calibration, and robot geometry, and treat masked pixels as unknown rather than
+clear.
 
 Add seeded, provisional domain randomization and synchronized training-data
 artifacts with:

@@ -79,7 +79,7 @@
     "maximum_component_area_fraction": 0.02,
     "minimum_component_fill_ratio": 0.6,
     "maximum_component_aspect_ratio": 1.5,
-    "cube_edge_minimum_factor": 0.6,
+    "cube_edge_minimum_factor": 0.75,
     "cube_edge_maximum_factor": 1.4,
     "minimum_detection_confidence": 0.2,
     "morphology_kernel_px": 3
