@@ -351,10 +351,13 @@ the same as end-to-end grasp accuracy.
   calibration residual and boundary jitter, and verify them throughout the
   region; projecting robot/hoses onto the cube-top plane makes this a heuristic,
   not a fixture self-mask.
-- The shared known-size gate currently accepts an inferred edge from 75% to
-  140% of the declared cube edge (7.5--14 mm under the active 10 mm
-  assumption). This rejected a compact 6.27 mm yellow robot/tool component in
-  the exact Isaac pre-descent image without weakening completed-colour checks.
+- The shared known-size gate requires both inferred silhouette dimensions to
+  reach 75% of the declared cube edge, while the dimension selected as the
+  footprint edge must remain at or below 140% (7.5--14 mm under the active
+  10 mm assumption). Allowing the other dimension to be longer retains
+  oblique views containing a side face. This rejected a compact 5.4 by 8.9 mm
+  yellow robot/tool component in the exact Isaac pre-descent image without
+  weakening completed-colour checks.
   It can also hide a partial/dim real cube, so validate it on native real images
   across the whole pickup region and keep missing evidence fail-closed. A
   future joint/calibration/CAD-derived robot mask must mark its dilated pixels

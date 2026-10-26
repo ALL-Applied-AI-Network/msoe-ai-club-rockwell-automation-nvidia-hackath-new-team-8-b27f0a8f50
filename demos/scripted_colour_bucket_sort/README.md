@@ -114,9 +114,11 @@ volume is clear.
 Known-cube silhouette gates also reject sparse, elongated, or physically
 undersize colour patches from the robot, hoses, lettering, and gripper before
 target counting. The current shared size window is 75% to 140% of the declared
-10 mm edge. It rejected a compact yellow tool detail that back-projected to
-6.27 mm in the exact blue-pre-descent Isaac frame; raising a pixel-area cutoff
-would have been camera-resolution dependent. These size/fill/aspect thresholds
+10 mm edge. Both projected silhouette dimensions must reach the lower bound,
+while one may be longer because an oblique view includes a cube side face. This
+rejects a compact yellow tool detail measuring about 5.4 by 8.9 mm in the exact
+blue-pre-descent Isaac frame; raising a pixel-area cutoff would have been
+camera-resolution dependent. These size/fill/aspect thresholds
 are shared with the hardware adapter, preserve fail-closed ambiguity handling
 for shapes that pass the gates, and are only provisional until checked against
 native 1920x1080 images from the real cell. They can also reject a partially

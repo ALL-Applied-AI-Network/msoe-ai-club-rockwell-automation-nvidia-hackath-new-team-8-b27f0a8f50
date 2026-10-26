@@ -165,9 +165,18 @@ def detect_coloured_cubes(
                 continue
             minimum_edge = config.cube_edge_m * config.vision.cube_edge_minimum_factor
             maximum_edge = config.cube_edge_m * config.vision.cube_edge_maximum_factor
-            if not minimum_edge <= edge_length <= maximum_edge:
+            shortest_edge = min(length for length, _ in projected_edges)
+            if (
+                shortest_edge < minimum_edge
+                or not minimum_edge <= edge_length <= maximum_edge
+            ):
                 # The matching bins use the same colours as the cubes.  Their
                 # 35/50 mm edges must never become duplicate 10 mm targets.
+                # Requiring the shorter projected rectangle dimension to
+                # reach the declared minimum also rejects compact tool/cable
+                # details where only one dimension happens to resemble a
+                # 10 mm cube.  The longer dimension may legitimately exceed
+                # the maximum because the oblique view includes a side face.
                 continue
             yaw = normalise_square_yaw_rad(
                 math.atan2(float(world_edge[1]), float(world_edge[0]))

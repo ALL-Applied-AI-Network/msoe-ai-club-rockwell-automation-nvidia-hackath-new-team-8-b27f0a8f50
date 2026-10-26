@@ -600,16 +600,17 @@ class VisionTests(unittest.TestCase):
         image = np.full((180, 320, 3), 235, dtype=np.uint8)
         # Regression for the yellow FANUC/tool detail seen in the exact
         # blue-pre-descent Isaac frame.  That compact component passed the
-        # fill/aspect gates but back-projected to only 6.27 mm.  A 6.25 mm
-        # square here must not become evidence that a declared 10 mm cube has
-        # reappeared; the shared known-size gate is used by both backends.
-        cv2.rectangle(image, (150, 80), (170, 100), (255, 255, 0), -1)
+        # fill/aspect gates and had one back-projected edge near 8.9 mm, but
+        # its other edge was only about 5.4 mm.  Matching one dimension is not
+        # enough to claim that a declared 10 mm cube has reappeared; the
+        # shared known-size gate is used by both backends.
+        cv2.rectangle(image, (156, 87), (164, 93), (255, 255, 0), -1)
 
         def project(uv, z):
             return np.array(
                 [
-                    0.40 + (uv[0] - 160) / 3200.0,
-                    (uv[1] - 90) / 3200.0,
+                    0.40 + (uv[0] - 160) * 0.0011125,
+                    (uv[1] - 90) * 0.0009,
                     z,
                 ]
             )
