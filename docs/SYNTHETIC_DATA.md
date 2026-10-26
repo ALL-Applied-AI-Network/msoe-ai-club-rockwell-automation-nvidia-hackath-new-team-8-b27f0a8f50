@@ -237,7 +237,10 @@ still need:
 - controller/network latency, interpolation, and tracking error; and
 - confirmation of the active **10 mm cube** and fingertip TCP convention.
 
-The live-site claim that UTOOL1 is 10 mm beyond the fingertips remains in
-conflict with the pinned executable client/mock convention. Resolve it by a
-supervised high hover before any physical descent; synthetic randomization
-cannot make an incorrect tool frame safe.
+The pinned client/mock labels its action point as the fingertip. Separately, an
+organizer clarified on October 26, 2026 that the standard fingers touch the
+table near UF0 Z = -335 mm; the former -345 mm FAQ value came from another
+group's shorter fingers and was reverted. These facts are consistent, but a
+supervised high check must still verify the installed fingers and active
+UTOOL1/UF0 before physical descent. Synthetic randomization cannot make an
+incorrect or stale tool frame safe.

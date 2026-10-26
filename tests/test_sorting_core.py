@@ -94,7 +94,8 @@ class ConfigTests(unittest.TestCase):
         self.assertAlmostEqual(c.gripper.j6_to_fingertip_m, 0.293)
         self.assertAlmostEqual(c.frames.uf0_z_offset_mm, -330.0)
         self.assertAlmostEqual(c.frames.tcp_beyond_fingertips_mm, 0.0)
-        self.assertIn("10 mm beyond", c.frames.tcp_conflict_note)
+        self.assertIn("standard fingers", c.frames.tcp_conflict_note)
+        self.assertIn("z=-335 mm", c.frames.tcp_conflict_note)
 
     def test_reversed_pickup_region_is_rejected(self):
         malformed = replace(

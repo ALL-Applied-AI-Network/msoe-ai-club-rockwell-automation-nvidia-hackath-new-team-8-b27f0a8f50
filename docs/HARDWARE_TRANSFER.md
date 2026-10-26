@@ -18,10 +18,12 @@ Re-audit the upstream package before updating that revision.
 > **10 mm reminder — print this at the start of every simulation and hardware
 > run:** this project currently assumes a **10 mm cube**, a work-surface height
 > of **−335.1 mm in UF0**, and a provisional pick target of **−332.6 mm** under
-> the official repository/mock's **TCP means fingertip** convention. The live
-> event site describes a different tool point, approximately 10 mm lower. The
-> final low pick target must not be used on hardware until a supervisor confirms
-> the tool convention with a non-contact hover test.
+> the official repository/mock's **TCP means fingertip** convention. Separately,
+> an organizer confirmed on October 26, 2026 that the standard fingers touch the
+> table near UF0 Z = −335 mm and that the former −345 mm value was for another
+> group's shorter fingers. These facts are consistent; they do not prove the
+> installed fingers or active UTOOL1/UF0, which still require a supervised high,
+> non-contact verification before physical descent.
 
 Keep these values in one configuration object rather than copying numbers into
 perception, planning, simulation, and hardware code:
@@ -46,24 +48,24 @@ straight faces are 12 mm apart when open. A 10 mm cube nominally leaves only
 faces. Even the 10 mm choice is tight enough that camera, calibration, and
 placement error must be measured before contact.
 
-### The unresolved 10 mm tool-point conflict
+### Resolved FAQ discrepancy and remaining physical check
 
 The pinned client repository calls `obs["tcp_pose"]` the **fingertip**, defines
 UF0 as the base frame shifted by −330 mm, and places the work surface at about
 −335 mm. Its mock accepts TCP z only in `[−334, 300]` mm. Those facts support
 the provisional −332.6 mm value above.
 
-The current [event FAQ](https://hackathon.sidclab.org/) instead says the
-controller's UTOOL1 is 10 mm past the fingertips and that the TCP is about
-−345 mm when the fingertips touch the surface. If that description is applied
-literally, the same physical fingertip height would use a TCP z value 10 mm
-lower. The two descriptions cannot both be used as the command convention.
+An organizer clarified by email on October 26, 2026 that the FAQ's former −345
+mm value had been changed accidentally for another group using shorter fingers.
+The FAQ was reverted: the standard fingers still contact the table near −335
+mm. That establishes that the −345 mm value does not apply to the standard
+fingers. The project continues to use the pinned client's checked-in 0 mm
+`tcp_beyond_fingertips_mm` convention; the email alone does not prove the live
+action/report frame, so do not infer or add a transform from either FAQ value.
 
-We deliberately choose the repository/mock fingertip convention because it is
-the executable contract and because the higher target is the conservative
-failure direction: a mismatch should miss the cube high instead of driving the
-fingers into the table. This is still only an assumption. Before the first
-contact attempt, an assigned cell supervisor must confirm:
+The clarification identifies the intended setup, but software cannot prove
+which fingers or controller frame are active on test day. Before the first
+contact attempt, an assigned cell supervisor must still confirm:
 
 1. what point `obs["tcp_pose"]` reports;
 2. what point a `tcp` action commands;
@@ -72,8 +74,9 @@ contact attempt, an assigned cell supervisor must confirm:
 
 Start well above the table, approach in supervised increments, and stop before
 the low pick height. Do not “test” the convention by touching the table. If the
-live-site convention is confirmed, change the single shared transform and its
-tests; do not add an unexplained `−10` in the hardware adapter.
+installed hardware differs from the confirmed standard-finger setup, stop and
+update the single shared transform and its tests from measured, supervisor-
+approved values; do not add an unexplained offset in the hardware adapter.
 
 ## Use the event client, not a direct robot driver
 
@@ -237,8 +240,8 @@ gate to make a demonstration appear successful.
 
 - Pin the official client at upstream SHA `ff7534e` and record the project SHA.
 - Centralize the five numeric assumptions shown at the top of this document.
-- Print those assumptions, especially the 10 mm tool-point conflict, at every
-  run start.
+- Print those assumptions, especially the 10 mm cube choice, resolved FAQ
+  history, and still-unverified live frame state, at every run start.
 - Confirm the Git working tree is clean and no credentials or generated runs
   are tracked.
 
@@ -259,13 +262,13 @@ repository:
 
 ```bash
 uv sync
-uv run run.py --mock
+ROCKWELL_ENABLE_PHYSICAL_MOTION=1 uv run run.py --mock
 ```
 
 Success is the literal `✓ Ready for the real robot` verdict with zero rejected
 actions. This proves only formats and connection behavior. Mock images are
-synthetic, and the mock's initial TCP pose may be absent, so the policy needs a
-tested safe initialization/hold path.
+synthetic, and the mock's initial TCP pose is absent. The motion variable above
+is therefore a **mock protocol bootstrap**, not physical authorization.
 
 ### Gate 3 — Isaac regression and parity tests
 
@@ -280,15 +283,21 @@ tested safe initialization/hold path.
   arrival time. Report sensitivity instead of treating one physics setting as
   proof.
 
-### Gate 4 — supervised read-only hardware check
+### Gate 4 — supervised stationary hold-command diagnostic
 
 During an approved slot, with the operator in control:
 
+- first ask whether the service supports a true observation-only/no-op mode;
 - start the client and inspect camera names, image colour order, timestamps,
   joint convention, TCP pose, and table/bin/cube visibility;
 - save calibration overlays without commanding a contact motion;
 - confirm available cube/bin colours and exact placement names; and
 - measure observation-to-action round trip and actual pose lag.
+
+The checked-in fallback repeats one fresh measured TCP/gripper row. It does not
+run perception or planning, but it is not read-only: latency and controller
+tracking can still produce a small correction. Do not jog the robot while it is
+active, and do not use it as an emergency stop.
 
 Stop if calibration error consumes the available grasp clearance.
 
@@ -299,8 +308,15 @@ Stop if calibration error consumes the available grasp clearance.
 - Verify the observed TCP response and visible fingertip height.
 - Approach in operator-approved increments, remaining well above the cube and
   table.
-- Resolve the −335/−345 convention and custom hook geometry before enabling
-  the provisional −332.6 mm target.
+- Confirm the organizer-resolved standard-finger −335 mm convention against the
+  installed fingers and active frames before enabling the provisional −332.6
+  mm target.
+
+This gate is a future supervised step. `ROCKWELL_ENABLE_PHYSICAL_MOTION=1`
+currently enables the complete planned pre-descent route, not a single bounded
+hover, and the project does not yet have full swept-volume collision checking.
+Do not set it on the cell until Gate 3's clearance work is implemented and
+reviewed.
 
 Any disagreement between expected and observed frames returns the project to
 Gate 1. Do not compensate by trial-and-error at table height.
@@ -423,7 +439,7 @@ defines this sequence:
 
 1. Install `git` and `uv`, then synchronize the pinned client with `uv sync`.
 2. Implement the wrapper in `policy.py` and pass Gate 2 with
-   `uv run run.py --mock`.
+   `ROCKWELL_ENABLE_PHYSICAL_MOTION=1 uv run run.py --mock` (mock only).
 3. Fill `submission/submission.yaml`. Give the policy/task clear names, select
    the closest model type, and describe the sorting task honestly.
 4. Fill `submission/placement.yaml` for any non-default scene. If objects and
@@ -435,9 +451,12 @@ defines this sequence:
 6. Use the printed request ID to book a 30-minute Central Time slot on the
    [event calendar](https://hackathon.sidclab.org/#calendar). The request must
    be approved.
-7. During the approved slot, run `uv run run.py` and leave it running. The
-   operator homes the robot, prepares each rollout, starts/stops it, and records
-   faults/interventions.
+7. During the approved slot, plain `uv run run.py` invokes only the stationary
+   hold-command diagnostic. Do not enable planned motion until the remaining
+   clearance work and Gates 4–5 are complete. An eventual approved sorting run
+   requires both `ROCKWELL_ENABLE_PHYSICAL_MOTION=1` and
+   `ROCKWELL_ENABLE_PHYSICAL_DESCENT=1`; the operator homes the robot, prepares
+   each rollout, starts/stops it, and records faults/interventions.
 8. Use `uv run run.py --status` for status/results and
    `uv run run.py --download` for the recorded LeRobotDataset.
 
@@ -449,9 +468,12 @@ organizer approval and a safe test protocol.
 
 Do not call the hardware integration complete until these are answered:
 
-- [ ] Is the action/report point the repository's virtual fingertip or raw
-      controller UTOOL1? Resolve the −335.1 versus approximately −345 mm table
-      convention.
+- [x] Organizer documentation discrepancy: the standard fingers contact the
+      table near UF0 Z = −335 mm; the former −345 mm value was for another
+      group's shorter fingers.
+- [ ] Does the installed cell actually use the standard fingers and the pinned
+      client's fingertip action/report convention? Verify active UTOOL1/UF0 at a
+      high, non-contact pose.
 - [ ] What UTOOL1, UF0, payload, and controller program are active for the
       approved event interface?
 - [ ] Where is the custom aluminium hook-finger CAD, including notch dimensions

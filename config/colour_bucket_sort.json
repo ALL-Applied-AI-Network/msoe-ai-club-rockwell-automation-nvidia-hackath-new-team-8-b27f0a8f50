@@ -4,7 +4,7 @@
     "cube_edge_m": 0.01,
     "cube_size_note": "ACTIVE ASSUMPTION: use 10 mm cubes for simulation and hardware until the physical parts are measured; do not silently switch to the supplied 16 mm asset.",
     "tcp_beyond_fingertips_mm": 0.0,
-    "tcp_conflict_note": "The checked-in FANUC client and mock define UTOOL1 at the fingertips (0 mm beyond them), while the live event site has also stated 10 mm beyond the fingertips. This configuration deliberately uses the repository/mock convention. Confirm the live controller before a physical descent and change this one field only after validation."
+    "tcp_conflict_note": "The pinned client/mock labels its UTOOL1 action point as the fingertip, which is why this configuration uses a 0 mm extra offset. Separately, an organizer clarified on 2026-10-26 that the standard fingers contact the table near UF0 z=-335 mm and that the earlier -345 mm FAQ value was for another group's shorter fingers and was reverted. These facts are consistent but do not prove the live controller setup; confirm the installed standard fingers and active UTOOL1/UF0 before physical descent."
   },
   "task": {
     "colour_order": [

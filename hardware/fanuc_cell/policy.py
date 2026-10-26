@@ -4,12 +4,13 @@ This module is the hardware adapter for the backend-neutral task contract in
 ``sorting_core``. It deliberately uses the official HTTPS ``Policy.act``
 interface; it does not connect to FANUC, ROS, a PLC, or a safety controller.
 
-The checked-in default is a dry run. It may move to a hover pose, but it will
-not descend toward a cube unless ``ROCKWELL_ENABLE_PHYSICAL_DESCENT=1`` was in
-the policy process's environment at rollout reset. Set that only after the
-operator has verified the scene, the 10 mm cube assumption, and that the live
-controller's UTOOL1 really is the fingertip. Holding a TCP target is not an
-emergency stop; the cell operator/controller remains responsible for stopping.
+The checked-in default is a hold-only diagnostic: it requires a fresh measured
+TCP and gripper state and repeats exactly one measured row without running
+perception or planning. Any planned movement requires
+``ROCKWELL_ENABLE_PHYSICAL_MOTION=1`` at rollout reset. Descent additionally
+requires ``ROCKWELL_ENABLE_PHYSICAL_DESCENT=1``. A repeated TCP target can still
+cause small controller corrections and is not an emergency stop; the cell
+operator/controller remains responsible for stopping.
 """
 
 from __future__ import annotations
@@ -103,12 +104,18 @@ class Policy:
     DEPTH: list[str] = []  # depth is not recorded; start with reproducible RGB only
     DT = 0.1
 
+    MOTION_INTERLOCK_ENV = "ROCKWELL_ENABLE_PHYSICAL_MOTION"
     DESCENT_INTERLOCK_ENV = "ROCKWELL_ENABLE_PHYSICAL_DESCENT"
     MAX_ACTIONS_PER_CALL = 8
     MAX_MOTION_CALLS_PER_PHASE = 20
     MAX_NO_PROGRESS_CALLS = 4
     MIN_MEASURED_PROGRESS_MM = 0.5
     MIN_MEASURED_ANGULAR_PROGRESS_DEG = 0.5
+    GRIPPER_FEEDBACK_TOLERANCE = 0.1
+    _OPEN_FEEDBACK_PHASES = frozenset(
+        {"approach_pick", "descend_pick", "settle", "retreat"}
+    )
+    _CLOSED_FEEDBACK_PHASES = frozenset({"dwell", "lift", "carry", "lower"})
 
     def __init__(self, checkpoint: str | None = None):
         self.config = load_config()
@@ -199,8 +206,11 @@ class Policy:
             backend="sidclab_https_tcp",
             cube_edge_mm=self.config.cube_edge_m * 1000.0,
             tcp_beyond_fingertips_mm=self.config.frames.tcp_beyond_fingertips_mm,
+            motion_interlock_env=self.MOTION_INTERLOCK_ENV,
             descent_interlock_env=self.DESCENT_INTERLOCK_ENV,
-            hover_motion_can_run_with_descent_interlock_closed=True,
+            default_mode="hold-only diagnostic; no perception or planning",
+            hover_requires_motion_interlock=True,
+            descent_requires_both_interlocks=True,
             minimum_hardware_centre_clearance_mm=(
                 self._minimum_hardware_clearance_m * 1000.0
             ),
@@ -223,16 +233,23 @@ class Policy:
         self._last_observation_time_s: float | None = None
         self._clock_offset_estimate_s: float | None = None
         self._last_valid_tcp: tuple[float, ...] | None = None
+        self._last_valid_gripper_feedback: float | None = None
+        self._last_commanded_gripper: float | None = None
         self._last_hold_log: str | None = None
         self._scene_number = 0
+        self._motion_enabled = _environment_flag(self.MOTION_INTERLOCK_ENV)
         self._descent_enabled = _environment_flag(self.DESCENT_INTERLOCK_ENV)
         self._emit(
             "rollout_reset",
+            physical_motion_enabled=self._motion_enabled,
             physical_descent_enabled=self._descent_enabled,
             active_assumption="10 mm cubes; UTOOL1 TCP at fingertips (0 mm extra)",
             warning=(
-                "The live site has also stated TCP 10 mm past the fingertips. "
-                "Verify the real UTOOL1 before setting the descent interlock."
+                "The pinned client labels its action point as the fingertip. "
+                "Separately, an organizer confirmed standard-finger table contact "
+                "near UF0 z=-335 mm and said the former -345 mm FAQ value was for "
+                "shorter fingers. Verify the installed fingers and active "
+                "UTOOL1/UF0 before setting the descent interlock."
             ),
         )
 
@@ -250,9 +267,22 @@ class Policy:
         try:
             self._accept_observation_timestamp(obs)
         except (TypeError, ValueError) as exc:
+            if not self._motion_enabled:
+                raise ActionValidationError(
+                    "hold-only diagnostic requires a fresh observation timestamp; "
+                    "no action was constructed"
+                ) from exc
             if self._active_plan is not None:
                 self._block(f"stale or invalid observation during motion: {exc}")
             return self._hold_action(obs, f"observation rejected: {exc}")
+
+        if not self._motion_enabled:
+            return self._strict_diagnostic_hold_action(
+                obs,
+                "physical motion interlock is closed; repeating one fresh "
+                "measured TCP/gripper row without perception or planning. Set "
+                f"{self.MOTION_INTERLOCK_ENV}=1 only for a supervised motion session",
+            )
 
         # Record a valid measured TCP before perception. Only the official mock
         # may reuse it if the mock omits TCP later; a real malformed/missing TCP
@@ -555,6 +585,14 @@ class Policy:
         if phase.target is None:
             raise PlanningError(f"phase {phase.name} has no TCP target")
         current = np.asarray(self._current_tcp_row(obs), dtype=float)
+        if phase.name in self._OPEN_FEEDBACK_PHASES:
+            self._require_gripper_feedback(
+                obs, self.config.gripper.open_command, phase.name
+            )
+        elif phase.name in self._CLOSED_FEEDBACK_PHASES:
+            self._require_gripper_feedback(
+                obs, self.config.gripper.closed_command, phase.name
+            )
         target = np.asarray(
             base_tip_pose_to_uf0_tcp(phase.target, phase.gripper, self.config),
             dtype=float,
@@ -611,6 +649,7 @@ class Policy:
                 position_error_mm=round(position_error, 2),
                 angle_error_deg=round(angle_error, 2),
             )
+            self._last_commanded_gripper = float(rows[-1, 6])
             return rows.tolist()
 
         if self._phase_dwell_rows_remaining is None:
@@ -637,6 +676,7 @@ class Policy:
             self._reset_phase_watchdog()
             if self._phase_index >= len(self._phases):
                 self._finish_active_plan()
+        self._last_commanded_gripper = float(rows[-1, 6])
         return rows.tolist()
 
     def _finish_active_plan(self) -> None:
@@ -721,13 +761,26 @@ class Policy:
             return None
         if values.shape != (6,) or not np.all(np.isfinite(values)):
             return None
-        gripper = self.config.gripper.open_command
-        try:
-            joints = np.asarray(obs.get("joints"), dtype=float)
-            if joints.shape == (7,) and math.isfinite(float(joints[6])):
-                gripper = float(np.clip(joints[6], 0.0, 1.0))
-        except (TypeError, ValueError):
-            pass
+        feedback = self._current_gripper_feedback(obs)
+        if feedback is not None:
+            self._last_valid_gripper_feedback = feedback
+
+        # A measured gripper value may lag the command that is still keeping a
+        # part clamped.  Reissuing that stale value during a hold could release
+        # the part, so preserve the last action command first.  Before any
+        # command, use current/last valid feedback.  If neither has ever been
+        # valid, refuse the action instead of inventing a pneumatic command.
+        if self._last_commanded_gripper is not None:
+            gripper = self._last_commanded_gripper
+        elif feedback is not None:
+            gripper = feedback
+        elif self._last_valid_gripper_feedback is not None:
+            gripper = self._last_valid_gripper_feedback
+        else:
+            # There is no universally safe invented pneumatic state: opening
+            # can drop a part, while closing can pinch an unknown obstruction.
+            # With neither a command nor feedback, refuse to construct a row.
+            return None
         row = tuple(float(v) for v in values) + (gripper,)
         try:
             checked = validate_tcp_chunk([row], self.DT, self.config)[0]
@@ -735,6 +788,96 @@ class Policy:
             return None
         self._last_valid_tcp = tuple(float(v) for v in checked)
         return self._last_valid_tcp
+
+    @staticmethod
+    def _current_gripper_feedback(obs: dict) -> float | None:
+        """Return fresh bounded gripper feedback without clipping corruption."""
+
+        try:
+            joints = np.asarray(obs.get("joints"), dtype=float)
+        except (TypeError, ValueError):
+            return None
+        if joints.shape != (7,) or not math.isfinite(float(joints[6])):
+            return None
+        feedback = float(joints[6])
+        if not 0.0 <= feedback <= 1.0:
+            return None
+        return feedback
+
+    def _require_gripper_feedback(
+        self, obs: dict, expected: float, phase_name: str
+    ) -> float:
+        """Reject hazardous motion unless this observation confirms gripper state."""
+
+        feedback = self._current_gripper_feedback(obs)
+        if feedback is None:
+            raise PlanningError(
+                f"phase {phase_name} has no valid fresh gripper feedback; "
+                "hazardous motion is blocked"
+            )
+        if abs(feedback - float(expected)) > self.GRIPPER_FEEDBACK_TOLERANCE:
+            state = "closed" if expected >= 0.5 else "open"
+            raise PlanningError(
+                f"phase {phase_name} requires confirmed {state} gripper "
+                f"feedback {expected:.2f}, observed {feedback:.2f}"
+            )
+        return feedback
+
+    def _strict_diagnostic_hold_action(self, obs: dict, reason: str):
+        """Repeat one current measured row without fallback, clipping, or planning.
+
+        The official TCP contract has no no-op. Repeating the measured target is
+        the narrowest available diagnostic action, but it may still cause small
+        controller corrections and therefore is not an emergency stop.
+        """
+
+        try:
+            pose = np.asarray(obs.get("tcp_pose"), dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ActionValidationError(
+                "hold-only diagnostic requires current obs['tcp_pose']; no action sent"
+            ) from exc
+        if pose.shape != (6,) or not np.all(np.isfinite(pose)):
+            raise ActionValidationError(
+                "hold-only diagnostic requires six finite current TCP values; "
+                "no action sent"
+            )
+
+        try:
+            joints = np.asarray(obs.get("joints"), dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ActionValidationError(
+                "hold-only diagnostic requires current gripper feedback; no action sent"
+            ) from exc
+        if joints.shape != (7,) or not math.isfinite(float(joints[6])):
+            raise ActionValidationError(
+                "hold-only diagnostic requires current gripper feedback in "
+                "seven finite joint/gripper values; no action sent"
+            )
+        gripper = float(joints[6])
+        if not 0.0 <= gripper <= 1.0:
+            raise ActionValidationError(
+                "hold-only diagnostic gripper feedback must be in [0, 1]; "
+                "no action sent"
+            )
+
+        row = tuple(float(v) for v in pose) + (gripper,)
+        checked = validate_tcp_chunk([row], self.DT, self.config)
+        exact = tuple(float(v) for v in checked[0])
+        self._last_valid_tcp = exact
+        self._last_valid_gripper_feedback = gripper
+        self._last_commanded_gripper = gripper
+        if reason != self._last_hold_log:
+            self._emit(
+                "holding",
+                reason=reason,
+                diagnostic_hold_only=True,
+                perception_and_planning_ran=False,
+                hold_is_emergency_stop=False,
+                operator_controller_remain_responsible_for_stop=True,
+            )
+            self._last_hold_log = reason
+        return checked.tolist()
 
     def _current_tcp_row(self, obs: dict) -> tuple[float, ...]:
         measured = self._measured_tcp_row(obs)
@@ -754,6 +897,7 @@ class Policy:
     def _hold_action(self, obs: dict, reason: str):
         row = self._current_tcp_row(obs)
         checked = validate_tcp_chunk([row], self.DT, self.config)
+        self._last_commanded_gripper = float(checked[-1, 6])
         if reason != self._last_hold_log:
             self._emit(
                 "holding",

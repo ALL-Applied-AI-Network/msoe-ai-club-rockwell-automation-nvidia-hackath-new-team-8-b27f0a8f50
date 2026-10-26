@@ -91,8 +91,14 @@ def _advance_to_gate(policy: Policy, obs: dict) -> dict:
 
 
 class FanucPolicyTests(unittest.TestCase):
-    def test_official_contract_and_random_mock_image_fail_closed(self):
-        with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "0"}):
+    def test_default_hold_only_repeats_current_measurement_without_perception(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "0",
+                Policy.DESCENT_INTERLOCK_ENV: "1",
+            },
+        ):
             policy = Policy()
         self.assertEqual(policy.CAMERAS, ["table"])
         self.assertEqual(policy.IMAGE_SIZE, (1920, 1080))
@@ -101,14 +107,65 @@ class FanucPolicyTests(unittest.TestCase):
         self.assertEqual(policy.DEPTH, [])
         self.assertEqual(policy.IMAGE_FORMAT, "png")
 
+        obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
+        obs["joints"][-1] = 0.65
+        policy._detect_scene_views = mock.Mock(
+            side_effect=AssertionError("diagnostic mode must not run perception")
+        )
+        chunk = np.asarray(policy.act(obs), dtype=float)
+        self.assertEqual(chunk.shape, (1, 7))
+        np.testing.assert_allclose(chunk[0, :6], obs["tcp_pose"])
+        self.assertAlmostEqual(chunk[0, 6], 0.65)
+        policy._detect_scene_views.assert_not_called()
+        self.assertIsNone(policy._active_plan)
+        self.assertIsNone(policy._blocked_reason)
+
+    def test_motion_enabled_official_mock_image_fails_closed(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "0",
+            },
+        ):
+            policy = Policy()
+
         chunk = np.asarray(policy.act(_observation()), dtype=float)
         self.assertEqual(chunk.shape, (1, 7))
         self.assertAlmostEqual(chunk[0, 6], 0.0)
         self.assertIsNone(policy._active_plan)
         self.assertIsNone(policy._blocked_reason)
 
+    def test_hold_only_rejects_missing_or_out_of_range_gripper_feedback(self):
+        with mock.patch.dict(os.environ, {Policy.MOTION_INTERLOCK_ENV: "0"}):
+            policy = Policy()
+        obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
+        obs["joints"] = None
+        with self.assertRaisesRegex(ActionValidationError, "gripper feedback"):
+            policy.act(obs)
+
+        policy.reset()
+        obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
+        obs["joints"][-1] = 1.01
+        with self.assertRaisesRegex(ActionValidationError, "must be in"):
+            policy.act(obs)
+
+    def test_hold_only_rejects_repeated_timestamp_without_stale_hold(self):
+        with mock.patch.dict(os.environ, {Policy.MOTION_INTERLOCK_ENV: "0"}):
+            policy = Policy()
+        obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
+        policy.act(obs)
+        with self.assertRaisesRegex(ActionValidationError, "fresh observation"):
+            policy.act(obs)
+
     def test_missing_real_tcp_never_invents_a_scan_move(self):
-        with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "0"}):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "0",
+            },
+        ):
             policy = Policy()
         with self.assertRaisesRegex(
             ActionValidationError, "refusing to.*invent a scan move"
@@ -177,7 +234,13 @@ class FanucPolicyTests(unittest.TestCase):
                 Policy()
 
     def test_stalled_phase_latches_after_bounded_no_progress_calls(self):
-        with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "1"}):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "1",
+            },
+        ):
             policy = Policy()
         policy._detect_scene_views = lambda obs: _views(_scene(obs))
         obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
@@ -216,7 +279,13 @@ class FanucPolicyTests(unittest.TestCase):
         self.assertLess(policy._phase_no_progress_calls, policy.MAX_NO_PROGRESS_CALLS)
 
     def test_equivalent_tool_down_angle_does_not_command_a_360_degree_jump(self):
-        with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "0"}):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "0",
+            },
+        ):
             policy = Policy()
         obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
         obs["tcp_pose"] = list(obs["tcp_pose"])
@@ -313,7 +382,13 @@ class FanucPolicyTests(unittest.TestCase):
             policy._verify_post_place(views.unplaced)
 
     def test_invalid_real_tcp_during_motion_blocks_without_forward_chunk(self):
-        with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "1"}):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "1",
+            },
+        ):
             policy = Policy()
         policy._detect_scene_views = lambda obs: _views(_scene(obs))
         obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
@@ -327,8 +402,147 @@ class FanucPolicyTests(unittest.TestCase):
             policy.act(obs)
         self.assertIsNotNone(policy._blocked_reason)
 
-    def test_default_interlock_stops_at_freshly_revalidated_hover(self):
+    def test_hold_without_any_gripper_state_refuses_to_invent_a_command(self):
         with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "0"}):
+            policy = Policy()
+        obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
+        obs["joints"] = np.zeros(6, dtype=float)
+
+        with self.assertRaisesRegex(ActionValidationError, "no valid current"):
+            policy._hold_action(obs, "test hold")
+
+    def test_hold_preserves_last_valid_gripper_feedback(self):
+        with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "0"}):
+            policy = Policy()
+        obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
+        obs["joints"][-1] = 0.65
+        measured = policy._measured_tcp_row(obs)
+        self.assertIsNotNone(measured)
+        self.assertAlmostEqual(measured[-1], 0.65)
+
+        obs["joints"] = None
+        measured_without_feedback = policy._measured_tcp_row(obs)
+
+        self.assertIsNotNone(measured_without_feedback)
+        self.assertAlmostEqual(measured_without_feedback[-1], 0.65)
+
+    def test_hold_preserves_close_command_over_lagging_open_feedback(self):
+        with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "0"}):
+            policy = Policy()
+        x, y = policy.config.task.cube_spawns_base_xy_yaw_deg["yellow"][:2]
+        close = MotionPhase(
+            "close",
+            TipPoseBase(
+                (
+                    x,
+                    y,
+                    policy.config.pick_tip_base_z_m
+                    + policy.config.task.approach_clearance_m,
+                ),
+                0.0,
+            ),
+            policy.config.gripper.closed_command,
+            dwell_s=1.0,
+        )
+        obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
+        obs["joints"][-1] = policy.config.gripper.open_command
+        close_chunk = np.asarray(policy._execute_phase(obs, close), dtype=float)
+        self.assertEqual(close_chunk[-1, 6], policy.config.gripper.closed_command)
+
+        # Feedback can lag a pneumatic command.  A fault hold must not turn that
+        # stale open reading back into an open command.
+        obs["joints"][-1] = policy.config.gripper.open_command
+        held = np.asarray(policy._hold_action(obs, "fault after close"), dtype=float)
+
+        self.assertEqual(held[-1, 6], policy.config.gripper.closed_command)
+
+        # Preservation is not a permanent latch: the semantic release phase
+        # can still issue and remember an intentional open command.
+        policy._phase_dwell_rows_remaining = None
+        release = MotionPhase(
+            "release",
+            close.target,
+            policy.config.gripper.open_command,
+            dwell_s=1.0,
+        )
+        release_chunk = np.asarray(policy._execute_phase(obs, release), dtype=float)
+        self.assertEqual(release_chunk[-1, 6], policy.config.gripper.open_command)
+        released_hold = np.asarray(
+            policy._hold_action(obs, "fault after release"), dtype=float
+        )
+        self.assertEqual(released_hold[-1, 6], policy.config.gripper.open_command)
+
+        # A new rollout must adopt its own measured state, not a command from
+        # the preceding trial.
+        policy.reset()
+        after_reset = np.asarray(
+            policy._hold_action(obs, "new rollout hold"), dtype=float
+        )
+        self.assertEqual(after_reset[-1, 6], policy.config.gripper.open_command)
+
+    def test_hazardous_phases_require_fresh_gripper_confirmation(self):
+        policy = Policy()
+        x, y = policy.config.task.cube_spawns_base_xy_yaw_deg["yellow"][:2]
+        high_target = TipPoseBase(
+            (
+                x,
+                y,
+                policy.config.pick_tip_base_z_m
+                + policy.config.task.approach_clearance_m,
+            ),
+            0.0,
+        )
+        obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
+
+        # A previously requested close is an intent, not proof that the
+        # pneumatic gripper actually closed.  Every object-carrying phase must
+        # inspect the fresh feedback independently.
+        policy._last_commanded_gripper = policy.config.gripper.closed_command
+        obs["joints"][-1] = policy.config.gripper.open_command
+        for phase_name in ("dwell", "lift", "carry", "lower"):
+            with self.subTest(phase=phase_name):
+                phase = MotionPhase(
+                    phase_name,
+                    high_target,
+                    policy.config.gripper.closed_command,
+                )
+                with self.assertRaisesRegex(PlanningError, "confirmed closed"):
+                    policy._execute_phase(obs, phase)
+
+        obs["joints"] = None
+        with self.assertRaisesRegex(PlanningError, "no valid fresh gripper"):
+            policy._execute_phase(
+                obs,
+                MotionPhase(
+                    "lift", high_target, policy.config.gripper.closed_command
+                ),
+            )
+
+        # The reverse transition matters too: every nominally open motion can
+        # pinch an obstruction or drag a part if the fingers are still closed.
+        policy._last_commanded_gripper = policy.config.gripper.open_command
+        obs["joints"] = np.zeros(7, dtype=float)
+        obs["joints"][-1] = policy.config.gripper.closed_command
+        for phase_name in ("approach_pick", "descend_pick", "settle", "retreat"):
+            with self.subTest(phase=phase_name):
+                with self.assertRaisesRegex(PlanningError, "confirmed open"):
+                    policy._execute_phase(
+                        obs,
+                        MotionPhase(
+                            phase_name,
+                            high_target,
+                            policy.config.gripper.open_command,
+                        ),
+                    )
+
+    def test_default_interlock_stops_at_freshly_revalidated_hover(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "0",
+            },
+        ):
             policy = Policy()
         policy._detect_scene_views = lambda obs: _views(_scene(obs))
         obs = _advance_to_gate(policy, _observation(policy._scan_tcp[:6]))
@@ -346,7 +560,13 @@ class FanucPolicyTests(unittest.TestCase):
         self.assertEqual(policy._active_plan.plan_id.count("revalidated"), 1)
 
     def test_enabled_interlock_descends_only_after_reobservation(self):
-        with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "1"}):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "1",
+            },
+        ):
             policy = Policy()
         calls = []
 
@@ -367,7 +587,13 @@ class FanucPolicyTests(unittest.TestCase):
         self.assertIsNone(policy._blocked_reason)
 
     def test_moved_target_latches_hold_and_never_blindly_retries(self):
-        with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "1"}):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "1",
+            },
+        ):
             policy = Policy()
         policy._detect_scene_views = lambda obs: _views(_scene(obs))
         obs = _advance_to_gate(policy, _observation(policy._scan_tcp[:6]))
@@ -388,7 +614,13 @@ class FanucPolicyTests(unittest.TestCase):
         self.assertEqual(policy._phase_index, 1)
 
     def test_staleness_uses_estimated_cell_clock_offset(self):
-        with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "0"}):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "0",
+            },
+        ):
             policy = Policy()
         old_cell_time = time.time() - 1000.0
         policy._detect_scene_views = lambda obs: _views(

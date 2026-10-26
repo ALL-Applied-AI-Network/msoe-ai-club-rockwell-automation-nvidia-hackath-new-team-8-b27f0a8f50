@@ -17,9 +17,12 @@ The simulator and FANUC hardware adapter share
 `config/colour_bucket_sort.json` for the colour order, cube size and starting
 poses, bin centres and dimensions, clearances, and frame assumptions. The
 active choice is a **10 mm cube** and **UTOOL1/TCP at the fingertips**. The live
-event site has separately described the TCP as 10 mm beyond the fingertips;
-that conflict is unresolved and must be checked with a supervised physical
-  high, non-contact hover test before any real descent. Every run prints the assumption and
+pinned client labels its action point as the fingertip. Separately, an organizer
+clarified on October 26, 2026 that the standard fingers touch the table near UF0
+Z = -335 mm and that the former -345 mm FAQ value was for another group's
+shorter fingers. This resolves the documentation discrepancy, but the installed
+fingers and active controller frames still require a supervised high,
+non-contact check before any real descent. Every run prints that evidence and
 records it, the config hash, and the shared semantic phase sequence in
 `execution_report.json`.
 

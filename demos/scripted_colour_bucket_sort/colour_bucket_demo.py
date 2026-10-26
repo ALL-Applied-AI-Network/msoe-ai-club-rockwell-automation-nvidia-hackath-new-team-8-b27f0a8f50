@@ -423,7 +423,8 @@ def main() -> None:
         flush=True,
     )
     print(
-        f"[bucket-demo] UNRESOLVED TCP CONFLICT: {TASK_CONFIG.frames.tcp_conflict_note}",
+        "[bucket-demo] TCP FAQ DISCREPANCY RESOLVED; live installed frame "
+        f"still unverified: {TASK_CONFIG.frames.tcp_conflict_note}",
         flush=True,
     )
     run = Path(args.run).resolve()
@@ -1454,7 +1455,11 @@ def main() -> None:
                 "tcp_beyond_fingertips_mm": (
                     TASK_CONFIG.frames.tcp_beyond_fingertips_mm
                 ),
-                "tcp_conflict_unresolved": True,
+                # Retain the old field for report-reader compatibility while
+                # recording the two distinct facts explicitly.
+                "tcp_conflict_unresolved": False,
+                "tcp_faq_discrepancy_resolved": True,
+                "live_hardware_frame_verified": False,
                 "tcp_conflict_note": TASK_CONFIG.frames.tcp_conflict_note,
                 "semantic_phase_names": list(SHARED_SEMANTIC_PHASE_NAMES),
                 "isaac_adapter_extension_phases": ["home"],

@@ -19,12 +19,13 @@ this repository pins the client revision recorded in
   motion, grasp success, bin placement, or emergency stopping.
 - This project has not yet been run on the physical FANUC cell.
 
-The shared configuration currently assumes **10 mm cubes** and defines the
-UTOOL1/TCP at the **fingertips (0 mm extra offset)**. The live event site has
-also said that the TCP is 10 mm beyond the fingertips. That unresolved 10 mm
-frame difference can turn a safe height into a table contact. Keep the current
-choice consistent in simulation and hardware, and verify it with the cell
-operator before enabling any physical descent.
+The shared configuration currently assumes **10 mm cubes** and follows the
+pinned executable client's definition of UTOOL1/TCP at the **fingertips (0 mm
+extra offset)**. Separately, an organizer clarified on October 26, 2026 that
+the standard fingers touch the table near UF0 Z = -335 mm; the former -345 mm
+FAQ value was for another group's shorter fingers and was reverted. Those facts
+are consistent but do not prove the live controller setup. Verify the installed
+fingers and active UTOOL1/UF0 with the cell operator before physical descent.
 
 The raw detector also uses a provisional calibrated pickup region of
 `x=0.30..0.55 m` and `y=-0.30..0.30 m` in robot-base coordinates only when
@@ -43,14 +44,23 @@ Install [`uv`](https://docs.astral.sh/uv/), then run from the repository root:
 ```bash
 cd hardware/fanuc_cell
 uv sync
-uv run run.py --mock
+ROCKWELL_ENABLE_PHYSICAL_MOTION=1 uv run run.py --mock
 ```
 
-The default policy is fail-closed. `ROCKWELL_ENABLE_PHYSICAL_DESCENT` is unset,
-so it will not descend toward a detected cube. Depending on the observation it
-may still command a hover pose; "descent disabled" does not mean "no motion."
-The policy's hold command is also **not an emergency stop**. Only the cell
-operator/controller provides the supported stop behavior.
+The mock starts without a measured TCP, so its protocol test explicitly opens
+the motion gate. This does **not** authorize a physical run. With the motion
+gate unset, the policy performs only a stationary hold-command diagnostic: it
+requires a fresh measured TCP and gripper value, skips perception and planning,
+and returns that one measured row. The official interface has no true no-op, so
+even this repeated row can make a small correction toward an earlier measured
+pose. Do not jog the robot while it is running, and do not treat it as a
+read-only mode, emergency stop, or safety system.
+
+`ROCKWELL_ENABLE_PHYSICAL_MOTION=1` enables the complete planned pre-descent
+route, not merely one bounded hover. The project does not yet implement the
+required full-arm/finger/held-object swept-path collision validator. Therefore
+keep this variable unset on physical hardware until that validator, the cell
+geometry, and the supervised preflight gates are complete.
 
 Never add `.request.json` to Git, print it, paste it into chat, or upload it.
 The official `--submit` command creates it with the secret required for that
@@ -83,27 +93,32 @@ uv run run.py --status
 
 Book the approved 30-minute slot using the request id printed by `--submit`.
 Coordinate the first live connection and every motion check with the assigned
-cell operator. During the approved validation session, leave the descent
-interlock unset and first confirm the table/camera calibration, object layout,
-safe hover, working envelope, gripper, and the live UTOOL1/TCP convention. Even
-this hover run can move the arm.
+cell operator. First request an organizer-supported observation-only/no-op
+procedure; the checked-in default can only repeat a measured command row. Keep
+both motion variables unset until the operator has confirmed the observation
+contract, table/camera calibration, object layout, gripper feedback, installed
+fingers, and live UTOOL1/UF0.
 
-Only after that supervised frame-and-hover verification may the same approved
-client be started with physical descent enabled:
+Only after full clearance validation and the supervised frame-and-motion gates
+may the same approved client eventually be started with physical descent
+enabled. Both explicit authorizations are required:
 
 ```bash
-ROCKWELL_ENABLE_PHYSICAL_DESCENT=1 uv run run.py
+ROCKWELL_ENABLE_PHYSICAL_MOTION=1 \
+ROCKWELL_ENABLE_PHYSICAL_DESCENT=1 \
+uv run run.py
 ```
 
-Setting this environment variable is a deliberate authorization gate, not a
+Setting these environment variables is a deliberate authorization gate, not a
 safety system. An operator must remain responsible for the controller's stop
-and recovery procedure. Do not set the variable on the basis of a passing mock
-or Isaac run.
+and recovery procedure. Do not set either variable on the basis of a passing
+mock or Isaac run.
 
 The official runner creates and consumes the private request credential in
-this directory. Use `uv run run.py --status` to inspect the request and plain
-`uv run run.py` (with or without the descent gate as appropriate) only during
-the approved supervised slot.
+this directory. Use `uv run run.py --status` to inspect the request. Plain
+`uv run run.py` runs the stationary hold-command diagnostic; an eventual
+approved sorting run requires both motion variables shown above and may run
+only during the supervised slot after every prerequisite is satisfied.
 
 ## What stays shared with Isaac
 

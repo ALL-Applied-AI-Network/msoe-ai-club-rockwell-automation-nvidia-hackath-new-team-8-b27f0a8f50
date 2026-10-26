@@ -28,10 +28,13 @@ The official mock checks the client contract and action limits; it does **not**
 prove that perception, motion, grasping, collision avoidance, or the physical
 sort works. No physical run has been completed by this project yet.
 
-Current shared assumption: **10 mm cubes and UTOOL1/TCP at the fingertips**.
-The live event site has also described the TCP as 10 mm beyond the fingertips,
-so that frame must be confirmed during a supervised hover check before physical
-descent is enabled. Do not treat a policy-issued hold as an emergency stop.
+Current shared assumption: **10 mm cubes and UTOOL1/TCP at the fingertips**,
+following the pinned executable client. Separately, an organizer clarified on
+October 26, 2026 that the standard fingers touch the table near UF0 Z = -335 mm;
+the former -345 mm FAQ value came from another group's shorter fingers and was
+reverted. The two facts are consistent, but the installed fingers and active
+UTOOL1/UF0 still require a supervised high check before physical descent. Do
+not treat a policy-issued hold as an emergency stop.
 
 ## Key dates
 

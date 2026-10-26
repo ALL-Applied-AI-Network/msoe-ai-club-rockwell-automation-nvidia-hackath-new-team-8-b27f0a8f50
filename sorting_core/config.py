@@ -230,9 +230,7 @@ class SortConfig:
         if not 0 <= self.frames.tcp_beyond_fingertips_mm < 100:
             raise ConfigurationError("tcp_beyond_fingertips_mm is implausible")
         if not self.frames.tcp_conflict_note.strip():
-            raise ConfigurationError("the TCP convention conflict must remain documented")
-        if "10 mm" not in self.frames.tcp_conflict_note:
-            raise ConfigurationError("tcp_conflict_note must mention the live-site 10 mm value")
+            raise ConfigurationError("the TCP convention evidence must remain documented")
         if not self.bin.floor_m < self.bin.height_m:
             raise ConfigurationError("bin floor must be below the rim")
         if not self.cube_edge_m < self.bin.pocket_m:
