@@ -676,16 +676,18 @@ class VisionTests(unittest.TestCase):
 
         def project(uv, z):
             return np.array(
-                [0.40 + (uv[0] - 13) * 0.00075, (uv[1] - 13) * 0.00075, z]
+                [0.40 + (uv[0] - 59) * 0.00075, (uv[1] - 59) * 0.00075, z]
             )
 
         yaws = []
         for frame_index, rows in enumerate(masks):
-            image = np.full((27, 27, 3), 235, dtype=np.uint8)
-            for row_index, row in enumerate(rows, start=5):
+            # Keep the component below the configured maximum *image area*
+            # fraction, as it is in the native 1920x1080 source frames.
+            image = np.full((120, 120, 3), 235, dtype=np.uint8)
+            for row_index, row in enumerate(rows, start=51):
                 for column_index, value in enumerate(row):
                     if value == "#":
-                        image[row_index, column_index] = (255, 255, 0)
+                        image[row_index, column_index + 46] = (255, 255, 0)
             scene = detect_coloured_cubes(
                 image,
                 project,
