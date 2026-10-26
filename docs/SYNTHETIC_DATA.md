@@ -30,7 +30,8 @@ This repository now has a separate, host-testable data contract:
    Compute distorted amodal cuboid boxes from distorted projected 3D vertices,
    not by distorting the four corners of an already axis-aligned box.
 6. Put simulator poses, masks, and other truth under `evaluator_only`; they are
-   labels/evaluation data, never runtime policy inputs or pose repairs.
+   labels/evaluation data, never runtime policy inputs, pose repairs, or
+   control-flow gates in camera/training modes.
 7. Split datasets by complete episode/layout/arrival sequence. Adjacent video
    frames must not be scattered between training and evaluation.
 
@@ -82,12 +83,19 @@ from sorting_core.synthetic_data import (
 )
 
 calibration = load_capture_calibration(spec)
-result = augment_sensor_rgb(raw_rgb, manifest, camera_calibration=calibration)
+result = augment_sensor_rgb(
+    raw_rgb,
+    manifest,
+    frame_index=frame_number,
+    camera_calibration=calibration,
+)
 derived_rgb = result.image_rgb
 ```
 
 `raw_rgb` must be the native 1920×1080 `uint8` RGB render. Save it first. The
 result remains 1920×1080 RGB and reports every applied sensor parameter.
+Gaussian noise uses a recorded deterministic per-frame seed derived from the
+episode seed and `frame_index`; adjacent frames do not repeat one noise field.
 Instance masks should use `apply_radial_distortion(..., nearest=True)`; point
 labels should use `distort_points_uv(...)`.
 
@@ -131,7 +139,11 @@ placement, failed lift, drop, wrong bin, unintended contact, cancellation,
 retry, and intervention. The default scripted demo's execution report is not a
 substitute because its decisions come from simulator truth; the opt-in
 camera-perception mode removes that particular decision leak but does not add
-the missing episode-level annotations.
+the missing episode-level annotations or camera-based post-place verification.
+The Isaac demo therefore executes the remaining planned actions regardless of
+evaluator-truth success/failure; truth scores `task_complete` but cannot control
+the sequence or process exit status. `runtime_sequence_complete` is reported
+separately and is not an independent placement-success measurement.
 
 ## What the provisional ranges do and do not mean
 
@@ -142,7 +154,7 @@ The checked-in ranges cover:
 - small camera pose and focal perturbations;
 - exposure, white balance, gamma, noise, blur, vignette, and compression;
 - independent cube position/yaw perturbations; and
-- cube mass, friction, and restitution.
+- cube mass, physically ordered static/dynamic friction, and restitution.
 
 Every range is marked `provisional_unmeasured`. The values are conservative
 engineering starting points only. Broad randomization can reduce accuracy or
@@ -178,16 +190,29 @@ not falsely described as an Isaac camera intrinsic.
 The following work remains before calling the images a complete perception
 training dataset:
 
-1. independently materialize bin materials too if individual-bin appearance
+1. vary object count and create deliberate clutter, touching/overlap,
+   occlusion, blocked approaches, and arrival/motion sequences; the current
+   episode always contains exactly three cubes and only perturbs each cube's
+   XY/yaw within a small range;
+2. independently materialize bin materials too if individual-bin appearance
    variation becomes useful; task cubes are already materialized per instance;
-2. add semantic/instance render passes, measured visibility/occlusion,
+3. add semantic/instance render passes, measured visibility/occlusion,
    instance masks and—only where the selected model needs them—depth/normals;
-3. validate randomized layouts with complete swept-volume collision checks,
+4. validate randomized layouts with complete swept-volume collision checks,
    not only separation, IK and physical execution gates;
-4. model motion blur, rolling shutter, auto-exposure and the measured camera
-   response instead of generic display-RGB approximations; and
-5. replace every provisional range using physical samples/measurements and
-   validate held-out real-camera performance.
+5. model motion blur, rolling shutter, auto-exposure and the measured camera
+   response instead of generic display-RGB approximations;
+6. add a deployable camera-based post-place outcome check rather than using
+   simulator-truth placement scores;
+7. replace every provisional range using physical samples/measurements and
+   validate held-out real-camera performance;
+8. decouple capture/label writing from policy success (or label failed decision
+   frames), because the current training run aborts before dataset frames when
+   randomized appearance defeats the HSV policy and therefore undersamples the
+   hardest conditions; and
+9. record the clean project commit, Isaac/renderer build and settings, GPU, and
+   driver in each episode manifest; current config/calibration/readback hashes
+   do not fully identify the generator runtime.
 
 Path-traced imagery may improve shadows and reflections, but it does not repair
 wrong geometry, calibration, time synchronization, physics, or labels. Render

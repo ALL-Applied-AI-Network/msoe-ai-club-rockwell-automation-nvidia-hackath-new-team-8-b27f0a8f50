@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from itertools import combinations
 import math
+from typing import Collection, Mapping
 
 from .config import SortConfig
 from .contracts import (
@@ -18,6 +19,83 @@ from .contracts import (
 
 class PlanningError(ValueError):
     """Raised when camera observations are not unambiguous enough to execute."""
+
+
+def square_yaw_delta_degrees(first_rad: float, second_rad: float) -> float:
+    """Return the smallest square-equivalent yaw separation in degrees."""
+
+    change = abs(math.degrees(float(first_rad) - float(second_rad))) % 90.0
+    return min(change, 90.0 - change)
+
+
+def validate_reobserved_scene(
+    scene: SceneDetections,
+    references: Mapping[str, CubeDetection],
+    completed_colours: Collection[str],
+    config: SortConfig,
+    *,
+    maximum_motion_m: float,
+    maximum_yaw_motion_deg: float,
+) -> dict[str, CubeDetection]:
+    """Validate every remaining target against one initial camera observation."""
+
+    if maximum_motion_m < 0.0 or not math.isfinite(maximum_motion_m):
+        raise PlanningError("maximum target motion must be finite and non-negative")
+    if maximum_yaw_motion_deg < 0.0 or not math.isfinite(maximum_yaw_motion_deg):
+        raise PlanningError("maximum yaw motion must be finite and non-negative")
+    known = set(config.task.colour_order)
+    completed = set(completed_colours)
+    if not completed <= known:
+        raise PlanningError("completed colours contain an unknown task colour")
+    if set(references) != known:
+        raise PlanningError("reference detections must contain every configured colour")
+
+    grouped: dict[str, list[CubeDetection]] = {colour: [] for colour in known}
+    for cube in scene.cubes:
+        if cube.colour not in known:
+            raise PlanningError(f"unknown cube colour: {cube.colour}")
+        grouped[cube.colour].append(cube)
+
+    for colour in completed:
+        if grouped[colour]:
+            raise PlanningError(
+                f"completed {colour} reappeared outside its bin; no automatic retry"
+            )
+
+    selected: dict[str, CubeDetection] = {}
+    for colour in config.task.colour_order:
+        if colour in completed:
+            continue
+        count = len(grouped[colour])
+        if count != 1:
+            label = "missing" if count == 0 else f"ambiguous ({count} detections)"
+            raise PlanningError(f"{colour} target is {label}")
+        current = grouped[colour][0]
+        if current.confidence < config.vision.minimum_detection_confidence:
+            raise PlanningError(
+                f"low-confidence {colour} detection "
+                f"({current.confidence:.2f} < "
+                f"{config.vision.minimum_detection_confidence:.2f})"
+            )
+        reference = references[colour]
+        displacement = math.dist(
+            current.position_base_m[:2], reference.position_base_m[:2]
+        )
+        yaw_change = square_yaw_delta_degrees(
+            current.yaw_rad, reference.yaw_rad
+        )
+        if displacement > maximum_motion_m:
+            raise PlanningError(
+                f"{colour} moved {displacement * 1000.0:.1f} mm "
+                f"(limit {maximum_motion_m * 1000.0:.1f} mm)"
+            )
+        if yaw_change > maximum_yaw_motion_deg:
+            raise PlanningError(
+                f"{colour} yaw changed {yaw_change:.1f} deg "
+                f"(limit {maximum_yaw_motion_deg:.1f} deg)"
+            )
+        selected[colour] = current
+    return selected
 
 
 def build_colour_sort_plans(

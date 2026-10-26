@@ -14,7 +14,6 @@ emergency stop; the cell operator/controller remains responsible for stopping.
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
 import json
 import math
@@ -55,6 +54,7 @@ from sorting_core import (  # noqa: E402
     load_config,
     semantic_phase_plan,
     validate_tcp_chunk,
+    validate_reobserved_scene,
 )
 
 
@@ -485,52 +485,14 @@ class Policy:
     def _validate_scene_against_reference(
         self, scene: SceneDetections
     ) -> dict[str, CubeDetection]:
-        grouped: defaultdict[str, list[CubeDetection]] = defaultdict(list)
-        for cube in scene.cubes:
-            grouped[cube.colour].append(cube)
-
-        for colour in self._completed_colours:
-            if grouped[colour]:
-                raise PlanningError(
-                    f"completed {colour} reappeared outside its bin; no automatic retry"
-                )
-
-        expected = [
-            colour
-            for colour in self.config.task.colour_order
-            if colour not in self._completed_colours
-        ]
-        selected: dict[str, CubeDetection] = {}
-        for colour in expected:
-            count = len(grouped[colour])
-            if count != 1:
-                label = "missing" if count == 0 else f"ambiguous ({count} detections)"
-                raise PlanningError(f"{colour} target is {label}")
-            current = grouped[colour][0]
-            reference = self._reference_detections[colour]
-            displacement = math.dist(
-                current.position_base_m[:2], reference.position_base_m[:2]
-            )
-            yaw_change = abs(
-                _shortest_angle_degrees(
-                    math.degrees(current.yaw_rad),
-                    math.degrees(reference.yaw_rad),
-                )
-            )
-            # Square yaw is equivalent modulo 90 degrees.
-            yaw_change = min(yaw_change % 90.0, 90.0 - (yaw_change % 90.0))
-            if displacement > self._maximum_motion_m:
-                raise PlanningError(
-                    f"{colour} moved {displacement * 1000.0:.1f} mm "
-                    f"(limit {self._maximum_motion_m * 1000.0:.1f} mm)"
-                )
-            if yaw_change > self._maximum_yaw_motion_deg:
-                raise PlanningError(
-                    f"{colour} yaw changed {yaw_change:.1f} deg "
-                    f"(limit {self._maximum_yaw_motion_deg:.1f} deg)"
-                )
-            selected[colour] = current
-
+        selected = validate_reobserved_scene(
+            scene,
+            self._reference_detections,
+            self._completed_colours,
+            self.config,
+            maximum_motion_m=self._maximum_motion_m,
+            maximum_yaw_motion_deg=self._maximum_yaw_motion_deg,
+        )
         selected_values = tuple(selected.values())
         self._validate_hardware_clearance(selected_values)
         return selected

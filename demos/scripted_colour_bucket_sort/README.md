@@ -93,6 +93,17 @@ Both camera modes retain the exact unannotated RGB observations used for the
 initial plan and each pre-descent revalidation under `decision_frames/`. The
 execution report links those files, so a failed or questionable decision can
 be reproduced from pixels instead of inferred from presentation video.
+The pre-descent gate checks count, confidence, XY displacement, and
+square-equivalent yaw for every remaining target, rejects a completed colour
+that reappears, and rebinds post-gate pick motion to the refreshed current
+target rather than descending on the original pose.
+Camera-based post-place verification is not implemented in this Isaac demo.
+Simulator truth scores pickup/placement outcomes for evaluation, but in camera
+and training modes it cannot stop or alter later actions or determine process
+success. `runtime_sequence_complete` reports whether the planned sequence ran;
+truth-derived `task_complete` remains an evaluator score. This keeps truth out
+of runtime control while making the parity gap with the hardware policy
+explicit; do not interpret a truth score as deployable outcome sensing.
 The raw detector retains cube-like colour components across the calibrated
 image. The camera adapter promotes only components inside the configured
 base-frame pickup region to pick targets; the robot's coloured hoses and the

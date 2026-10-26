@@ -20,6 +20,8 @@ from isaac_bridge import (  # noqa: E402
 )
 from demos.scripted_colour_bucket_sort.colour_bucket_demo import (  # noqa: E402
     _clipped_amodal_bbox,
+    _phase_interpolates_spread,
+    _should_stop_after_truth_evaluation,
 )
 from sorting_core import load_config  # noqa: E402
 
@@ -215,6 +217,29 @@ class IsaacCameraSortAdapterTests(unittest.TestCase):
                 capture_time_s=6.0,
                 simulator_truth={"red": (0.44, -0.19, 0.0)},
             )
+
+    def test_evaluator_truth_cannot_stop_camera_or_training_actions(self):
+        self.assertFalse(
+            _should_stop_after_truth_evaluation(
+                camera_perception=True, placement_verified=False
+            )
+        )
+        self.assertTrue(
+            _should_stop_after_truth_evaluation(
+                camera_perception=False, placement_verified=False
+            )
+        )
+        self.assertFalse(
+            _should_stop_after_truth_evaluation(
+                camera_perception=False, placement_verified=True
+            )
+        )
+
+    def test_refreshed_descent_yaw_is_interpolated(self):
+        self.assertTrue(_phase_interpolates_spread("approach_pick"))
+        self.assertTrue(_phase_interpolates_spread("descend_pick"))
+        self.assertTrue(_phase_interpolates_spread("carry"))
+        self.assertFalse(_phase_interpolates_spread("close"))
 
 
 if __name__ == "__main__":

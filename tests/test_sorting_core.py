@@ -31,6 +31,7 @@ from sorting_core import (  # noqa: E402
     semantic_phase_plan,
     uf0_tcp_to_base_tip,
     validate_tcp_chunk,
+    validate_reobserved_scene,
 )
 
 
@@ -269,6 +270,134 @@ class PlanningTests(unittest.TestCase):
         gate = phases[1]
         self.assertTrue(gate.requires_reobservation_before)
         self.assertIsNone(gate.target)
+
+    def test_reobservation_validates_yaw_duplicates_and_every_remaining_target(self):
+        references = {cube.colour: cube for cube in self.good.cubes}
+        for completed in (set(), {"red"}, {"red", "yellow"}):
+            with self.subTest(completed=completed):
+                fresh = SceneDetections(
+                    "fresh-by-phase",
+                    10.0,
+                    tuple(
+                        cube
+                        for cube in self.good.cubes
+                        if cube.colour not in completed
+                    ),
+                )
+                by_phase = validate_reobserved_scene(
+                    fresh,
+                    references,
+                    completed,
+                    self.config,
+                    maximum_motion_m=0.005,
+                    maximum_yaw_motion_deg=15.0,
+                )
+                self.assertEqual(set(by_phase), set(references) - completed)
+
+        remaining = SceneDetections(
+            "fresh",
+            10.0,
+            tuple(cube for cube in self.good.cubes if cube.colour != "red"),
+        )
+        selected = validate_reobserved_scene(
+            remaining,
+            references,
+            {"red"},
+            self.config,
+            maximum_motion_m=0.005,
+            maximum_yaw_motion_deg=15.0,
+        )
+        self.assertEqual(set(selected), {"yellow", "blue"})
+
+        with self.assertRaisesRegex(PlanningError, "completed red reappeared"):
+            validate_reobserved_scene(
+                self.good,
+                references,
+                {"red"},
+                self.config,
+                maximum_motion_m=0.005,
+                maximum_yaw_motion_deg=15.0,
+            )
+
+        with self.assertRaisesRegex(PlanningError, "blue target is missing"):
+            validate_reobserved_scene(
+                SceneDetections("missing", 10.0, (selected["yellow"],)),
+                references,
+                {"red"},
+                self.config,
+                maximum_motion_m=0.005,
+                maximum_yaw_motion_deg=15.0,
+            )
+
+        low_yellow = replace(selected["yellow"], confidence=0.19)
+        with self.assertRaisesRegex(PlanningError, "low-confidence yellow"):
+            validate_reobserved_scene(
+                SceneDetections("low", 10.0, (low_yellow, selected["blue"])),
+                references,
+                {"red"},
+                self.config,
+                maximum_motion_m=0.005,
+                maximum_yaw_motion_deg=15.0,
+            )
+
+        quarter_turn_yellow = replace(
+            selected["yellow"],
+            yaw_rad=selected["yellow"].yaw_rad + math.pi / 2.0,
+        )
+        equivalent = validate_reobserved_scene(
+            SceneDetections(
+                "square-equivalent",
+                10.0,
+                (quarter_turn_yellow, selected["blue"]),
+            ),
+            references,
+            {"red"},
+            self.config,
+            maximum_motion_m=0.005,
+            maximum_yaw_motion_deg=15.0,
+        )
+        self.assertEqual(set(equivalent), {"yellow", "blue"})
+
+        yellow = selected["yellow"]
+        rotated = replace(yellow, yaw_rad=yellow.yaw_rad + math.radians(20.0))
+        with self.assertRaisesRegex(PlanningError, "yellow yaw changed"):
+            validate_reobserved_scene(
+                SceneDetections("rotated", 10.0, (rotated, selected["blue"])),
+                references,
+                {"red"},
+                self.config,
+                maximum_motion_m=0.005,
+                maximum_yaw_motion_deg=15.0,
+            )
+
+        moved_blue = replace(
+            selected["blue"],
+            position_base_m=(0.45, 0.19, -0.0001),
+        )
+        with self.assertRaisesRegex(PlanningError, "blue moved"):
+            validate_reobserved_scene(
+                SceneDetections("moved-other", 10.0, (yellow, moved_blue)),
+                references,
+                {"red"},
+                self.config,
+                maximum_motion_m=0.005,
+                maximum_yaw_motion_deg=15.0,
+            )
+
+        duplicate_yellow = replace(yellow, track_id="yellow-duplicate")
+        with self.assertRaisesRegex(PlanningError, "yellow target is ambiguous"):
+            validate_reobserved_scene(
+                SceneDetections(
+                    "duplicate",
+                    10.0,
+                    (yellow, duplicate_yellow, selected["blue"]),
+                ),
+                references,
+                {"red"},
+                self.config,
+                maximum_motion_m=0.005,
+                maximum_yaw_motion_deg=15.0,
+            )
 
     def test_target_outside_radial_reach_is_rejected(self):
         scene = SceneDetections(

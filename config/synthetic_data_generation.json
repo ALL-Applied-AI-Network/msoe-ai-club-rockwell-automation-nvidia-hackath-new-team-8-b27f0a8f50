@@ -293,7 +293,7 @@
     "physics.object_static_friction": {
       "consumer": "isaac_stage",
       "distribution": "uniform",
-      "minimum": 0.75,
+      "minimum": 0.85,
       "maximum": 1.05,
       "unit": "unitless",
       "nominal": 0.90
@@ -302,7 +302,7 @@
       "consumer": "isaac_stage",
       "distribution": "uniform",
       "minimum": 0.65,
-      "maximum": 0.95,
+      "maximum": 0.80,
       "unit": "unitless",
       "nominal": 0.80
     },

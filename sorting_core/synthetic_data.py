@@ -230,6 +230,19 @@ class SyntheticDataSpec:
             if name != spec.name:
                 raise SyntheticDataError(f"parameter key/name mismatch for {name}")
             spec.validate()
+        static_name = "physics.object_static_friction"
+        dynamic_name = "physics.object_dynamic_friction"
+        try:
+            static_friction = self.parameters[static_name]
+            dynamic_friction = self.parameters[dynamic_name]
+        except KeyError as exc:
+            raise SyntheticDataError(
+                "static and dynamic object-friction ranges are both required"
+            ) from exc
+        if dynamic_friction.maximum > static_friction.minimum:
+            raise SyntheticDataError(
+                "dynamic-friction maximum must not exceed static-friction minimum"
+            )
         return self
 
 
@@ -557,6 +570,7 @@ def augment_sensor_rgb(
     image_rgb,
     manifest: RandomizationManifest,
     *,
+    frame_index: int,
     camera_calibration: Mapping[str, Any] | None = None,
 ) -> SensorAugmentationResult:
     """Create a deterministic derived RGB image; never overwrite the raw PNG.
@@ -568,6 +582,18 @@ def augment_sensor_rgb(
 
     import cv2
     import numpy as np
+
+    if isinstance(frame_index, bool) or not isinstance(frame_index, int):
+        raise SyntheticDataError("frame_index must be a non-negative integer")
+    if frame_index < 0:
+        raise SyntheticDataError("frame_index must be a non-negative integer")
+    frame_seed_digest = hashlib.sha256(
+        (
+            "rockwell-sensor-noise-frame-v1:"
+            f"{manifest.sensor_noise_seed}:{frame_index}"
+        ).encode("utf-8")
+    ).digest()
+    frame_noise_seed = int.from_bytes(frame_seed_digest[:8], "big", signed=False)
 
     image = np.asarray(image_rgb)
     if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
@@ -638,7 +664,7 @@ def augment_sensor_rgb(
 
     noise_std = float(values["sensor.gaussian_noise_std_dn"]) / 255.0
     if noise_std > 0:
-        rng = np.random.default_rng(manifest.sensor_noise_seed)
+        rng = np.random.default_rng(frame_noise_seed)
         floating += rng.normal(0.0, noise_std, size=floating.shape).astype(np.float32)
     working = np.clip(np.rint(floating * 255.0), 0, 255).astype(np.uint8)
 
@@ -668,7 +694,9 @@ def augment_sensor_rgb(
             "input": "raw lossless pinhole RGB",
             "output": "derived sensor-augmented RGB",
             "calibrated_radial_distortion_applied": distortion_applied,
-            "sensor_noise_seed": manifest.sensor_noise_seed,
+            "sensor_noise_base_seed": manifest.sensor_noise_seed,
+            "sensor_noise_frame_seed": frame_noise_seed,
+            "frame_index": frame_index,
             "warning": (
                 "Display-RGB approximation only; physical camera response, motion "
                 "blur, auto-exposure and rolling shutter remain unmeasured."

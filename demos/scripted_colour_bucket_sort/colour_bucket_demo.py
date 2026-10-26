@@ -68,6 +68,8 @@ from sorting_core import (  # noqa: E402
     load_synthetic_data_spec,
     sample_randomization,
     semantic_phase_plan,
+    square_yaw_delta_degrees,
+    validate_reobserved_scene,
 )
 from sorting_core.synthetic_data import distort_points_uv, write_json_atomic  # noqa: E402
 from isaac_bridge import CalibratedPinholeCamera, IsaacCameraSortAdapter  # noqa: E402
@@ -130,6 +132,22 @@ BIN_MATERIALS = {
 VIDEO_RESOLUTION = (1280, 720)
 NATIVE_TABLE_RESOLUTION = (1920, 1080)
 FPS = 30
+CAMERA_REVALIDATION_MAXIMUM_MOTION_M = 0.005
+CAMERA_REVALIDATION_MAXIMUM_YAW_DEG = 15.0
+
+
+def _should_stop_after_truth_evaluation(
+    *, camera_perception: bool, placement_verified: bool
+) -> bool:
+    """Keep evaluator-only truth from controlling camera/training actions."""
+
+    return (not camera_perception) and (not placement_verified)
+
+
+def _phase_interpolates_spread(phase: str) -> bool:
+    """Identify motion phases that must rotate from measured current yaw."""
+
+    return phase in {"approach_pick", "descend_pick", "carry"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -900,6 +918,7 @@ def main() -> None:
                 sensor_result = augment_sensor_rgb(
                     raw_rgb,
                     randomization,
+                    frame_index=frame_number,
                     camera_calibration=capture_calibration,
                 )
                 applied_randomization.update(sensor_result.applied_parameters)
@@ -998,7 +1017,7 @@ def main() -> None:
                 )
             frame_number += 1
 
-        for colour in COLOURS:
+        for colour_index, colour in enumerate(COLOURS):
             start_all = {name: cube_pose(name) for name in COLOURS}
             start = start_all[colour]
             runtime_detection = observed_targets.get(colour)
@@ -1084,9 +1103,16 @@ def main() -> None:
                     "Isaac adapter semantic phases differ from the shared planner: "
                     f"{actual_semantic_names!r} != {SHARED_SEMANTIC_PHASE_NAMES!r}"
                 )
-            for phase, p0, p1, duration, jaw0, jaw1, spread in segments:
+            for segment_index, (
+                phase,
+                p0,
+                p1,
+                duration,
+                jaw0,
+                jaw1,
+                spread,
+            ) in enumerate(segments):
                 if phase == "revalidate_before_descent":
-                    tolerance_m = min(0.002, TASK_CONFIG.cube_edge_m / 4.0)
                     if camera_perception:
                         refreshed_rgb = capture_rgb()
                         refreshed_observation_relpath = save_decision_frame(
@@ -1097,43 +1123,118 @@ def main() -> None:
                             scene_id=f"isaac-camera-{colour}-pre-descent",
                             capture_time_s=float(world.current_time),
                         )
-                        refreshed = [
-                            item
-                            for item in refreshed_scene.cubes
-                            if item.colour == colour
-                        ]
-                        if len(refreshed) != 1:
-                            raise RuntimeError(
-                                f"Fresh camera observation has {len(refreshed)} "
-                                f"{colour} detections; refusing descent"
-                            )
-                        if (
-                            refreshed[0].confidence
-                            < TASK_CONFIG.vision.minimum_detection_confidence
+                        refreshed_by_colour = validate_reobserved_scene(
+                            refreshed_scene,
+                            observed_targets,
+                            COLOURS[:colour_index],
+                            TASK_CONFIG,
+                            maximum_motion_m=(
+                                CAMERA_REVALIDATION_MAXIMUM_MOTION_M
+                            ),
+                            maximum_yaw_motion_deg=(
+                                CAMERA_REVALIDATION_MAXIMUM_YAW_DEG
+                            ),
+                        )
+                        refreshed = refreshed_by_colour[colour]
+                        per_colour_changes = {}
+                        for remaining_colour, current_detection in (
+                            refreshed_by_colour.items()
                         ):
-                            raise RuntimeError(
-                                f"Fresh {colour} camera detection confidence "
-                                f"{refreshed[0].confidence:.2f} is below "
-                                f"{TASK_CONFIG.vision.minimum_detection_confidence:.2f}; "
-                                "refusing descent"
-                            )
-                        reference_xy = np.asarray(
-                            runtime_detection.position_base_m[:2], dtype=float
-                        )
-                        refreshed_xy = np.asarray(
-                            refreshed[0].position_base_m[:2], dtype=float
-                        )
-                        moved_xy_m = float(np.linalg.norm(refreshed_xy - reference_xy))
+                            reference_detection = observed_targets[remaining_colour]
+                            per_colour_changes[remaining_colour] = {
+                                "movement_xy_m": float(
+                                    np.linalg.norm(
+                                        np.asarray(
+                                            current_detection.position_base_m[:2]
+                                        )
+                                        - np.asarray(
+                                            reference_detection.position_base_m[:2]
+                                        )
+                                    )
+                                ),
+                                "square_yaw_change_deg": (
+                                    square_yaw_delta_degrees(
+                                        current_detection.yaw_rad,
+                                        reference_detection.yaw_rad,
+                                    )
+                                ),
+                            }
+                        moved_xy_m = per_colour_changes[colour]["movement_xy_m"]
+                        yaw_change_deg = per_colour_changes[colour][
+                            "square_yaw_change_deg"
+                        ]
+                        tolerance_m = CAMERA_REVALIDATION_MAXIMUM_MOTION_M
+                        yaw_tolerance_deg = CAMERA_REVALIDATION_MAXIMUM_YAW_DEG
                         revalidation_source = "fresh_raw_isaac_table_camera_rgb"
+                        # Rebind every post-gate motion target to the fresh
+                        # target XY/yaw. The first descent begins at the actual
+                        # old hover pose and converges on the refreshed pick;
+                        # simulator truth is never used to repair the plan.
+                        refreshed_theta = refreshed.yaw_rad
+                        refreshed_spread = np.array(
+                            [
+                                -math.sin(refreshed_theta),
+                                math.cos(refreshed_theta),
+                                0.0,
+                            ],
+                            dtype=float,
+                        )
+                        (
+                            measured_rebound_q,
+                            _,
+                            _,
+                            _,
+                            _,
+                        ) = articulation_readback()
+                        # Seed rebound IK and its start pose from articulation
+                        # readback, not the last commanded solver state. This
+                        # bounds the first step even if a drive lagged at hover.
+                        q = np.asarray(measured_rebound_q, dtype=float).copy()
+                        current_rotation, _ = fk.fk(q)
+                        current_spread = (
+                            current_rotation @ np.asarray(C.FINGER_SPREAD_AXIS)
+                        )
+                        if np.dot(current_spread, refreshed_spread) < 0.0:
+                            refreshed_spread = -refreshed_spread
+                        refreshed_destination_spread = np.array(
+                            [0.0, 1.0, 0.0], dtype=float
+                        )
+                        if (
+                            np.dot(
+                                refreshed_spread, refreshed_destination_spread
+                            )
+                            < 0.0
+                        ):
+                            refreshed_destination_spread = (
+                                -refreshed_destination_spread
+                            )
+                        pick["xy"] = list(refreshed.position_base_m[:2])
+                        pick["spread_dir"] = refreshed_spread.tolist()
+                        pick["place_spread_dir"] = (
+                            refreshed_destination_spread.tolist()
+                        )
+                        refreshed_segments = motion_segments(pick, home, C)
+                        _, actual_hover = fk.tool_pose(q, tool)
+                        rebound_descent = list(refreshed_segments[2])
+                        rebound_descent[1] = np.asarray(actual_hover, dtype=float)
+                        segments[segment_index + 1 :] = [
+                            tuple(rebound_descent),
+                            *refreshed_segments[3:],
+                        ]
+                        runtime_detection = refreshed
+                        event["motion_rebound_to_refreshed_detection"] = True
+                        event["rebound_measured_arm_joints_rad"] = q.tolist()
                         event["pre_descent_revalidation_detection"] = {
-                            "track_id": refreshed[0].track_id,
-                            "capture_time_s": refreshed[0].capture_time_s,
-                            "position_base_m": list(refreshed[0].position_base_m),
-                            "yaw_rad": refreshed[0].yaw_rad,
-                            "confidence": refreshed[0].confidence,
+                            "track_id": refreshed.track_id,
+                            "capture_time_s": refreshed.capture_time_s,
+                            "position_base_m": list(refreshed.position_base_m),
+                            "yaw_rad": refreshed.yaw_rad,
+                            "confidence": refreshed.confidence,
                             "observation_relpath": refreshed_observation_relpath,
                         }
                     else:
+                        tolerance_m = min(0.002, TASK_CONFIG.cube_edge_m / 4.0)
+                        yaw_tolerance_deg = None
                         current = cube_pose(colour)
                         moved_xy_m = float(
                             np.linalg.norm(
@@ -1141,12 +1242,24 @@ def main() -> None:
                                 - np.asarray(start["centre"][:2])
                             )
                         )
+                        yaw_change_deg = None
+                        per_colour_changes = None
+                        event["motion_rebound_to_refreshed_detection"] = False
                         revalidation_source = "simulator_ground_truth_not_camera"
                     event["pre_descent_revalidation"] = {
                         "source": revalidation_source,
                         "target_movement_xy_m": moved_xy_m,
                         "maximum_allowed_m": tolerance_m,
-                        "passed": bool(moved_xy_m <= tolerance_m),
+                        "target_square_yaw_change_deg": yaw_change_deg,
+                        "maximum_allowed_yaw_deg": yaw_tolerance_deg,
+                        "remaining_target_changes": per_colour_changes,
+                        "passed": bool(
+                            moved_xy_m <= tolerance_m
+                            and (
+                                yaw_tolerance_deg is None
+                                or yaw_change_deg <= yaw_tolerance_deg
+                            )
+                        ),
                     }
                     if moved_xy_m > tolerance_m:
                         raise RuntimeError(
@@ -1156,7 +1269,7 @@ def main() -> None:
                     continue
 
                 spread_start = None
-                if spread is not None and phase in ("approach_pick", "carry"):
+                if spread is not None and _phase_interpolates_spread(phase):
                     rotation, _ = fk.fk(q)
                     current = rotation @ np.asarray(C.FINGER_SPREAD_AXIS)
                     current[2] = 0.0
@@ -1247,6 +1360,24 @@ def main() -> None:
             event["placement_verified"] = bool(
                 event["pickup_verified"] and inside_xy and on_floor
             )
+            event["simulator_truth_affects_runtime_control"] = not camera_perception
+            event["runtime_post_place_verification"] = (
+                {
+                    "source": "simulator_truth",
+                    "passed": event["placement_verified"],
+                    "limitation": "default scripted simulation mode only",
+                }
+                if not camera_perception
+                else {
+                    "source": None,
+                    "passed": None,
+                    "limitation": (
+                        "camera-based post-place verification is not implemented; "
+                        "simulator truth scores the result but cannot stop or alter "
+                        "later actions"
+                    ),
+                }
+            )
             events.append(event)
             (run / "execution_events.json").write_text(
                 json.dumps(events, indent=2) + "\n", encoding="utf-8"
@@ -1258,7 +1389,10 @@ def main() -> None:
                 f"z-error={event['z_error_mm']:.2f} mm",
                 flush=True,
             )
-            if not event["placement_verified"]:
+            if _should_stop_after_truth_evaluation(
+                camera_perception=camera_perception,
+                placement_verified=event["placement_verified"],
+            ):
                 break
 
         final = {colour: cube_pose(colour) for colour in COLOURS}
@@ -1280,6 +1414,12 @@ def main() -> None:
                 else "configured simulator poses; no camera perception or AI"
             ),
             "decision_uses_simulator_truth": not camera_perception,
+            "simulator_truth_affects_runtime_control": not camera_perception,
+            "camera_post_place_runtime_verification": (
+                "not implemented; evaluator truth never branches camera/training actions"
+                if camera_perception
+                else "not applicable to configured-pose scripted mode"
+            ),
             "physics": "Isaac Sim rigid-body contact; cubes are not attached to the gripper",
             "shared_task_contract": {
                 "config_path": DEFAULT_CONFIG_PATH.relative_to(REPO_ROOT).as_posix(),
@@ -1410,6 +1550,7 @@ def main() -> None:
             "events": events,
             "verified_pickups": sum(e["pickup_verified"] for e in events),
             "verified_placements": sum(e["placement_verified"] for e in events),
+            "runtime_sequence_complete": len(events) == len(COLOURS),
             "task_complete": len(events) == len(COLOURS)
             and all(e["placement_verified"] for e in events),
         }
@@ -1417,13 +1558,18 @@ def main() -> None:
             json.dumps(report, indent=2) + "\n", encoding="utf-8"
         )
         print(
-            f"[bucket-demo] complete={report['task_complete']} "
+            f"[bucket-demo] runtime-sequence-complete="
+            f"{report['runtime_sequence_complete']} "
+            f"evaluator-task-complete={report['task_complete']} "
             f"pickups={report['verified_pickups']}/3 "
             f"placements={report['verified_placements']}/3 "
             f"frames={frame_number}",
             flush=True,
         )
-        if not report["task_complete"]:
+        if _should_stop_after_truth_evaluation(
+            camera_perception=camera_perception,
+            placement_verified=report["task_complete"],
+        ):
             raise RuntimeError("Bucket-sort verification failed; inspect execution_report.json")
     except Exception:
         import traceback

@@ -73,6 +73,19 @@ class SyntheticDataConfigTests(unittest.TestCase):
             self.assertEqual(entry["status"], "provisional_unmeasured")
             self.assertEqual(entry["application_status"], "pending")
 
+    def test_dynamic_friction_never_exceeds_static_friction(self):
+        static = self.spec.parameters["physics.object_static_friction"]
+        dynamic = self.spec.parameters["physics.object_dynamic_friction"]
+        self.assertLessEqual(dynamic.maximum, static.minimum)
+        for seed in range(1000):
+            manifest = sample_randomization(
+                self.spec, episode_seed=seed, episode_id=f"friction-{seed}"
+            )
+            self.assertLessEqual(
+                manifest.value("physics.object_dynamic_friction"),
+                manifest.value("physics.object_static_friction"),
+            )
+
     def test_application_manifest_cannot_claim_partial_randomization(self):
         manifest = sample_randomization(
             self.spec, episode_seed=7, episode_id="episode-7"
@@ -121,17 +134,43 @@ class SensorModelTests(unittest.TestCase):
 
     def test_sensor_augmentation_is_deterministic_and_preserves_contract(self):
         a = augment_sensor_rgb(
-            self.image, self.manifest, camera_calibration=self.calibration
+            self.image,
+            self.manifest,
+            frame_index=12,
+            camera_calibration=self.calibration,
         )
         b = augment_sensor_rgb(
-            self.image, self.manifest, camera_calibration=self.calibration
+            self.image,
+            self.manifest,
+            frame_index=12,
+            camera_calibration=self.calibration,
         )
         np.testing.assert_array_equal(a.image_rgb, b.image_rgb)
         self.assertEqual(a.image_rgb.shape, self.image.shape)
         self.assertEqual(a.image_rgb.dtype, np.uint8)
         self.assertFalse(np.array_equal(a.image_rgb, self.image))
         self.assertTrue(a.processing["calibrated_radial_distortion_applied"])
+        self.assertEqual(a.processing["frame_index"], 12)
+        self.assertEqual(
+            a.processing["sensor_noise_frame_seed"],
+            b.processing["sensor_noise_frame_seed"],
+        )
         self.assertEqual(len(a.applied_parameters), 9)
+
+        adjacent = augment_sensor_rgb(
+            self.image,
+            self.manifest,
+            frame_index=13,
+            camera_calibration=self.calibration,
+        )
+        self.assertNotEqual(
+            a.processing["sensor_noise_frame_seed"],
+            adjacent.processing["sensor_noise_frame_seed"],
+        )
+        self.assertGreater(
+            self.manifest.value("sensor.gaussian_noise_std_dn"), 0.0
+        )
+        self.assertFalse(np.array_equal(a.image_rgb, adjacent.image_rgb))
 
     def test_distorted_point_labels_keep_optical_centre_fixed(self):
         points = distort_points_uv(
@@ -150,6 +189,7 @@ class SensorModelTests(unittest.TestCase):
             augment_sensor_rgb(
                 self.image[:, :-1],
                 self.manifest,
+                frame_index=0,
                 camera_calibration=self.calibration,
             )
 

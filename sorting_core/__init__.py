@@ -29,7 +29,13 @@ from .contracts import (
     TrajectoryChunk,
     normalise_square_yaw_rad,
 )
-from .planner import PlanningError, build_colour_sort_plans, semantic_phase_plan
+from .planner import (
+    PlanningError,
+    build_colour_sort_plans,
+    semantic_phase_plan,
+    square_yaw_delta_degrees,
+    validate_reobserved_scene,
+)
 
 
 _LAZY_EXPORTS = {
@@ -108,7 +114,9 @@ __all__ = [
     "load_synthetic_data_spec",
     "normalise_square_yaw_rad",
     "semantic_phase_plan",
+    "square_yaw_delta_degrees",
     "sample_randomization",
     "uf0_tcp_to_base_tip",
     "validate_tcp_chunk",
+    "validate_reobserved_scene",
 ]
