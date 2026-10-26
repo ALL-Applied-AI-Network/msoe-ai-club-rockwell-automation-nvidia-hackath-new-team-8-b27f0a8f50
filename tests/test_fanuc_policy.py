@@ -63,6 +63,10 @@ def _scene(obs: dict, *, red_dx_m: float = 0.0) -> SceneDetections:
     )
 
 
+def _views(scene: SceneDetections):
+    return policy_module._SceneViews(unplaced=scene, pickable=scene)
+
+
 def _observation(tcp_pose=None, *, timestamp=None, trial_id="mock-t00") -> dict:
     return {
         "t": time.time() if timestamp is None else float(timestamp),
@@ -132,7 +136,7 @@ class FanucPolicyTests(unittest.TestCase):
         )
         with mock.patch.object(policy_module, "detect_coloured_cubes", return_value=raw):
             with self.assertRaisesRegex(PlanningError, "wrong-bin"):
-                policy._detect_work_scene(obs)
+                policy._detect_scene_views(obs)
 
     def test_hardware_clearance_is_stricter_than_detection_ambiguity(self):
         with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "0"}):
@@ -175,7 +179,7 @@ class FanucPolicyTests(unittest.TestCase):
     def test_stalled_phase_latches_after_bounded_no_progress_calls(self):
         with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "1"}):
             policy = Policy()
-        policy._detect_work_scene = lambda obs: _scene(obs)
+        policy._detect_scene_views = lambda obs: _views(_scene(obs))
         obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
         for _ in range(policy.MAX_NO_PROGRESS_CALLS + 2):
             obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
@@ -217,7 +221,7 @@ class FanucPolicyTests(unittest.TestCase):
         obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
         obs["tcp_pose"] = list(obs["tcp_pose"])
         obs["tcp_pose"][3] = 180.0  # equivalent to the configured -180 deg
-        policy._detect_work_scene = lambda current: _scene(current)
+        policy._detect_scene_views = lambda current: _views(_scene(current))
         chunk = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
         self.assertTrue(np.allclose(chunk[:, 3], 180.0))
 
@@ -242,13 +246,76 @@ class FanucPolicyTests(unittest.TestCase):
             ),
         )
         with mock.patch.object(policy_module, "detect_coloured_cubes", return_value=raw):
-            filtered = policy._detect_work_scene(obs)
-        self.assertEqual([cube.track_id for cube in filtered.cubes], ["red-outside"])
+            views = policy._detect_scene_views(obs)
+        self.assertEqual(
+            [cube.track_id for cube in views.unplaced.cubes], ["red-outside"]
+        )
+        self.assertEqual(views.pickable.cubes, ())
+
+    def test_confident_outside_pickup_component_blocks_success_not_targeted(self):
+        with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "0"}):
+            policy = Policy()
+        obs = _observation(policy._scan_tcp[:6])
+        timestamp = float(obs["t"])
+        raw = SceneDetections(
+            "robot-colour",
+            timestamp,
+            (
+                CubeDetection(
+                    "yellow-robot-component",
+                    "yellow",
+                    timestamp,
+                    (0.05, 0.06, -0.0001),
+                    0.0,
+                    0.9,
+                ),
+            ),
+        )
+        with mock.patch.object(policy_module, "detect_coloured_cubes", return_value=raw):
+            views = policy._detect_scene_views(obs)
+        self.assertEqual(
+            [cube.track_id for cube in views.unplaced.cubes],
+            ["yellow-robot-component"],
+        )
+        self.assertEqual(views.pickable.cubes, ())
+        policy._pending_verification_colour = "yellow"
+        with self.assertRaisesRegex(PlanningError, "outside.*matching bin"):
+            policy._verify_post_place(views.unplaced)
+
+    def test_weak_outside_pickup_evidence_cannot_false_pass_outcome(self):
+        with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "0"}):
+            policy = Policy()
+        obs = _observation(policy._scan_tcp[:6])
+        timestamp = float(obs["t"])
+        raw = SceneDetections(
+            "weak-robot-colour",
+            timestamp,
+            (
+                CubeDetection(
+                    "yellow-robot-component",
+                    "yellow",
+                    timestamp,
+                    (0.05, 0.06, -0.0001),
+                    0.0,
+                    0.10,
+                ),
+            ),
+        )
+        with mock.patch.object(policy_module, "detect_coloured_cubes", return_value=raw):
+            views = policy._detect_scene_views(obs)
+        self.assertEqual(
+            [cube.track_id for cube in views.unplaced.cubes],
+            ["yellow-robot-component"],
+        )
+        self.assertEqual(views.pickable.cubes, ())
+        policy._pending_verification_colour = "yellow"
+        with self.assertRaisesRegex(PlanningError, "outside.*matching bin"):
+            policy._verify_post_place(views.unplaced)
 
     def test_invalid_real_tcp_during_motion_blocks_without_forward_chunk(self):
         with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "1"}):
             policy = Policy()
-        policy._detect_work_scene = lambda obs: _scene(obs)
+        policy._detect_scene_views = lambda obs: _views(_scene(obs))
         obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
         first = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
         self.assertIsNotNone(policy._active_plan)
@@ -263,7 +330,7 @@ class FanucPolicyTests(unittest.TestCase):
     def test_default_interlock_stops_at_freshly_revalidated_hover(self):
         with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "0"}):
             policy = Policy()
-        policy._detect_work_scene = lambda obs: _scene(obs)
+        policy._detect_scene_views = lambda obs: _views(_scene(obs))
         obs = _advance_to_gate(policy, _observation(policy._scan_tcp[:6]))
 
         hover_z = float(obs["tcp_pose"][2])
@@ -287,7 +354,7 @@ class FanucPolicyTests(unittest.TestCase):
             calls.append(float(obs["t"]))
             return _scene(obs)
 
-        policy._detect_work_scene = detect
+        policy._detect_scene_views = lambda obs: _views(detect(obs))
         obs = _advance_to_gate(policy, _observation(policy._scan_tcp[:6]))
         calls_before_gate = len(calls)
         hover_z = float(obs["tcp_pose"][2])
@@ -302,17 +369,19 @@ class FanucPolicyTests(unittest.TestCase):
     def test_moved_target_latches_hold_and_never_blindly_retries(self):
         with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "1"}):
             policy = Policy()
-        policy._detect_work_scene = lambda obs: _scene(obs)
+        policy._detect_scene_views = lambda obs: _views(_scene(obs))
         obs = _advance_to_gate(policy, _observation(policy._scan_tcp[:6]))
         hover = np.asarray(obs["tcp_pose"], dtype=float)
 
-        policy._detect_work_scene = lambda current: _scene(current, red_dx_m=0.010)
+        policy._detect_scene_views = lambda current: _views(
+            _scene(current, red_dx_m=0.010)
+        )
         obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
         rejected = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
         self.assertIn("moved", policy._blocked_reason)
         np.testing.assert_allclose(rejected[-1, :6], hover)
 
-        policy._detect_work_scene = lambda current: _scene(current)
+        policy._detect_scene_views = lambda current: _views(_scene(current))
         obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
         still_holding = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
         np.testing.assert_allclose(still_holding[-1, :6], hover)
@@ -322,8 +391,8 @@ class FanucPolicyTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "0"}):
             policy = Policy()
         old_cell_time = time.time() - 1000.0
-        policy._detect_work_scene = lambda obs: SceneDetections(
-            "empty", float(obs["t"]), ()
+        policy._detect_scene_views = lambda obs: _views(
+            SceneDetections("empty", float(obs["t"]), ())
         )
         policy.act(_observation(policy._scan_tcp[:6], timestamp=old_cell_time))
         self.assertIsNone(policy._blocked_reason)

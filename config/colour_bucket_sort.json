@@ -22,6 +22,10 @@
       "yellow": [0.24, 0.0],
       "blue": [0.24, 0.19]
     },
+    "pickup_region_base_m": {
+      "x": [0.3, 0.55],
+      "y": [-0.3, 0.3]
+    },
     "pick_tip_clearance_m": 0.0025,
     "approach_clearance_m": 0.13,
     "bin_release_clearance_m": 0.015,

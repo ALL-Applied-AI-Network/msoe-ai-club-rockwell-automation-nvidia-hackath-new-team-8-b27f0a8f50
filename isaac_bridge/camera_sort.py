@@ -30,6 +30,7 @@ from sorting_core import (
     SortConfig,
     build_colour_sort_plans,
     detect_coloured_cubes,
+    filter_scene_to_pickup_region,
 )
 
 
@@ -329,6 +330,7 @@ class CalibratedPinholeCamera:
 class CameraSortDecision:
     """One perception result and the plans derived exclusively from it."""
 
+    raw_scene: SceneDetections
     scene: SceneDetections
     plans: tuple[PickPlacePlan, ...]
 
@@ -347,7 +349,21 @@ class IsaacCameraSortAdapter:
         scene_id: str,
         capture_time_s: float,
     ) -> SceneDetections:
-        """Detect cubes from a raw, unannotated ``Camera.get_rgba`` RGB slice."""
+        """Return pick-eligible detections from an unannotated Isaac RGB slice."""
+
+        raw_scene = self.observe_raw(
+            rgb, scene_id=scene_id, capture_time_s=capture_time_s
+        )
+        return filter_scene_to_pickup_region(raw_scene, self.config)
+
+    def observe_raw(
+        self,
+        rgb: np.ndarray,
+        *,
+        scene_id: str,
+        capture_time_s: float,
+    ) -> SceneDetections:
+        """Return broad cube-like detections before pick-eligibility filtering."""
 
         image = np.asarray(rgb)
         width, height = self.camera.resolution_px
@@ -373,10 +389,12 @@ class IsaacCameraSortAdapter:
     ) -> CameraSortDecision:
         """Run the same detector and deterministic planner used by hardware."""
 
-        scene = self.observe(
+        raw_scene = self.observe_raw(
             rgb, scene_id=scene_id, capture_time_s=capture_time_s
         )
+        scene = filter_scene_to_pickup_region(raw_scene, self.config)
         return CameraSortDecision(
+            raw_scene=raw_scene,
             scene=scene,
             plans=build_colour_sort_plans(scene, self.config),
         )

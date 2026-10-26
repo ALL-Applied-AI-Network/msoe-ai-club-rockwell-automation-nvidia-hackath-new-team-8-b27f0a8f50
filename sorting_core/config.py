@@ -59,6 +59,7 @@ class TaskSpec:
     colour_order: tuple[str, ...]
     cube_spawns_base_xy_yaw_deg: Mapping[str, tuple[float, float, float]]
     bin_centres_base_m: Mapping[str, tuple[float, float]]
+    pickup_region_base_m: Mapping[str, tuple[float, float]]
     pick_tip_clearance_m: float
     approach_clearance_m: float
     bin_release_clearance_m: float
@@ -173,6 +174,24 @@ class SortConfig:
             raise ConfigurationError("colour_order must be red, yellow, blue")
         if len(set(colours)) != len(colours):
             raise ConfigurationError("colour_order contains duplicates")
+        if set(self.task.pickup_region_base_m) != {"x", "y"}:
+            raise ConfigurationError("pickup_region_base_m must define x and y bounds")
+        for axis, (lower, upper) in self.task.pickup_region_base_m.items():
+            if lower >= upper:
+                raise ConfigurationError(
+                    f"pickup_region_base_m.{axis} lower bound must be below upper bound"
+                )
+        x_bounds = self.task.pickup_region_base_m["x"]
+        y_bounds = self.task.pickup_region_base_m["y"]
+        for colour, (x_m, y_m, _) in self.task.cube_spawns_base_xy_yaw_deg.items():
+            if not (x_bounds[0] <= x_m <= x_bounds[1]):
+                raise ConfigurationError(
+                    f"{colour} cube spawn is outside pickup-region x bounds"
+                )
+            if not (y_bounds[0] <= y_m <= y_bounds[1]):
+                raise ConfigurationError(
+                    f"{colour} cube spawn is outside pickup-region y bounds"
+                )
         expected = set(colours)
         for name, values in (
             ("cube_spawns_base_xy_yaw_deg", self.task.cube_spawns_base_xy_yaw_deg),
@@ -304,6 +323,12 @@ def config_from_dict(raw: Mapping[str, Any]) -> SortConfig:
             bin_centres_base_m={
                 str(k).lower(): _pair(v, f"bin centre {k}")
                 for k, v in bins_raw.items()
+            },
+            pickup_region_base_m={
+                str(k).lower(): _pair(v, f"pickup region {k}")
+                for k, v in _mapping(
+                    task_raw, "pickup_region_base_m"
+                ).items()
             },
             pick_tip_clearance_m=_finite(
                 task_raw["pick_tip_clearance_m"], "pick_tip_clearance_m"

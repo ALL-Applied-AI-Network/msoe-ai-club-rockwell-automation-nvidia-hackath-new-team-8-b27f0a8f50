@@ -16,6 +16,7 @@ if str(REPO) not in sys.path:
 
 from sorting_core import (  # noqa: E402
     ActionValidationError,
+    ConfigurationError,
     CubeDetection,
     PlanningError,
     SceneDetections,
@@ -23,7 +24,9 @@ from sorting_core import (  # noqa: E402
     base_tip_pose_to_uf0_tcp,
     build_colour_sort_plans,
     build_trajectory_chunks,
+    detection_in_pickup_region,
     detect_coloured_cubes,
+    filter_scene_to_pickup_region,
     load_config,
     semantic_phase_plan,
     uf0_tcp_to_base_tip,
@@ -56,6 +59,10 @@ class ConfigTests(unittest.TestCase):
                 "blue": (0.24, 0.19),
             },
         )
+        self.assertEqual(
+            dict(c.task.pickup_region_base_m),
+            {"x": (0.30, 0.55), "y": (-0.30, 0.30)},
+        )
         self.assertAlmostEqual(c.bin.outer_m, 0.050)
         self.assertAlmostEqual(c.bin.pocket_m, 0.035)
         self.assertAlmostEqual(c.bin.height_m, 0.055)
@@ -84,6 +91,29 @@ class ConfigTests(unittest.TestCase):
         self.assertAlmostEqual(c.frames.uf0_z_offset_mm, -330.0)
         self.assertAlmostEqual(c.frames.tcp_beyond_fingertips_mm, 0.0)
         self.assertIn("10 mm beyond", c.frames.tcp_conflict_note)
+
+    def test_reversed_pickup_region_is_rejected(self):
+        malformed = replace(
+            self.config,
+            task=replace(
+                self.config.task,
+                pickup_region_base_m={"x": (0.55, 0.30), "y": (-0.30, 0.30)},
+            ),
+        )
+        with self.assertRaisesRegex(ConfigurationError, "lower bound"):
+            malformed.validate()
+
+    def test_pickup_region_boundaries_are_inclusive(self):
+        timestamp = 1.0
+        for x_m, y_m in ((0.30, -0.30), (0.55, 0.30)):
+            detection = CubeDetection(
+                "boundary", "red", timestamp, (x_m, y_m, -0.0001), 0.0, 0.9
+            )
+            self.assertTrue(detection_in_pickup_region(detection, self.config))
+        outside = CubeDetection(
+            "outside", "red", timestamp, (0.2999, 0.0, -0.0001), 0.0, 0.9
+        )
+        self.assertFalse(detection_in_pickup_region(outside, self.config))
 
 
 class FrameAndProtocolTests(unittest.TestCase):
@@ -391,6 +421,30 @@ class VisionTests(unittest.TestCase):
         )
         self.assertEqual(scene.cubes, ())
 
+    def test_pickup_filter_preserves_raw_outside_region_detection(self):
+        image = np.full((180, 320, 3), 235, dtype=np.uint8)
+        cv2.rectangle(image, (145, 75), (175, 105), (0, 0, 255), -1)
+
+        def project(uv, z):
+            return np.array(
+                [
+                    0.10 + (uv[0] - 160) / 3000.0,
+                    (uv[1] - 90) / 3000.0,
+                    z,
+                ]
+            )
+
+        raw = detect_coloured_cubes(
+            image,
+            project,
+            self.config,
+            scene_id="robot-colour-distractor",
+            capture_time_s=26.9,
+        )
+        self.assertEqual([item.colour for item in raw.cubes], ["blue"])
+        eligible = filter_scene_to_pickup_region(raw, self.config)
+        self.assertEqual(eligible.cubes, ())
+
     def test_larger_same_colour_bin_shape_is_not_a_cube(self):
         image = np.full((300, 500, 3), 235, dtype=np.uint8)
         # One valid 10 mm-scale square for each cube colour.
@@ -410,7 +464,7 @@ class VisionTests(unittest.TestCase):
         cv2.rectangle(image, (390, 170), (440, 220), (255, 0, 0), -1)
 
         def project(uv, z):
-            return np.array([0.35 + (uv[0] - 250) / 3000.0, (uv[1] - 150) / 3000.0, z])
+            return np.array([0.40 + (uv[0] - 250) / 3000.0, (uv[1] - 150) / 3000.0, z])
 
         scene = detect_coloured_cubes(
             image,

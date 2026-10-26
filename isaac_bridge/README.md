@@ -68,6 +68,15 @@ leaving the default path unchanged.
 - The shared planner enforces the checked-in minimum detection confidence for
   both Isaac and hardware. Hardware may raise that threshold through its
   bounded environment override, but it cannot lower the shared safety floor.
+- Raw detection remains broad for diagnostics. Pick eligibility is limited to
+  the shared provisional pickup region (`x=0.30..0.55 m`,
+  `y=-0.30..0.30 m` in robot base), which keeps similarly coloured robot hoses
+  and bins out of target selection. `CameraSortDecision.raw_scene` retains the
+  pre-filter view. Re-measure the bounds, inspect the overlay, and allow for
+  calibration jitter before approving them on the physical cell.
+- The pickup region is not an obstacle map, fixture self-mask, or swept-volume
+  collision check. Unknown-colour obstacles and relevant geometry outside the
+  region remain unresolved.
 - It uses the ideal pinhole model rendered by Isaac. The hardware projection
   still uses the measured real-camera distortion calibration.
 - It does not provide a complete swept-volume collision planner, temporal

@@ -1296,6 +1296,10 @@ def main() -> None:
                 "bin_centres_base_m": {
                     colour: list(BIN_CENTRES[colour]) for colour in COLOURS
                 },
+                "pickup_region_base_m": {
+                    axis: list(bounds)
+                    for axis, bounds in TASK_CONFIG.task.pickup_region_base_m.items()
+                },
                 "surface_base_z_m": TASK_CONFIG.frames.surface_base_z_m,
                 "pick_tip_clearance_m": (
                     TASK_CONFIG.task.pick_tip_clearance_m

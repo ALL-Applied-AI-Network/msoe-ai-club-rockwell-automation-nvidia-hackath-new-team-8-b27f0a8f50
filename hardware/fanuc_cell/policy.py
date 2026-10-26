@@ -15,6 +15,7 @@ emergency stop; the cell operator/controller remains responsible for stopping.
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 import json
 import math
 import os
@@ -48,6 +49,7 @@ from sorting_core import (  # noqa: E402
     VisionError,
     base_tip_pose_to_uf0_tcp,
     build_colour_sort_plans,
+    detection_in_pickup_region,
     detect_coloured_cubes,
     interpolate_tcp_rows,
     load_config,
@@ -75,6 +77,14 @@ def _finite_environment_float(name: str, default: float, *, minimum: float) -> f
 
 def _shortest_angle_degrees(first: float, second: float) -> float:
     return (float(first) - float(second) + 180.0) % 360.0 - 180.0
+
+
+@dataclass(frozen=True)
+class _SceneViews:
+    """Broad outcome observations and the narrower pick-eligible subset."""
+
+    unplaced: SceneDetections
+    pickable: SceneDetections
 
 
 class Policy:
@@ -251,19 +261,19 @@ class Policy:
 
         try:
             if self._active_plan is None:
-                scene = self._detect_work_scene(obs)
+                scenes = self._detect_scene_views(obs)
                 if self._pending_verification_colour is not None:
-                    self._verify_post_place(scene)
+                    self._verify_post_place(scenes.unplaced)
                 if len(self._completed_colours) == len(self.config.task.colour_order):
                     return self._hold_action(
                         obs, "all configured colours camera-checked after placement"
                     )
-                self._start_next_plan(scene)
+                self._start_next_plan(scenes.pickable)
 
             phase = self._phases[self._phase_index]
             if phase.requires_reobservation_before:
-                scene = self._detect_work_scene(obs)
-                self._revalidate_before_descent(scene)
+                scenes = self._detect_scene_views(obs)
+                self._revalidate_before_descent(scenes.pickable)
                 if not self._descent_enabled:
                     return self._hold_action(
                         obs,
@@ -309,7 +319,7 @@ class Policy:
             raise ValueError("obs['t'] did not advance")
         self._last_observation_time_s = timestamp
 
-    def _detect_work_scene(self, obs: dict) -> SceneDetections:
+    def _detect_scene_views(self, obs: dict) -> _SceneViews:
         images = obs.get("images")
         if not isinstance(images, dict) or "table" not in images:
             raise VisionError("obs['images']['table'] is required")
@@ -334,10 +344,15 @@ class Policy:
         # The bins are themselves red/yellow/blue. Exclude only a component in
         # its same-colour destination footprint. A cube of one colour near a
         # different bin is a wrong-bin outcome and must remain visible/fail.
-        # Coloured detections anywhere else remain obstacles and therefore make
-        # duplicate or completed colours fail closed.
-        work: list[CubeDetection] = []
-        excluded = 0
+        # Confident non-bin detections remain in the broader outcome view so a
+        # misplaced/completed colour fails verification. Only the calibrated
+        # pickup-region subset may become a target. This partition is not an
+        # obstacle map or swept-volume collision check.
+        unplaced: list[CubeDetection] = []
+        pickable: list[CubeDetection] = []
+        bin_components_excluded = 0
+        outside_pickup_region_excluded = 0
+        low_confidence_outside_region_retained = 0
         for detection in raw.cubes:
             bin_membership = {
                 colour: (
@@ -355,7 +370,7 @@ class Policy:
                 for colour in self.config.task.colour_order
             }
             if bin_membership[detection.colour]:
-                excluded += 1
+                bin_components_excluded += 1
                 continue
             wrong_bins = [
                 colour for colour, inside in bin_membership.items()
@@ -366,22 +381,49 @@ class Policy:
                     f"{detection.colour} cube detected in/near the "
                     f"{wrong_bins[0]} bin; wrong-bin placements are not ignored"
                 )
+            in_pickup_region = detection_in_pickup_region(detection, self.config)
             if detection.confidence < self._minimum_confidence:
-                raise PlanningError(
-                    f"low-confidence {detection.colour} detection "
-                    f"({detection.confidence:.2f} < {self._minimum_confidence:.2f})"
-                )
-            work.append(detection)
+                if in_pickup_region:
+                    raise PlanningError(
+                        f"low-confidence {detection.colour} detection "
+                        f"({detection.confidence:.2f} < {self._minimum_confidence:.2f})"
+                    )
+                # It is never pickable, but erasing weak evidence here could
+                # turn a dropped cube into a false successful placement. Keep
+                # it in the outcome view so matching/completed-colour checks
+                # fail closed until fixture colour is calibrated explicitly.
+                unplaced.append(detection)
+                low_confidence_outside_region_retained += 1
+                continue
+            unplaced.append(detection)
+            if not in_pickup_region:
+                # Preserve a confident non-bin observation for outcome checks,
+                # but never promote it to a pick target. This catches a dropped
+                # cube outside the pickup region instead of declaring success.
+                outside_pickup_region_excluded += 1
+                continue
+            pickable.append(detection)
 
-        scene = SceneDetections(raw.scene_id, raw.capture_time_s, tuple(work))
+        unplaced_scene = SceneDetections(
+            raw.scene_id, raw.capture_time_s, tuple(unplaced)
+        )
+        pickable_scene = SceneDetections(
+            raw.scene_id, raw.capture_time_s, tuple(pickable)
+        )
         self._emit(
             "camera_scene",
-            scene_id=scene.scene_id,
-            work_detections=len(scene.cubes),
-            bin_components_excluded=excluded,
-            colours=[cube.colour for cube in scene.cubes],
+            scene_id=raw.scene_id,
+            unplaced_detections=len(unplaced_scene.cubes),
+            pickable_detections=len(pickable_scene.cubes),
+            raw_detections=len(raw.cubes),
+            bin_components_excluded=bin_components_excluded,
+            outside_pickup_region_excluded=outside_pickup_region_excluded,
+            low_confidence_outside_region_retained=(
+                low_confidence_outside_region_retained
+            ),
+            pickable_colours=[cube.colour for cube in pickable_scene.cubes],
         )
-        return scene
+        return _SceneViews(unplaced=unplaced_scene, pickable=pickable_scene)
 
     def _start_next_plan(self, scene: SceneDetections) -> None:
         self._validate_hardware_clearance(scene.cubes)

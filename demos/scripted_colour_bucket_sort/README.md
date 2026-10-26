@@ -93,6 +93,12 @@ Both camera modes retain the exact unannotated RGB observations used for the
 initial plan and each pre-descent revalidation under `decision_frames/`. The
 execution report links those files, so a failed or questionable decision can
 be reproduced from pixels instead of inferred from presentation video.
+The raw detector retains cube-like colour components across the calibrated
+image. The camera adapter promotes only components inside the configured
+base-frame pickup region to pick targets; the robot's coloured hoses and the
+destination-bin region are outside that provisional region. The physical cell
+must validate those bounds and boundary uncertainty before operation. This is
+not an obstacle map or a guarantee that the arm's swept volume is clear.
 
 Add seeded, provisional domain randomization and synchronized training-data
 artifacts with:

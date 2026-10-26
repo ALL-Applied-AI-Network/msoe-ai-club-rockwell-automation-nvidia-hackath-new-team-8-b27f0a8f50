@@ -118,7 +118,6 @@ def detect_coloured_cubes(
                 float(moments["m01"] / moments["m00"]),
             )
             centre_base = _pixel_to_base(projector, centre_uv, top_z)
-
             box = cv2.boxPoints(rect).astype(float)
             projected_edges: list[tuple[float, np.ndarray]] = []
             for edge_index in range(len(box)):
@@ -200,4 +199,39 @@ def detect_coloured_cubes(
         scene_id=scene_id,
         capture_time_s=capture_time_s,
         cubes=tuple(detections),
+    )
+
+
+def detection_in_pickup_region(
+    detection: CubeDetection, config: SortConfig
+) -> bool:
+    """Return whether a camera detection is eligible to become a pick target.
+
+    Raw colour detections deliberately remain unfiltered so adapters can first
+    classify destination-bin observations and report out-of-workspace coloured
+    components.  This helper is task-space semantics, not object ground truth.
+    """
+
+    x_m, y_m = detection.position_base_m[:2]
+    x_bounds = config.task.pickup_region_base_m["x"]
+    y_bounds = config.task.pickup_region_base_m["y"]
+    return (
+        x_bounds[0] <= x_m <= x_bounds[1]
+        and y_bounds[0] <= y_m <= y_bounds[1]
+    )
+
+
+def filter_scene_to_pickup_region(
+    scene: SceneDetections, config: SortConfig
+) -> SceneDetections:
+    """Create the pick-eligible view of a broader raw camera scene."""
+
+    return SceneDetections(
+        scene_id=scene.scene_id,
+        capture_time_s=scene.capture_time_s,
+        cubes=tuple(
+            detection
+            for detection in scene.cubes
+            if detection_in_pickup_region(detection, config)
+        ),
     )

@@ -180,6 +180,32 @@ class IsaacCameraSortAdapterTests(unittest.TestCase):
                 image, scene_id="wrong-resolution", capture_time_s=5.0
             )
 
+    def test_outside_pickup_colour_component_is_not_a_pick_target(self):
+        image = self._render_top_faces()
+        centre = self.camera.project((0.10, 0.0, self.config.cube_top_base_z_m))
+        self.assertIsNotNone(centre)
+        centre_px = np.round(centre).astype(np.int32)
+        cv2.rectangle(
+            image,
+            tuple(centre_px - np.array([5, 5])),
+            tuple(centre_px + np.array([5, 5])),
+            (255, 0, 0),
+            -1,
+        )
+
+        raw = self.adapter.observe_raw(
+            image, scene_id="with-robot-colour-raw", capture_time_s=5.5
+        )
+        self.assertEqual(
+            [d.colour for d in raw.cubes], ["red", "red", "yellow", "blue"]
+        )
+        scene = self.adapter.observe(
+            image, scene_id="with-robot-colour-pickable", capture_time_s=5.5
+        )
+        self.assertEqual(
+            [d.colour for d in scene.cubes], ["red", "yellow", "blue"]
+        )
+
     def test_annotated_or_truth_pose_inputs_are_not_part_of_adapter_api(self):
         image = self._render_top_faces()
         with self.assertRaises(TypeError):

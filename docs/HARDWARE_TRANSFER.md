@@ -340,6 +340,18 @@ the same as end-to-end grasp accuracy.
 
 - A visible cube centroid lies on the cube's top face. For a 10 mm cube, map a
   top-face pixel at `surface_z + 0.010 m`, not at the table plane.
+- The raw detector retains cube-like components across the calibrated image.
+  The policy classifies bin observations first, then accepts pick targets only
+  in the provisional robot-base pickup region `x=0.30..0.55 m`,
+  `y=-0.30..0.30 m`. Non-bin components outside it, including weak ambiguous
+  evidence, remain visible to fail-closed outcome verification. Overlay the
+  bounds on the real table image, measure
+  calibration residual and boundary jitter, and verify them throughout the
+  region; projecting robot/hoses onto the cube-top plane makes this a heuristic,
+  not a fixture self-mask.
+- The pickup region does not prove free space for the fingers or arm, does not
+  see unknown-colour obstacles, and does not validate the swept motion. Keep
+  those as separate collision and physical-integration gates.
 - The event FAQ warns that overhead table depth does not reliably see screws or
   small cubes. Start with table RGB plus known geometry. If needed, use wrist
   depth close to the table and pass the **same observation's joints** to the

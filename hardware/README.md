@@ -26,6 +26,16 @@ frame difference can turn a safe height into a table contact. Keep the current
 choice consistent in simulation and hardware, and verify it with the cell
 operator before enabling any physical descent.
 
+The raw detector also uses a provisional calibrated pickup region of
+`x=0.30..0.55 m` and `y=-0.30..0.30 m` in robot-base coordinates only when
+deciding which detections may become pick targets. The policy classifies
+matching-bin and wrong-bin observations first, and retains non-bin observations
+outside the region—including weak ambiguous evidence—for fail-closed
+placement-outcome checks. Confirm the whole
+region against the real camera overlay, calibration uncertainty, cell fixtures,
+and approved working envelope; do not widen it merely to force a missed
+detection. It is not an obstacle map or a swept-volume collision guarantee.
+
 ## Run the official mock
 
 Install [`uv`](https://docs.astral.sh/uv/), then run from the repository root:

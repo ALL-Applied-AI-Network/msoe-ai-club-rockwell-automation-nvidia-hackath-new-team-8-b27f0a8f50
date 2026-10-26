@@ -40,7 +40,12 @@ _LAZY_EXPORTS = {
     "build_trajectory_chunks": (".trajectory", "build_trajectory_chunks"),
     "interpolate_tcp_rows": (".trajectory", "interpolate_tcp_rows"),
     "VisionError": (".vision", "VisionError"),
+    "detection_in_pickup_region": (".vision", "detection_in_pickup_region"),
     "detect_coloured_cubes": (".vision", "detect_coloured_cubes"),
+    "filter_scene_to_pickup_region": (
+        ".vision",
+        "filter_scene_to_pickup_region",
+    ),
     "SyntheticDataError": (".synthetic_data", "SyntheticDataError"),
     "augment_sensor_rgb": (".synthetic_data", "augment_sensor_rgb"),
     "build_synchronized_frame_record": (
@@ -92,7 +97,9 @@ __all__ = [
     "build_trajectory_chunks",
     "build_synchronized_frame_record",
     "config_from_dict",
+    "detection_in_pickup_region",
     "detect_coloured_cubes",
+    "filter_scene_to_pickup_region",
     "augment_sensor_rgb",
     "finalize_application_status",
     "interpolate_tcp_rows",
