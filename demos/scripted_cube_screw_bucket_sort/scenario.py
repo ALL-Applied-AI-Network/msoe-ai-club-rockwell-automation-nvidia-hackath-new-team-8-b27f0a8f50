@@ -599,6 +599,44 @@ def screw_jaw_half_target(
     return target
 
 
+def tool_tip_z_for_desired_grasp_height(
+    *,
+    desired_grasp_base_z_m: float,
+    observed_grasp_world_z_m: float,
+    pickup_tip_base_z_m: float,
+    table_top_world_z_m: float,
+) -> tuple[float, float]:
+    """Convert a desired object-grasp Z into the matching tool-tip base Z.
+
+    The screw is held slightly above the fingertip reference because the
+    hooked finger profile contacts the lying shank above the table. Preserve
+    that measured pickup relationship at placement instead of reusing the
+    cube-only, above-rim release height.
+
+    Returns ``(tool_tip_base_z_m, grasp_above_tip_m)`` so the runtime can log
+    the exact conversion used for each physics rollout.
+    """
+
+    values = {
+        "desired_grasp_base_z_m": desired_grasp_base_z_m,
+        "observed_grasp_world_z_m": observed_grasp_world_z_m,
+        "pickup_tip_base_z_m": pickup_tip_base_z_m,
+        "table_top_world_z_m": table_top_world_z_m,
+    }
+    checked = {name: _finite(value, name) for name, value in values.items()}
+    grasp_above_tip_m = checked["observed_grasp_world_z_m"] - (
+        checked["table_top_world_z_m"] + checked["pickup_tip_base_z_m"]
+    )
+    if not 0.0 < grasp_above_tip_m < 0.02:
+        raise ScenarioError(
+            "observed screw grasp must be 0-20 mm above the pickup fingertip"
+        )
+    return (
+        checked["desired_grasp_base_z_m"] - grasp_above_tip_m,
+        grasp_above_tip_m,
+    )
+
+
 def verify_vertices_inside_bin(
     vertices_world_m: Iterable[Sequence[float]],
     *,

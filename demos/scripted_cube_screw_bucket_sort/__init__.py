@@ -20,6 +20,7 @@ from .scenario import (
     local_to_world_vertices,
     resolve_screw_model,
     screw_jaw_half_target,
+    tool_tip_z_for_desired_grasp_height,
     validate_screw_model,
     verify_vertices_inside_bin,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "local_to_world_vertices",
     "resolve_screw_model",
     "screw_jaw_half_target",
+    "tool_tip_z_for_desired_grasp_height",
     "validate_screw_model",
     "verify_vertices_inside_bin",
 ]

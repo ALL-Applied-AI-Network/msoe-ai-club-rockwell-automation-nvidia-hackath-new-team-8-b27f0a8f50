@@ -48,6 +48,7 @@ from demos.scripted_cube_screw_bucket_sort.scenario import (  # noqa: E402
     load_scenario_config,
     resolve_screw_model,
     screw_jaw_half_target,
+    tool_tip_z_for_desired_grasp_height,
     validate_screw_model,
     verify_vertices_inside_bin,
 )
@@ -151,6 +152,7 @@ def _motion_segments(pick: dict, home: np.ndarray, scene_config):
     destination_spread = pick["place_spread_dir"]
     shut = float(pick["jaw_half_target_m"])
     opened = scene_config.JAW_OPEN
+    in_bin_open = float(pick.get("in_bin_open_jaw_half_m", opened))
     return [
         ("approach_pick", home, source_above, 1.2, opened, opened, spread),
         (
@@ -184,18 +186,34 @@ def _motion_segments(pick: dict, home: np.ndarray, scene_config):
             shut,
             destination_spread,
         ),
-        ("release", destination, destination, 0.6, shut, opened, destination_spread),
-        ("settle", destination, destination, 0.6, opened, opened, destination_spread),
+        (
+            "release",
+            destination,
+            destination,
+            0.6,
+            shut,
+            in_bin_open,
+            destination_spread,
+        ),
+        (
+            "settle",
+            destination,
+            destination,
+            0.6,
+            in_bin_open,
+            in_bin_open,
+            destination_spread,
+        ),
         (
             "retreat",
             destination,
             destination_above,
             0.8,
-            opened,
-            opened,
+            in_bin_open,
+            in_bin_open,
             destination_spread,
         ),
-        ("home", destination_above, home, 1.1, opened, opened, None),
+        ("home", destination_above, home, 1.1, in_bin_open, opened, None),
     ]
 
 
@@ -535,6 +553,12 @@ def main() -> None:
                 destination_spread = np.array([0.0, 1.0, 0.0])
                 place_xy = np.asarray(bin_centres[item.destination_colour], dtype=float)
                 jaw_target = C.CUBE_JAW_HALF_TARGET
+                place_tip_z = task_config.bin_release_tip_base_z_m
+                in_bin_open_jaw = C.JAW_OPEN
+                placement_height_plan = {
+                    "mode": "cube release above bin rim",
+                    "commanded_tip_base_z_m": float(place_tip_z),
+                }
             else:
                 target_yaw = math.radians(item.target_axis_yaw_deg)
                 destination_axis = np.array(
@@ -547,6 +571,30 @@ def main() -> None:
                     item.placement_grasp_point_base_m[:2], dtype=float
                 )
                 jaw_target = screw_jaw_target
+                place_tip_z, grasp_above_tip_m = (
+                    tool_tip_z_for_desired_grasp_height(
+                        desired_grasp_base_z_m=(
+                            item.placement_grasp_point_base_m[2]
+                        ),
+                        observed_grasp_world_z_m=grasp[2],
+                        pickup_tip_base_z_m=task_config.pick_tip_base_z_m,
+                        table_top_world_z_m=C.TABLE_TOP_Z,
+                    )
+                )
+                # Clear the 6 mm shank while keeping the in-bin finger
+                # envelope smaller than it would be at the 6 mm full stroke.
+                # Full opening happens only after the vertical retreat.
+                in_bin_open_jaw = min(C.JAW_OPEN, jaw_target + 0.0005)
+                placement_height_plan = {
+                    "mode": "configured screw grasp height",
+                    "desired_grasp_point_base_z_m": float(
+                        item.placement_grasp_point_base_m[2]
+                    ),
+                    "observed_grasp_above_pickup_tip_m": float(
+                        grasp_above_tip_m
+                    ),
+                    "commanded_tip_base_z_m": float(place_tip_z),
+                }
 
             current_rotation, _ = fk.fk(q)
             current_spread = current_rotation @ np.asarray(C.FINGER_SPREAD_AXIS)
@@ -559,9 +607,10 @@ def main() -> None:
                 "pick_z": task_config.pick_tip_base_z_m,
                 "spread_dir": source_spread.tolist(),
                 "place_xy": place_xy.tolist(),
-                "place_z": task_config.bin_release_tip_base_z_m,
+                "place_z": place_tip_z,
                 "place_spread_dir": destination_spread.tolist(),
                 "jaw_half_target_m": jaw_target,
+                "in_bin_open_jaw_half_m": in_bin_open_jaw,
                 "approach_clearance_m": task_config.task.approach_clearance_m,
             }
             event = {
@@ -571,6 +620,8 @@ def main() -> None:
                 "source_truth": start,
                 "scripted_pick_grasp_point_base_xy_m": grasp[:2].tolist(),
                 "jaw_half_target_m": float(jaw_target),
+                "in_bin_open_jaw_half_m": float(in_bin_open_jaw),
+                "placement_height_plan": placement_height_plan,
                 "shared_semantic_phases": semantic_phases,
                 "pickup_verified": False,
                 "placement_verified": False,
@@ -695,6 +746,18 @@ def main() -> None:
                     )
                     event["lift_height_m"] = lift_m
                     event["pickup_verified"] = lift_m > 0.025
+
+                if item.kind == "screw" and phase in {
+                    "lift",
+                    "carry",
+                    "lower",
+                    "release",
+                    "settle",
+                    "retreat",
+                }:
+                    event.setdefault("phase_truth", {})[phase] = object_pose(
+                        item.item_id, item.kind
+                    )
 
             stability_passed = True
             if item.kind == "screw":

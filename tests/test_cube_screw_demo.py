@@ -18,6 +18,7 @@ from demos.scripted_cube_screw_bucket_sort import (
     local_to_world_vertices,
     resolve_screw_model,
     screw_jaw_half_target,
+    tool_tip_z_for_desired_grasp_height,
     validate_screw_model,
     verify_vertices_inside_bin,
 )
@@ -124,6 +125,25 @@ class CubeScrewScenarioTests(unittest.TestCase):
         )
         self.assertAlmostEqual(shallower_finger, 0.0017, places=12)
         self.assertGreater(shallower_finger, target)
+
+    def test_screw_placement_height_preserves_pickup_grasp_to_tip_offset(self):
+        tip_z, grasp_above_tip = tool_tip_z_for_desired_grasp_height(
+            desired_grasp_base_z_m=0.0314,
+            observed_grasp_world_z_m=0.899263,
+            pickup_tip_base_z_m=-0.0026,
+            table_top_world_z_m=0.9,
+        )
+        self.assertAlmostEqual(grasp_above_tip, 0.001863, places=9)
+        self.assertAlmostEqual(tip_z, 0.029537, places=9)
+        self.assertNotAlmostEqual(tip_z, 0.0649, places=6)
+
+        with self.assertRaisesRegex(ScenarioError, "0-20 mm"):
+            tool_tip_z_for_desired_grasp_height(
+                desired_grasp_base_z_m=0.0314,
+                observed_grasp_world_z_m=0.95,
+                pickup_tip_base_z_m=-0.0026,
+                table_top_world_z_m=0.9,
+            )
 
     def test_all_cad_vertices_fit_each_planned_red_bin_placement(self):
         cube = self.config.cube_config
