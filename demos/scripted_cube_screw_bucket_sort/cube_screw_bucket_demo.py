@@ -888,6 +888,12 @@ def main() -> None:
                 final_samples[item.item_id].append(
                     object_pose(item.item_id, item.kind)
                 )
+            save_frame(
+                "final scene",
+                "5 objects",
+                "all matching",
+                "final verification",
+            )
 
         final = {
             item.item_id: object_pose(item.item_id, item.kind) for item in items
