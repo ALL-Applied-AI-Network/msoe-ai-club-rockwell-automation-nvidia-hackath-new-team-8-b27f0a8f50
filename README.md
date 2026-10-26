@@ -17,6 +17,11 @@ See [BREV_SETUP.md](BREV_SETUP.md). Coding agents can simply be told: “Set thi
   supplied bin models. Its preserved default mode intentionally uses configured
   simulator poses; opt-in camera/training modes make decisions from rendered RGB.
   None of these modes uses Cosmos, and the demo is not proof of real-robot use.
+- [Scripted cube-and-screw bucket sort](demos/scripted_cube_screw_bucket_sort/README.md):
+  a separate headless physics demo that keeps the same three cube placements,
+  then grasps two supplied ISO 10642 M6 x 30 screw CAD models by their shafts
+  and places both in the red bin. Screw targets are configured simulator poses;
+  the current colour/cube camera detector does not perceive screws.
 
 ## FANUC hardware path
 
