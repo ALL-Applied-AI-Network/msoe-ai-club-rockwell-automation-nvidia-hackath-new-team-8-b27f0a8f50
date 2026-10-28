@@ -101,7 +101,10 @@ class Policy:
     IMAGE_SIZE = (1920, 1080)  # native table RGB; calibration pixels stay valid
     IMAGE_FORMAT = "png"  # preserve tiny cube edges until JPEG is validated on real images
     ACTION = "tcp"
-    PREFETCH = False  # every short phase is followed by a fresh observation
+    # Let the official client refill a long motion before its queue empties.
+    # Phase transitions still require measured feedback; this only removes
+    # network/camera pauses between chunks of the same phase.
+    PREFETCH = True
     DEPTH: list[str] = []  # depth is not recorded; start with reproducible RGB only
     DT = 0.1
 
@@ -111,14 +114,23 @@ class Policy:
     DESTINATION_MODE_ENV = "ROCKWELL_DESTINATION_MODE"
     CONFIRM_GRASP_FIT_ENV = "ROCKWELL_CONFIRM_CUBE_GRASP_FIT"
     STABLE_OBSERVATIONS_ENV = "ROCKWELL_INITIAL_STABLE_OBSERVATIONS"
-    MAX_ACTIONS_PER_CALL = 8
+    MAX_ACTIONS_PER_CALL = 100
     ABSOLUTE_MAX_MOTION_CALLS_PER_PHASE = 200
     MAX_NO_PROGRESS_CALLS = 4
     MIN_MEASURED_PROGRESS_MM = 0.5
     MIN_MEASURED_ANGULAR_PROGRESS_DEG = 0.5
     GRIPPER_FEEDBACK_TOLERANCE = 0.1
+    INSPECTION_OFFSET_X_M = -0.060
+    MAX_REVALIDATION_VISIBILITY_RETRIES = 3
     _OPEN_FEEDBACK_PHASES = frozenset(
-        {"approach_pick", "descend_pick", "settle", "retreat"}
+        {
+            "approach_inspection",
+            "align_above_pick",
+            "approach_pick",
+            "descend_pick",
+            "settle",
+            "retreat",
+        }
     )
     _CLOSED_FEEDBACK_PHASES = frozenset({"dwell", "lift", "carry", "lower"})
 
@@ -272,6 +284,7 @@ class Policy:
         self._phases: tuple[MotionPhase, ...] = ()
         self._phase_index = 0
         self._phase_dwell_rows_remaining: int | None = None
+        self._revalidation_visibility_failures = 0
         self._reset_phase_watchdog()
         self._completed_colours: set[str] = set()
         self._pending_verification_colour: str | None = None
@@ -379,18 +392,46 @@ class Policy:
             phase = self._phases[self._phase_index]
             if phase.requires_reobservation_before:
                 scenes = self._detect_scene_views(obs)
-                self._revalidate_before_descent(scenes.pickable)
-                if not self._descent_enabled:
-                    return self._hold_action(
-                        obs,
-                        "physical descent interlock is closed; holding at hover. "
-                        f"Set {self.DESCENT_INTERLOCK_ENV}=1 only after supervised "
-                        f"{self._vision_cube_edge_m * 1000.0:g} mm cube, grasp-fit, "
-                        "and fingertip-TCP verification",
+                try:
+                    self._revalidate_before_descent(scenes.pickable)
+                except PlanningError as exc:
+                    message = str(exc)
+                    retryable = (
+                        " target is missing" in message
+                        or " target is ambiguous" in message
                     )
-                # The revalidated observation directly supplies the next
-                # descent command; no queued action separates the gate from it.
+                    if (
+                        retryable
+                        and self._revalidation_visibility_failures
+                        < self.MAX_REVALIDATION_VISIBILITY_RETRIES
+                    ):
+                        self._revalidation_visibility_failures += 1
+                        self._emit(
+                            "pre_descent_visibility_retry",
+                            attempt=self._revalidation_visibility_failures,
+                            maximum_attempts=self.MAX_REVALIDATION_VISIBILITY_RETRIES,
+                            reason=message,
+                        )
+                        return self._hold_action(
+                            obs,
+                            "inspection view temporarily incomplete; waiting for "
+                            "a fresh table-camera frame",
+                        )
+                    raise
                 phase = self._phases[self._phase_index]
+
+            # Revalidation is performed from a laterally offset inspection
+            # pose. Align over the refreshed target first, then apply the
+            # descent interlock; never ask the table camera to see through the
+            # gripper at the direct-overhead pose.
+            if phase.name == "descend_pick" and not self._descent_enabled:
+                return self._hold_action(
+                    obs,
+                    "physical descent interlock is closed; holding at hover. "
+                    f"Set {self.DESCENT_INTERLOCK_ENV}=1 only after supervised "
+                    f"{self._vision_cube_edge_m * 1000.0:g} mm cube, grasp-fit, "
+                    "and fingertip-TCP verification",
+                )
 
             return self._execute_phase(obs, phase)
         except (ActionValidationError, PlanningError, VisionError, ValueError) as exc:
@@ -663,9 +704,10 @@ class Policy:
 
     def _set_active_plan(self, plan: PickPlacePlan) -> None:
         self._active_plan = plan
-        self._phases = semantic_phase_plan(plan, self.config)
+        self._phases = self._hardware_phase_plan(plan)
         self._phase_index = 0
         self._phase_dwell_rows_remaining = None
+        self._revalidation_visibility_failures = 0
         self._reset_phase_watchdog()
         self._last_hold_log = None
         self._emit(
@@ -676,6 +718,36 @@ class Policy:
             destination_mode=self._destination_mode,
             destination_xyz_m=list(plan.release_tip_pose.xyz_m),
             phase_names=[phase.name for phase in self._phases],
+        )
+
+    def _hardware_phase_plan(self, plan: PickPlacePlan) -> tuple[MotionPhase, ...]:
+        """Add a visible inspection/alignment pair without changing Isaac."""
+
+        shared = semantic_phase_plan(plan, self.config)
+        above_pick = shared[0].target
+        if above_pick is None:
+            raise PlanningError("shared approach phase has no target")
+        inspection = TipPoseBase(
+            (
+                above_pick.xyz_m[0] + self.INSPECTION_OFFSET_X_M,
+                above_pick.xyz_m[1],
+                above_pick.xyz_m[2],
+            ),
+            above_pick.yaw_rad,
+        )
+        return (
+            MotionPhase(
+                "approach_inspection",
+                inspection,
+                self.config.gripper.open_command,
+            ),
+            shared[1],
+            MotionPhase(
+                "align_above_pick",
+                above_pick,
+                self.config.gripper.open_command,
+            ),
+            *shared[2:],
         )
 
     def _plan_for_detection(
@@ -758,7 +830,7 @@ class Policy:
             release_tip_pose=refreshed.release_tip_pose,
         )
         self._active_plan = refreshed
-        self._phases = semantic_phase_plan(refreshed, self.config)
+        self._phases = self._hardware_phase_plan(refreshed)
         gate_index = next(
             index
             for index, phase in enumerate(self._phases)
@@ -766,15 +838,17 @@ class Policy:
         )
         self._phase_index = gate_index
         self._phase_dwell_rows_remaining = None
+        self._revalidation_visibility_failures = 0
         self._reset_phase_watchdog()
         self._emit(
             "pre_descent_revalidation",
             plan_id=refreshed.plan_id,
-            result="accepted",
+            result="accepted_from_offset_inspection",
             physical_descent_enabled=self._descent_enabled,
         )
-        if self._descent_enabled:
-            self._phase_index += 1
+        # Always move from the inspection offset to the direct-overhead hover.
+        # The act loop gates descent only after this alignment is measured.
+        self._phase_index += 1
 
     def _execute_phase(self, obs: dict, phase: MotionPhase):
         if phase.target is None:

@@ -134,10 +134,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-actions",
         type=int,
-        choices=range(1, 9),
-        default=1,
-        metavar="1..8",
-        help="maximum bounded TCP rows returned by one Policy.act call (default: 1)",
+        choices=range(1, 101),
+        default=32,
+        metavar="1..100",
+        help=(
+            "maximum bounded TCP rows returned by one Policy.act call "
+            "(default: 32; the official protocol limit is 100)"
+        ),
     )
     parser.add_argument(
         "--confirm-grasp-fit",

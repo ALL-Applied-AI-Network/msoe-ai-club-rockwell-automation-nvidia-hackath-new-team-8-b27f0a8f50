@@ -47,7 +47,7 @@ class SupervisedRunTests(unittest.TestCase):
             )
             self.assertEqual(os.environ[supervised_run.CUBE_EDGE_ENV], "10")
             self.assertNotIn(supervised_run.GRASP_FIT_ENV, os.environ)
-            self.assertEqual(os.environ[supervised_run.MAX_ACTIONS_ENV], "1")
+            self.assertEqual(os.environ[supervised_run.MAX_ACTIONS_ENV], "32")
             self.assertEqual(os.environ[supervised_run.STABLE_OBSERVATIONS_ENV], "3")
             for name in supervised_run._POLICY_TUNING_ENVIRONMENT:
                 self.assertNotIn(name, os.environ)

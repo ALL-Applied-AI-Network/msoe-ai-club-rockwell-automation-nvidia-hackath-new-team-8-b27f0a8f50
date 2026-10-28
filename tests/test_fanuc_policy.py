@@ -124,7 +124,7 @@ class FanucPolicyTests(unittest.TestCase):
         self.assertEqual(policy.CAMERAS, ["table"])
         self.assertEqual(policy.IMAGE_SIZE, (1920, 1080))
         self.assertEqual(policy.ACTION, "tcp")
-        self.assertFalse(policy.PREFETCH)
+        self.assertTrue(policy.PREFETCH)
         self.assertEqual(policy.DEPTH, [])
         self.assertEqual(policy.IMAGE_FORMAT, "png")
 
@@ -248,7 +248,7 @@ class FanucPolicyTests(unittest.TestCase):
             os.environ,
             {
                 Policy.DESCENT_INTERLOCK_ENV: "0",
-                "ROCKWELL_MAX_ACTIONS_PER_ACT": "9",
+                "ROCKWELL_MAX_ACTIONS_PER_ACT": "101",
             },
         ):
             with self.assertRaisesRegex(ValueError, "open-loop chunks are disabled"):
@@ -273,7 +273,13 @@ class FanucPolicyTests(unittest.TestCase):
         self.assertIn("no measured TCP progress", policy._blocked_reason)
 
     def test_in_place_angular_progress_does_not_trip_watchdog(self):
-        with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "1"}):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.DESCENT_INTERLOCK_ENV: "1",
+                "ROCKWELL_MAX_ACTIONS_PER_ACT": "8",
+            },
+        ):
             policy = Policy()
         x, y = policy.config.task.cube_spawns_base_xy_yaw_deg["yellow"][:2]
         phase = MotionPhase(
@@ -590,7 +596,13 @@ class FanucPolicyTests(unittest.TestCase):
         self.assertAlmostEqual(measured_without_feedback[-1], 0.65)
 
     def test_hold_preserves_close_command_over_lagging_open_feedback(self):
-        with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "0"}):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.DESCENT_INTERLOCK_ENV: "0",
+                "ROCKWELL_MAX_ACTIONS_PER_ACT": "8",
+            },
+        ):
             policy = Policy()
         x, y = policy.config.task.cube_spawns_base_xy_yaw_deg["yellow"][:2]
         close = MotionPhase(
@@ -713,13 +725,25 @@ class FanucPolicyTests(unittest.TestCase):
         hover_z = float(obs["tcp_pose"][2])
         obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
         chunk = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
-        self.assertEqual(policy._phase_index, 1)
+        self.assertEqual(policy._phase_index, 2)
         self.assertAlmostEqual(float(chunk[-1, 2]), hover_z)
         self.assertGreater(float(chunk[-1, 2]), -332.6)
         self.assertIsNone(policy._blocked_reason)
 
+        for _ in range(5):
+            obs["tcp_pose"] = chunk[-1, :6].tolist()
+            obs["joints"][-1] = chunk[-1, 6]
+            obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+            chunk = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+            if policy._phase_index == 3:
+                break
+        self.assertEqual(policy._phase_index, 3)
+
+        obs["tcp_pose"] = chunk[-1, :6].tolist()
+        obs["joints"][-1] = chunk[-1, 6]
         obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
-        policy.act(obs)
+        held = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+        np.testing.assert_allclose(held[-1, :6], obs["tcp_pose"])
         self.assertEqual(policy._active_plan.plan_id.count("revalidated"), 1)
 
     def test_real_default_requires_three_consistent_scenes_before_motion(self):
@@ -802,7 +826,22 @@ class FanucPolicyTests(unittest.TestCase):
 
         self.assertGreater(len(calls), calls_before_gate)
         self.assertEqual(policy._phase_index, 2)
-        self.assertLess(float(chunk[-1, 2]), hover_z)
+        self.assertAlmostEqual(float(chunk[-1, 2]), hover_z)
+
+        for _ in range(5):
+            obs["tcp_pose"] = chunk[-1, :6].tolist()
+            obs["joints"][-1] = chunk[-1, 6]
+            obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+            chunk = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+            if policy._phase_index == 3:
+                break
+        self.assertEqual(policy._phase_index, 3)
+
+        obs["tcp_pose"] = chunk[-1, :6].tolist()
+        obs["joints"][-1] = chunk[-1, 6]
+        obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+        descent = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+        self.assertLess(float(descent[-1, 2]), hover_z)
         self.assertIsNone(policy._blocked_reason)
 
     def test_moved_target_latches_hold_and_never_blindly_retries(self):
@@ -831,6 +870,47 @@ class FanucPolicyTests(unittest.TestCase):
         still_holding = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
         np.testing.assert_allclose(still_holding[-1, :6], hover)
         self.assertEqual(policy._phase_index, 1)
+
+    def test_offset_inspection_retries_transient_camera_occlusion(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "1",
+            },
+        ):
+            policy = Policy()
+        policy._detect_scene_views = lambda current: _views(_scene(current))
+        obs = _advance_to_gate(policy, _observation(policy._scan_tcp[:6]))
+
+        def without_red(current):
+            complete = _scene(current)
+            return _views(
+                SceneDetections(
+                    complete.scene_id,
+                    complete.capture_time_s,
+                    tuple(c for c in complete.cubes if c.colour != "red"),
+                )
+            )
+
+        policy._detect_scene_views = without_red
+        for expected_attempt in (1, 2, 3):
+            obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+            held = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+            np.testing.assert_allclose(held[-1, :6], obs["tcp_pose"])
+            self.assertEqual(
+                policy._revalidation_visibility_failures, expected_attempt
+            )
+            self.assertIsNone(policy._blocked_reason)
+            self.assertEqual(policy._phase_index, 1)
+
+        policy._detect_scene_views = lambda current: _views(_scene(current))
+        obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+        alignment = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+        self.assertEqual(policy._phase_index, 2)
+        self.assertEqual(policy._revalidation_visibility_failures, 0)
+        self.assertAlmostEqual(alignment[-1, 2], obs["tcp_pose"][2])
+        self.assertIsNone(policy._blocked_reason)
 
     def test_staleness_uses_estimated_cell_clock_offset(self):
         with mock.patch.dict(
