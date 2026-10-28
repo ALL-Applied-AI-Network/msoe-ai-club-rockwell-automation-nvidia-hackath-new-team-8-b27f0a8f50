@@ -8,11 +8,11 @@ the cell operator, controller limits, or emergency-stop procedure.
 Examples (run from ``hardware/fanuc_cell``)::
 
     uv run supervised_run.py --dry-run
-    uv run supervised_run.py hover --operator-present --cube-mm 10
+    uv run supervised_run.py hover --cube-mm 10
+    uv run supervised_run.py hover --cube-mm 16 --mock --trials 1
 
-The ``sort`` mode additionally requires explicit acknowledgements printed by
-``--help``.  Do not use it until the hover-only test and mechanical fit check
-have passed under the assigned operator's supervision.
+The ``sort`` mode enables physical descent. Do not use it until the hover-only
+test and mechanical fit check have passed with the assigned operator.
 """
 
 from __future__ import annotations
@@ -32,6 +32,13 @@ CUBE_EDGE_ENV = "ROCKWELL_VISION_CUBE_EDGE_MM"
 GRASP_FIT_ENV = "ROCKWELL_CONFIRM_CUBE_GRASP_FIT"
 MAX_ACTIONS_ENV = "ROCKWELL_MAX_ACTIONS_PER_ACT"
 STABLE_OBSERVATIONS_ENV = "ROCKWELL_INITIAL_STABLE_OBSERVATIONS"
+_POLICY_TUNING_ENVIRONMENT = (
+    "ROCKWELL_MAX_OBSERVATION_AGE_S",
+    "ROCKWELL_MAX_TARGET_MOTION_M",
+    "ROCKWELL_MAX_TARGET_YAW_MOTION_DEG",
+    "ROCKWELL_MIN_HARDWARE_CENTRE_CLEARANCE_M",
+    "ROCKWELL_MIN_DETECTION_CONFIDENCE",
+)
 
 _CONTROLLED_ENVIRONMENT = (
     MOTION_ENV,
@@ -41,6 +48,7 @@ _CONTROLLED_ENVIRONMENT = (
     GRASP_FIT_ENV,
     MAX_ACTIONS_ENV,
     STABLE_OBSERVATIONS_ENV,
+    *_POLICY_TUNING_ENVIRONMENT,
 )
 
 
@@ -132,34 +140,20 @@ def _parser() -> argparse.ArgumentParser:
         help="maximum bounded TCP rows returned by one Policy.act call (default: 1)",
     )
     parser.add_argument(
-        "--operator-present",
-        action="store_true",
-        help="acknowledge that the assigned cell operator is present for physical motion",
-    )
-    parser.add_argument(
-        "--confirm-standard-fingers",
-        action="store_true",
-        help="acknowledge that the installed 76 mm standard custom fingers were verified",
-    )
-    parser.add_argument(
-        "--confirm-tcp-at-fingertips",
-        action="store_true",
-        help="acknowledge that active UTOOL1 was verified at the fingertips",
-    )
-    parser.add_argument(
-        "--confirmed-cube-mm",
-        type=int,
-        choices=(10, 16),
-        help="measured/organizer-confirmed cube edge; must match --cube-mm for sort",
-    )
-    parser.add_argument(
         "--confirm-grasp-fit",
         action="store_true",
         help=(
-            "acknowledge that the selected cube was physically checked to fit the "
-            "installed hooks; this is especially consequential for a 16 mm cube"
+            "enable 16 mm descent after the operator has physically checked that "
+            "the selected cube fits the installed hooks; not needed for hover"
         ),
     )
+    parser.add_argument(
+        "--mock",
+        action="store_true",
+        help="forward to the official localhost-only mock; never contacts the robot",
+    )
+    parser.add_argument("--trials", type=int, help="with --mock: rollout count")
+    parser.add_argument("--trial-s", type=float, help="with --mock: seconds per rollout")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -181,25 +175,17 @@ def _settings(args: argparse.Namespace) -> LaunchSettings:
     )
 
 
-def _required_acknowledgements(args: argparse.Namespace) -> list[str]:
+def _required_inputs(args: argparse.Namespace) -> list[str]:
     missing: list[str] = []
     if args.mode in {"hover", "sort"}:
-        if not args.operator_present:
-            missing.append("--operator-present")
         if args.cube_mm is None:
             missing.append("--cube-mm {10|16}")
-    if args.mode == "sort":
-        if not args.confirm_standard_fingers:
-            missing.append("--confirm-standard-fingers")
-        if not args.confirm_tcp_at_fingertips:
-            missing.append("--confirm-tcp-at-fingertips")
-        if (
-            args.cube_mm is not None
-            and args.confirmed_cube_mm != args.cube_mm
-        ):
-            missing.append(f"--confirmed-cube-mm {args.cube_mm}")
-        if not args.confirm_grasp_fit:
-            missing.append("--confirm-grasp-fit")
+    if args.mode == "sort" and args.cube_mm == 16 and not args.confirm_grasp_fit:
+        missing.append("--confirm-grasp-fit")
+    if args.mock and args.mode == "hold":
+        missing.append("mode hover (the official mock has no initial TCP pose)")
+    if not args.mock and (args.trials is not None or args.trial_s is not None):
+        missing.append("--mock (required with --trials/--trial-s)")
     return missing
 
 
@@ -217,6 +203,12 @@ def _apply_environment(
 
 def _forwarded_arguments(args: argparse.Namespace) -> list[str]:
     forwarded: list[str] = []
+    if args.mock:
+        forwarded.append("--mock")
+        if args.trials is not None:
+            forwarded.extend(("--trials", str(args.trials)))
+        if args.trial_s is not None:
+            forwarded.extend(("--trial-s", str(args.trial_s)))
     for option, value in (
         ("--url", args.url),
         ("--token", args.token),
@@ -249,15 +241,16 @@ def main(
     parser = _parser()
     args = parser.parse_args(argv)
     settings = _settings(args)
-    missing = _required_acknowledgements(args)
+    missing = _required_inputs(args)
     if args.dry_run:
         summary = settings.public_summary()
-        summary["missing_acknowledgements_for_live_run"] = missing
+        summary["mock"] = args.mock
+        summary["missing_required_inputs"] = missing
         print(json.dumps(summary, sort_keys=True))
         return 0
     if missing:
         parser.error(
-            f"{args.mode} mode requires explicit acknowledgement(s): "
+            f"invalid launch configuration: "
             + ", ".join(missing)
         )
 

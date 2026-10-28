@@ -355,7 +355,7 @@ class FanucPolicyTests(unittest.TestCase):
                     "yellow-robot-component",
                     "yellow",
                     timestamp,
-                    (0.05, 0.06, -0.0001),
+                    (0.28, 0.06, -0.0001),
                     0.0,
                     0.9,
                 ),
@@ -373,7 +373,13 @@ class FanucPolicyTests(unittest.TestCase):
             policy._verify_post_place(views)
 
     def test_weak_outside_pickup_evidence_cannot_false_pass_outcome(self):
-        with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "0"}):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.DESTINATION_MODE_ENV: "bins",
+                Policy.DESCENT_INTERLOCK_ENV: "0",
+            },
+        ):
             policy = Policy()
         obs = _observation(policy._scan_tcp[:6])
         timestamp = float(obs["t"])
@@ -385,7 +391,7 @@ class FanucPolicyTests(unittest.TestCase):
                     "yellow-robot-component",
                     "yellow",
                     timestamp,
-                    (0.05, 0.06, -0.0001),
+                    (0.28, 0.06, -0.0001),
                     0.0,
                     0.10,
                 ),
@@ -401,6 +407,142 @@ class FanucPolicyTests(unittest.TestCase):
         policy._pending_verification_colour = "yellow"
         with self.assertRaisesRegex(PlanningError, "outside.*matching destination"):
             policy._verify_post_place(views)
+
+    def test_virtual_table_ignores_weak_non_destination_colour_evidence(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.DESTINATION_MODE_ENV: "virtual-table",
+                Policy.DESCENT_INTERLOCK_ENV: "0",
+            },
+        ):
+            policy = Policy()
+        obs = _observation(policy._scan_tcp[:6])
+        timestamp = float(obs["t"])
+        raw = SceneDetections(
+            "weak-cell-colour",
+            timestamp,
+            (
+                CubeDetection(
+                    "weak-blue-cell-component",
+                    "blue",
+                    timestamp,
+                    (0.28, 0.06, -0.0001),
+                    0.0,
+                    0.08,
+                ),
+            ),
+        )
+        with mock.patch.object(
+            policy_module, "detect_coloured_cubes", return_value=raw
+        ):
+            views = policy._detect_scene_views(obs)
+        self.assertEqual(views.unplaced.cubes, ())
+        self.assertEqual(views.pickable.cubes, ())
+
+    def test_impossible_projected_cell_colour_does_not_block_virtual_destination(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.DESTINATION_MODE_ENV: "virtual-table",
+                Policy.DESCENT_INTERLOCK_ENV: "0",
+            },
+        ):
+            policy = Policy()
+        obs = _observation(policy._scan_tcp[:6])
+        timestamp = float(obs["t"])
+        destination_xy = policy.config.task.bin_centres_base_m["red"]
+        raw = SceneDetections(
+            "outside-cell-false-positive",
+            timestamp,
+            (
+                CubeDetection(
+                    "red-cell-hardware",
+                    "red",
+                    timestamp,
+                    (-0.758, -0.124, -0.0001),
+                    0.0,
+                    0.9,
+                ),
+                CubeDetection(
+                    "red-at-virtual-destination",
+                    "red",
+                    timestamp,
+                    (destination_xy[0], destination_xy[1], -0.0001),
+                    0.0,
+                    0.9,
+                ),
+            ),
+        )
+        with mock.patch.object(
+            policy_module, "detect_coloured_cubes", return_value=raw
+        ):
+            views = policy._detect_scene_views(obs)
+        self.assertEqual(views.unplaced.cubes, ())
+        self.assertEqual(
+            [cube.track_id for cube in views.at_destination["red"]],
+            ["red-at-virtual-destination"],
+        )
+        policy._pending_verification_colour = "red"
+        policy._verify_post_place(views)
+        self.assertIn("red", policy._completed_colours)
+
+    def test_bin_mode_retains_out_of_workspace_drop_evidence(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.DESTINATION_MODE_ENV: "bins",
+                Policy.DESCENT_INTERLOCK_ENV: "0",
+            },
+        ):
+            policy = Policy()
+        obs = _observation(policy._scan_tcp[:6])
+        timestamp = float(obs["t"])
+        dropped = CubeDetection(
+            "red-outside-workspace",
+            "red",
+            timestamp,
+            (-0.758, -0.124, -0.0001),
+            0.0,
+            0.9,
+        )
+        raw = SceneDetections("outside-workspace-drop", timestamp, (dropped,))
+        with mock.patch.object(
+            policy_module, "detect_coloured_cubes", return_value=raw
+        ):
+            views = policy._detect_scene_views(obs)
+        self.assertEqual(views.unplaced.cubes, (dropped,))
+        policy._pending_verification_colour = "red"
+        with self.assertRaisesRegex(PlanningError, "outside.*matching destination"):
+            policy._verify_post_place(views)
+
+    def test_virtual_table_rechecks_previously_completed_destinations(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.DESTINATION_MODE_ENV: "virtual-table",
+                Policy.DESCENT_INTERLOCK_ENV: "0",
+            },
+        ):
+            policy = Policy()
+        timestamp = time.time()
+        yellow_xy = policy.config.task.bin_centres_base_m["yellow"]
+        yellow = CubeDetection(
+            "yellow-at-destination",
+            "yellow",
+            timestamp,
+            (yellow_xy[0], yellow_xy[1], -0.0001),
+            0.0,
+            0.9,
+        )
+        scenes = _views(
+            SceneDetections("red-displaced", timestamp, ()),
+            at_destination={"yellow": (yellow,)},
+        )
+        policy._completed_colours = {"red"}
+        policy._pending_verification_colour = "yellow"
+        with self.assertRaisesRegex(PlanningError, "confident red"):
+            policy._verify_post_place(scenes)
 
     def test_invalid_real_tcp_during_motion_blocks_without_forward_chunk(self):
         with mock.patch.dict(
@@ -786,6 +928,71 @@ class FanucPolicyTests(unittest.TestCase):
             _views(empty, at_destination={"red": (placed,)})
         )
         self.assertIn("red", policy._completed_colours)
+
+    def test_complete_three_colour_virtual_table_state_machine(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "1",
+                Policy.DESTINATION_MODE_ENV: "virtual-table",
+                Policy.VISION_CUBE_EDGE_ENV: "10",
+                "ROCKWELL_MAX_ACTIONS_PER_ACT": "8",
+            },
+        ):
+            policy = Policy()
+
+        def detected_views(obs):
+            timestamp = float(obs["t"])
+            base_scene = _scene(obs)
+            absent = set(policy._completed_colours)
+            if policy._pending_verification_colour is not None:
+                absent.add(policy._pending_verification_colour)
+            remaining = SceneDetections(
+                f"full-sort:{timestamp}",
+                timestamp,
+                tuple(
+                    cube for cube in base_scene.cubes if cube.colour not in absent
+                ),
+            )
+            at_destination: dict[str, tuple[CubeDetection, ...]] = {}
+            for colour in absent:
+                x_m, y_m = policy.config.task.bin_centres_base_m[colour]
+                at_destination[colour] = (
+                    CubeDetection(
+                        f"{colour}-placed",
+                        colour,
+                        timestamp,
+                        (x_m, y_m, -0.0001),
+                        0.0,
+                        0.9,
+                    ),
+                )
+            return _views(remaining, at_destination=at_destination)
+
+        policy._detect_scene_views = detected_views
+        obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
+        phases_seen: set[str] = set()
+        for _ in range(500):
+            obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+            chunk = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+            self.assertGreaterEqual(len(chunk), 1)
+            self.assertLessEqual(len(chunk), 8)
+            obs["tcp_pose"] = chunk[-1, :6].tolist()
+            obs["joints"][-1] = chunk[-1, 6]
+            if policy._active_plan is not None:
+                phases_seen.add(policy._phases[policy._phase_index].name)
+            if len(policy._completed_colours) == 3:
+                break
+        else:
+            self.fail("three-colour virtual-table state machine did not complete")
+
+        self.assertIsNone(policy._blocked_reason)
+        self.assertEqual(policy._completed_colours, {"red", "yellow", "blue"})
+        self.assertTrue(
+            {"descend_pick", "close", "lift", "carry", "lower", "release"}
+            <= phases_seen
+        )
 
     def test_sixteen_mm_hardware_profile_is_vision_only_and_gates_descent(self):
         with mock.patch.dict(

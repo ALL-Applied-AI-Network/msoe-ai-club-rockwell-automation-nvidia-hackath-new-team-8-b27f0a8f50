@@ -30,6 +30,7 @@ class SupervisedRunTests(unittest.TestCase):
                 supervised_run.GRASP_FIT_ENV: "1",
                 supervised_run.MAX_ACTIONS_ENV: "8",
                 supervised_run.STABLE_OBSERVATIONS_ENV: "1",
+                supervised_run._POLICY_TUNING_ENVIRONMENT[0]: "999",
             },
             clear=False,
         )
@@ -48,16 +49,18 @@ class SupervisedRunTests(unittest.TestCase):
             self.assertNotIn(supervised_run.GRASP_FIT_ENV, os.environ)
             self.assertEqual(os.environ[supervised_run.MAX_ACTIONS_ENV], "1")
             self.assertEqual(os.environ[supervised_run.STABLE_OBSERVATIONS_ENV], "3")
+            for name in supervised_run._POLICY_TUNING_ENVIRONMENT:
+                self.assertNotIn(name, os.environ)
         self.assertEqual(calls, [[]])
 
-    def test_hover_requires_operator_and_never_enables_descent(self):
+    def test_hover_requires_explicit_cube_profile_and_never_enables_descent(self):
         with self.assertRaises(SystemExit):
             supervised_run.main(["hover"], delegate=lambda _: None)
 
         calls: list[list[str]] = []
         with self._clean_environment():
             supervised_run.main(
-                ["hover", "--operator-present", "--cube-mm", "16"],
+                ["hover", "--cube-mm", "16"],
                 delegate=lambda a: calls.append(list(a)),
             )
             self.assertEqual(os.environ[supervised_run.MOTION_ENV], "1")
@@ -65,43 +68,30 @@ class SupervisedRunTests(unittest.TestCase):
             self.assertEqual(os.environ[supervised_run.CUBE_EDGE_ENV], "16")
         self.assertEqual(calls, [[]])
 
-    def test_sort_requires_all_specific_acknowledgements(self):
-        incomplete = [
-            "sort",
-            "--operator-present",
-            "--confirm-standard-fingers",
-            "--confirm-tcp-at-fingertips",
-            "--cube-mm",
-            "10",
-            "--confirmed-cube-mm",
-            "10",
-        ]
-        with self.assertRaises(SystemExit):
-            supervised_run.main(incomplete, delegate=lambda _: None)
-
-        complete = [*incomplete, "--confirm-grasp-fit", "--destination", "virtual-table"]
+    def test_ten_mm_sort_uses_mode_and_profile_without_inert_acknowledgements(self):
         calls: list[list[str]] = []
-        supervised_run.main(complete, delegate=lambda a: calls.append(list(a)))
+        supervised_run.main(
+            ["sort", "--cube-mm", "10", "--destination", "virtual-table"],
+            delegate=lambda a: calls.append(list(a)),
+        )
         self.assertEqual(os.environ[supervised_run.MOTION_ENV], "1")
         self.assertEqual(os.environ[supervised_run.DESCENT_ENV], "1")
         self.assertEqual(os.environ[supervised_run.DESTINATION_ENV], "virtual-table")
-        self.assertEqual(os.environ[supervised_run.GRASP_FIT_ENV], "1")
+        self.assertNotIn(supervised_run.GRASP_FIT_ENV, os.environ)
         self.assertEqual(calls, [[]])
 
-    def test_confirmed_cube_size_must_match_selected_profile(self):
-        args = [
-            "sort",
-            "--operator-present",
-            "--confirm-standard-fingers",
-            "--confirm-tcp-at-fingertips",
-            "--cube-mm",
-            "16",
-            "--confirmed-cube-mm",
-            "10",
-            "--confirm-grasp-fit",
-        ]
+    def test_sixteen_mm_sort_requires_behavior_bearing_fit_override(self):
         with self.assertRaises(SystemExit):
-            supervised_run.main(args, delegate=lambda _: None)
+            supervised_run.main(
+                ["sort", "--cube-mm", "16"], delegate=lambda _: None
+            )
+        calls: list[list[str]] = []
+        supervised_run.main(
+            ["sort", "--cube-mm", "16", "--confirm-grasp-fit"],
+            delegate=lambda a: calls.append(list(a)),
+        )
+        self.assertEqual(os.environ[supervised_run.GRASP_FIT_ENV], "1")
+        self.assertEqual(calls, [[]])
 
     def test_dry_run_never_delegates_or_prints_forwarded_secret(self):
         called = False
@@ -133,7 +123,27 @@ class SupervisedRunTests(unittest.TestCase):
         summary = json.loads(output.getvalue())
         self.assertEqual(summary["cube_edge_mm"], 16)
         self.assertTrue(summary["descent_enabled"])
-        self.assertIn("--confirm-grasp-fit", summary["missing_acknowledgements_for_live_run"])
+        self.assertIn("--confirm-grasp-fit", summary["missing_required_inputs"])
+
+    def test_mock_arguments_are_forwarded_without_raw_environment_exports(self):
+        calls: list[list[str]] = []
+        supervised_run.main(
+            [
+                "hover",
+                "--cube-mm",
+                "16",
+                "--mock",
+                "--trials",
+                "1",
+                "--trial-s",
+                "2",
+            ],
+            delegate=lambda a: calls.append(list(a)),
+        )
+        self.assertEqual(
+            calls,
+            [["--mock", "--trials", "1", "--trial-s", "2.0"]],
+        )
 
     def test_only_allowlisted_arguments_are_forwarded(self):
         calls: list[list[str]] = []

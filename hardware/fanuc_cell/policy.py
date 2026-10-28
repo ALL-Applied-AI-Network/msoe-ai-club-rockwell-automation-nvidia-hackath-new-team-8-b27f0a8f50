@@ -464,7 +464,23 @@ class Policy:
         bin_components_excluded = 0
         outside_pickup_region_excluded = 0
         low_confidence_outside_region_retained = 0
+        low_confidence_outside_region_ignored = 0
+        outside_hardware_workspace_excluded = 0
         for detection in raw.cubes:
+            if (
+                self._destination_mode == "virtual-table"
+                and not self._detection_in_outcome_workspace(detection)
+            ):
+                # The calibrated camera sees coloured robot/cell components
+                # well beyond any physically reachable cube location. Do not
+                # let geometrically impossible projections masquerade as
+                # unsorted cubes. Virtual-table mode separately requires
+                # positive detections for the current and all previously
+                # completed colours at their destinations. Bin mode remains
+                # fail-closed and retains this evidence because it cannot see
+                # reliably into an opaque bin.
+                outside_hardware_workspace_excluded += 1
+                continue
             bin_membership = {
                 colour: (
                     abs(
@@ -500,6 +516,13 @@ class Policy:
                         f"low-confidence {detection.colour} detection "
                         f"({detection.confidence:.2f} < {self._minimum_confidence:.2f})"
                     )
+                if self._destination_mode == "virtual-table":
+                    # Positive destination evidence is mandatory in this mode.
+                    # Keeping weak cell-colour evidence elsewhere can only
+                    # create a false failure; a real missing/drop outcome still
+                    # fails because the required destination cube is absent.
+                    low_confidence_outside_region_ignored += 1
+                    continue
                 # It is never pickable, but erasing weak evidence here could
                 # turn a dropped cube into a false successful placement. Keep
                 # it in the outcome view so matching/completed-colour checks
@@ -537,6 +560,12 @@ class Policy:
             low_confidence_outside_region_retained=(
                 low_confidence_outside_region_retained
             ),
+            low_confidence_outside_region_ignored=(
+                low_confidence_outside_region_ignored
+            ),
+            outside_hardware_workspace_excluded=(
+                outside_hardware_workspace_excluded
+            ),
             pickable_colours=[cube.colour for cube in pickable_scene.cubes],
             matching_destination_detections={
                 colour: len(detections)
@@ -547,6 +576,26 @@ class Policy:
             unplaced=unplaced_scene,
             pickable=pickable_scene,
             at_destination=destination_detections,
+        )
+
+    def _detection_in_outcome_workspace(self, detection: CubeDetection) -> bool:
+        """Whether a projected cube centre is physically plausible in the cell.
+
+        Base and UF0 share XY. Use the same official TCP XY box and radial
+        reach that constrain commanded targets. A virtual-table placement also
+        needs positive destination evidence, so excluding an unreachable
+        projected colour cannot by itself turn a drop into success.
+        """
+
+        x_m, y_m = detection.position_base_m[:2]
+        bounds = self.config.hardware.tcp_bounds_uf0_mm
+        x_lower, x_upper = (float(value) / 1000.0 for value in bounds["x"])
+        y_lower, y_upper = (float(value) / 1000.0 for value in bounds["y"])
+        return (
+            x_lower <= x_m <= x_upper
+            and y_lower <= y_m <= y_upper
+            and math.hypot(x_m, y_m)
+            <= self.config.hardware.maximum_radial_reach_m
         )
 
     def _start_next_plan(self, scene: SceneDetections) -> bool:
@@ -905,23 +954,25 @@ class Policy:
             )
 
         if self._destination_mode == "virtual-table":
-            matching = tuple(
-                cube
-                for cube in scenes.at_destination.get(colour, ())
-                if cube.confidence >= self._minimum_confidence
-            )
-            if len(matching) != 1:
-                raise PlanningError(
-                    "virtual-table post-place verification requires exactly one "
-                    f"confident {colour} cube in its configured destination "
-                    f"footprint, observed {len(matching)}"
+            for expected_colour in sorted(forbidden):
+                matching = tuple(
+                    cube
+                    for cube in scenes.at_destination.get(expected_colour, ())
+                    if cube.confidence >= self._minimum_confidence
                 )
+                if len(matching) != 1:
+                    raise PlanningError(
+                        "virtual-table post-place verification requires exactly "
+                        f"one confident {expected_colour} cube in its configured "
+                        f"destination footprint, observed {len(matching)}"
+                    )
 
         self._completed_colours.add(colour)
         self._pending_verification_colour = None
         verification = (
             "fresh table RGB found exactly one matching-colour cube in the "
-            "configured virtual-table destination and none outside it"
+            "configured virtual-table destination for every completed colour "
+            "and none outside them"
             if self._destination_mode == "virtual-table"
             else "fresh table RGB found no matching-colour cube outside the "
             "configured same-colour bin footprint"

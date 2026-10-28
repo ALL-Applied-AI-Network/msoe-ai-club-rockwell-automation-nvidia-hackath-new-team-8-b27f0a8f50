@@ -59,6 +59,13 @@ placed cube or have the operator identify it before choosing 10 or 16 mm.
   is required or detected.
 - Virtual-table completion requires a fresh positive camera detection at the
   destination, rather than treating disappearance alone as success.
+- Virtual-table outcome verification discards projected colour fragments
+  outside the official TCP XY/radial workspace, then positively rechecks every
+  completed colour at its destination. The recorded initial scene contained
+  hundreds of such red/yellow cell-background fragments; without this paired
+  filter/check, a successful red placement would have been reported as a
+  failure. Bin mode retains outside-workspace evidence because it lacks the
+  same positive destination view.
 - `supervised_run.py` clears inherited arming variables and enables only the
   requested mode. This avoids persistent shell exports and mistyped multiline
   commands.
@@ -86,7 +93,7 @@ safety controller.
 1. Inspect the effective settings without contacting the cell:
 
    ```bash
-   uv run supervised_run.py hover --cube-mm 16 --operator-present --dry-run
+   uv run supervised_run.py hover --cube-mm 16 --dry-run
    ```
 
    Replace `16` with `10` if the physical cube is measured/confirmed as 10 mm.
@@ -100,7 +107,7 @@ safety controller.
 3. With the operator present and the table path clear, run **hover only**:
 
    ```bash
-   uv run supervised_run.py hover --cube-mm 16 --operator-present
+   uv run supervised_run.py hover --cube-mm 16
    ```
 
    This may move to the planned high approach but cannot descend. Stop if the
@@ -115,10 +122,6 @@ safety controller.
    uv run supervised_run.py sort \
      --destination virtual-table \
      --cube-mm 16 \
-     --operator-present \
-     --confirm-standard-fingers \
-     --confirm-tcp-at-fingertips \
-     --confirmed-cube-mm 16 \
      --confirm-grasp-fit
    ```
 
@@ -131,6 +134,23 @@ clear before starting; they are at base-frame XY red `(0.24, -0.19)`, yellow
 
 Use `Ctrl+C`, not `Ctrl+Z`, to stop the client. `Ctrl+Z` merely suspends it and
 can leave an old process or exported environment setting behind.
+
+The launcher deliberately does not ask whether an operator is present: that is
+already guaranteed by the event workflow and a command-line checkbox cannot
+verify it. `--confirm-grasp-fit` remains only because it materially controls
+whether the policy permits 16 mm contact descent.
+
+For a localhost-only official protocol check, use:
+
+```bash
+uv run supervised_run.py hover --cube-mm 16 --mock --trials 1 --trial-s 2
+```
+
+The current approved request still describes 10 mm cubes and physical bins.
+Its remaining trials do not match the no-bucket/16 mm setup unless the operator
+and organizers explicitly agree to that changed setup. A fresh formal
+submission also cannot be made from the checked-in YAML until its team/contact
+TODOs and placement description are corrected.
 
 ## Offline camera audit
 
