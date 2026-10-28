@@ -28,18 +28,23 @@ See [BREV_SETUP.md](BREV_SETUP.md). Coding agents can simply be told: “Set thi
 The project now includes a wrapper for the event's official supervised FANUC
 client under [`hardware/fanuc_cell`](hardware/fanuc_cell). Start with the
 [`hardware/README.md`](hardware/README.md) onboarding and the more detailed
-[`docs/HARDWARE_TRANSFER.md`](docs/HARDWARE_TRANSFER.md) validation ladder.
+[`docs/HARDWARE_TRANSFER.md`](docs/HARDWARE_TRANSFER.md) validation ladder. The
+first physical session's no-motion diagnosis and guarded retry commands are in
+[`docs/HARDWARE_FIRST_RUN_DIAGNOSIS.md`](docs/HARDWARE_FIRST_RUN_DIAGNOSIS.md).
 The official mock checks the client contract and action limits; it does **not**
 prove that perception, motion, grasping, collision avoidance, or the physical
 sort works. No physical run has been completed by this project yet.
 
-Current shared assumption: **10 mm cubes and UTOOL1/TCP at the fingertips**,
-following the pinned executable client. Separately, an organizer clarified on
-October 26, 2026 that the standard fingers touch the table near UF0 Z = -335 mm;
-the former -345 mm FAQ value came from another group's shorter fingers and was
-reverted. The two facts are consistent, but the installed fingers and active
-UTOOL1/UF0 still require a supervised high check before physical descent. Do
-not treat a policy-issued hold as an emergency stop.
+The preserved simulator task uses **10 mm cubes**. Hardware motion now requires
+an explicit 10 mm or 16 mm camera profile after the placed cube is identified;
+the first resized result video strongly suggests 16 mm but is not a physical
+measurement. UTOOL1/TCP remains assumed at the fingertips following the pinned
+executable client. Separately, an organizer clarified on October 26, 2026 that
+the standard fingers touch the table near UF0 Z = -335 mm; the former -345 mm
+FAQ value came from another group's shorter fingers and was reverted. The
+installed fingers, cube fit, and active UTOOL1/UF0 still require a supervised
+high check before physical descent. Do not treat a policy-issued hold as an
+emergency stop.
 
 ## Key dates
 

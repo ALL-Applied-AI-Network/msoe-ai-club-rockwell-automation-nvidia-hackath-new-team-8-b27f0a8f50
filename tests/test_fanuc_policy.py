@@ -63,8 +63,19 @@ def _scene(obs: dict, *, red_dx_m: float = 0.0) -> SceneDetections:
     )
 
 
-def _views(scene: SceneDetections):
-    return policy_module._SceneViews(unplaced=scene, pickable=scene)
+def _views(
+    scene: SceneDetections,
+    *,
+    at_destination: dict[str, tuple[CubeDetection, ...]] | None = None,
+):
+    destinations = {"red": (), "yellow": (), "blue": ()}
+    if at_destination:
+        destinations.update(at_destination)
+    return policy_module._SceneViews(
+        unplaced=scene,
+        pickable=scene,
+        at_destination=destinations,
+    )
 
 
 def _observation(tcp_pose=None, *, timestamp=None, trial_id="mock-t00") -> dict:
@@ -91,6 +102,16 @@ def _advance_to_gate(policy: Policy, obs: dict) -> dict:
 
 
 class FanucPolicyTests(unittest.TestCase):
+    def setUp(self):
+        # Most unit tests focus on a downstream gate. Keep them single-frame;
+        # a dedicated regression below exercises the real default of three
+        # temporally consistent observations before any motion starts.
+        patcher = mock.patch.dict(
+            os.environ, {Policy.STABLE_OBSERVATIONS_ENV: "1"}
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_default_hold_only_repeats_current_measurement_without_perception(self):
         with mock.patch.dict(
             os.environ,
@@ -348,8 +369,8 @@ class FanucPolicyTests(unittest.TestCase):
         )
         self.assertEqual(views.pickable.cubes, ())
         policy._pending_verification_colour = "yellow"
-        with self.assertRaisesRegex(PlanningError, "outside.*matching bin"):
-            policy._verify_post_place(views.unplaced)
+        with self.assertRaisesRegex(PlanningError, "outside.*matching destination"):
+            policy._verify_post_place(views)
 
     def test_weak_outside_pickup_evidence_cannot_false_pass_outcome(self):
         with mock.patch.dict(os.environ, {Policy.DESCENT_INTERLOCK_ENV: "0"}):
@@ -378,8 +399,8 @@ class FanucPolicyTests(unittest.TestCase):
         )
         self.assertEqual(views.pickable.cubes, ())
         policy._pending_verification_colour = "yellow"
-        with self.assertRaisesRegex(PlanningError, "outside.*matching bin"):
-            policy._verify_post_place(views.unplaced)
+        with self.assertRaisesRegex(PlanningError, "outside.*matching destination"):
+            policy._verify_post_place(views)
 
     def test_invalid_real_tcp_during_motion_blocks_without_forward_chunk(self):
         with mock.patch.dict(
@@ -559,6 +580,62 @@ class FanucPolicyTests(unittest.TestCase):
         policy.act(obs)
         self.assertEqual(policy._active_plan.plan_id.count("revalidated"), 1)
 
+    def test_real_default_requires_three_consistent_scenes_before_motion(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "0",
+                Policy.STABLE_OBSERVATIONS_ENV: "3",
+            },
+        ):
+            policy = Policy()
+        policy._detect_scene_views = lambda obs: _views(_scene(obs))
+        obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
+
+        for accepted in (1, 2):
+            obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+            held = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+            self.assertIsNone(policy._active_plan)
+            self.assertEqual(policy._initial_stability_count, accepted)
+            np.testing.assert_allclose(held[-1, :6], obs["tcp_pose"])
+
+        obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+        first_motion = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+        self.assertIsNotNone(policy._active_plan)
+        self.assertEqual(policy._initial_stability_count, 3)
+        self.assertFalse(np.allclose(first_motion[-1, :6], obs["tcp_pose"]))
+
+    def test_one_row_chunks_get_distance_derived_watchdog_budget(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "0",
+                "ROCKWELL_MAX_ACTIONS_PER_ACT": "1",
+            },
+        ):
+            policy = Policy()
+        policy._detect_scene_views = lambda obs: _views(_scene(obs))
+        obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
+        maximum_motion_calls = 0
+
+        for _ in range(60):
+            obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+            chunk = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+            obs["tcp_pose"] = chunk[-1, :6].tolist()
+            obs["joints"][-1] = chunk[-1, 6]
+            maximum_motion_calls = max(
+                maximum_motion_calls, policy._phase_motion_calls
+            )
+            if policy._active_plan is not None and policy._phase_index == 1:
+                break
+        else:
+            self.fail("one-row supervised mode did not reach the hover gate")
+
+        self.assertIsNone(policy._blocked_reason)
+        self.assertGreater(maximum_motion_calls, 20)
+
     def test_enabled_interlock_descends_only_after_reobservation(self):
         with mock.patch.dict(
             os.environ,
@@ -661,13 +738,104 @@ class FanucPolicyTests(unittest.TestCase):
             ),
         )
         with self.assertRaisesRegex(PlanningError, "post-place verification"):
-            policy._verify_post_place(failed_scene)
+            policy._verify_post_place(_views(failed_scene))
         self.assertNotIn("red", policy._completed_colours)
 
         clear_scene = SceneDetections("red-in-bin", timestamp, ())
-        policy._verify_post_place(clear_scene)
+        policy._verify_post_place(_views(clear_scene))
         self.assertIn("red", policy._completed_colours)
         self.assertIsNone(policy._pending_verification_colour)
+
+    def test_virtual_table_mode_sets_down_and_requires_positive_destination_view(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.DESTINATION_MODE_ENV: "virtual-table",
+                Policy.DESCENT_INTERLOCK_ENV: "0",
+            },
+        ):
+            policy = Policy()
+        initial = _observation(policy._scan_tcp[:6])
+        initial_scene = _scene(initial)
+        self.assertTrue(policy._start_next_plan(initial_scene))
+        self.assertAlmostEqual(
+            policy._active_plan.release_tip_pose.xyz_m[2],
+            policy.config.pick_tip_base_z_m,
+        )
+        self.assertLess(
+            policy._active_plan.release_tip_pose.xyz_m[2],
+            policy.config.bin_release_tip_base_z_m,
+        )
+        policy._finish_active_plan()
+
+        timestamp = float(initial["t"]) + 1.0
+        empty = SceneDetections("missing-placement", timestamp, ())
+        with self.assertRaisesRegex(PlanningError, "exactly one confident red"):
+            policy._verify_post_place(_views(empty))
+
+        destination_xy = policy.config.task.bin_centres_base_m["red"]
+        placed = CubeDetection(
+            "red-in-virtual-zone",
+            "red",
+            timestamp,
+            (destination_xy[0], destination_xy[1], -0.0001),
+            0.0,
+            0.9,
+        )
+        policy._verify_post_place(
+            _views(empty, at_destination={"red": (placed,)})
+        )
+        self.assertIn("red", policy._completed_colours)
+
+    def test_sixteen_mm_hardware_profile_is_vision_only_and_gates_descent(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.VISION_CUBE_EDGE_ENV: "16",
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "0",
+                Policy.CONFIRM_GRASP_FIT_ENV: "0",
+            },
+        ):
+            policy = Policy()
+        self.assertAlmostEqual(policy._vision_cube_edge_m, 0.016)
+        self.assertAlmostEqual(policy.config.cube_edge_m, 0.010)
+
+        obs = _observation(policy._scan_tcp[:6])
+        raw = SceneDetections("empty", float(obs["t"]), ())
+        with mock.patch.object(
+            policy_module, "detect_coloured_cubes", return_value=raw
+        ) as detector:
+            policy._detect_scene_views(obs)
+        self.assertAlmostEqual(
+            detector.call_args.kwargs["expected_cube_edge_m"], 0.016
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.VISION_CUBE_EDGE_ENV: "16",
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "1",
+                Policy.CONFIRM_GRASP_FIT_ENV: "0",
+            },
+        ):
+            with self.assertRaisesRegex(
+                ValueError, Policy.CONFIRM_GRASP_FIT_ENV
+            ):
+                Policy()
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.VISION_CUBE_EDGE_ENV: "16",
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "1",
+                Policy.CONFIRM_GRASP_FIT_ENV: "1",
+            },
+        ):
+            confirmed = Policy()
+        self.assertTrue(confirmed._grasp_fit_confirmed)
 
 
 if __name__ == "__main__":

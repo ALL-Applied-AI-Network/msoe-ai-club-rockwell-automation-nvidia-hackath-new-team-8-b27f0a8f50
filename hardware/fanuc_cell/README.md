@@ -107,6 +107,14 @@ leave it running:
 uv run run.py
 ```
 
+This repository adds `supervised_run.py` around the official client to prevent
+stale shell exports from accidentally arming motion. Its default is hold-only;
+hardware motion modes require an explicit cube size and acknowledgements. For
+the current no-bucket test, `virtual-table` is the default destination and uses
+the checked-in fixed XY zones with a near-table set-down height. Read
+[`../../docs/HARDWARE_FIRST_RUN_DIAGNOSIS.md`](../../docs/HARDWARE_FIRST_RUN_DIAGNOSIS.md)
+before using `hover` or `sort`.
+
 For each rollout, the operator homes the arm, sets up the objects as your submission says, and starts it; your
 policy then runs until the operator scores the rollout, stops it, or the controller faults, and the next one begins.
 You do nothing between rollouts. Come to the lab to watch if you can; every rollout is recorded either way.

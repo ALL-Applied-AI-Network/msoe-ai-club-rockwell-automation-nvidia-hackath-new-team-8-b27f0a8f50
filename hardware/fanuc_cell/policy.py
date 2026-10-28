@@ -86,6 +86,7 @@ class _SceneViews:
 
     unplaced: SceneDetections
     pickable: SceneDetections
+    at_destination: dict[str, tuple[CubeDetection, ...]]
 
 
 class Policy:
@@ -106,8 +107,12 @@ class Policy:
 
     MOTION_INTERLOCK_ENV = "ROCKWELL_ENABLE_PHYSICAL_MOTION"
     DESCENT_INTERLOCK_ENV = "ROCKWELL_ENABLE_PHYSICAL_DESCENT"
+    VISION_CUBE_EDGE_ENV = "ROCKWELL_VISION_CUBE_EDGE_MM"
+    DESTINATION_MODE_ENV = "ROCKWELL_DESTINATION_MODE"
+    CONFIRM_GRASP_FIT_ENV = "ROCKWELL_CONFIRM_CUBE_GRASP_FIT"
+    STABLE_OBSERVATIONS_ENV = "ROCKWELL_INITIAL_STABLE_OBSERVATIONS"
     MAX_ACTIONS_PER_CALL = 8
-    MAX_MOTION_CALLS_PER_PHASE = 20
+    ABSOLUTE_MAX_MOTION_CALLS_PER_PHASE = 200
     MAX_NO_PROGRESS_CALLS = 4
     MIN_MEASURED_PROGRESS_MM = 0.5
     MIN_MEASURED_ANGULAR_PROGRESS_DEG = 0.5
@@ -126,6 +131,37 @@ class Policy:
         if tuple(int(v) for v in self._table_camera["size"]) != self.IMAGE_SIZE:
             raise RuntimeError(
                 "Policy.IMAGE_SIZE must match the official table-camera calibration"
+            )
+
+        cube_profile = os.environ.get(
+            self.VISION_CUBE_EDGE_ENV,
+            f"{self.config.cube_edge_m * 1000.0:g}",
+        ).strip()
+        if cube_profile not in {"10", "10.0", "16", "16.0"}:
+            raise ValueError(
+                f"{self.VISION_CUBE_EDGE_ENV} must be 10 or 16 millimetres"
+            )
+        self._vision_cube_edge_m = float(cube_profile) / 1000.0
+
+        self._destination_mode = os.environ.get(
+            self.DESTINATION_MODE_ENV, "bins"
+        ).strip().lower()
+        if self._destination_mode not in {"bins", "virtual-table"}:
+            raise ValueError(
+                f"{self.DESTINATION_MODE_ENV} must be bins or virtual-table"
+            )
+        self._grasp_fit_confirmed = _environment_flag(self.CONFIRM_GRASP_FIT_ENV)
+
+        raw_stable_observations = os.environ.get(self.STABLE_OBSERVATIONS_ENV, "3")
+        try:
+            self._stable_observations_required = int(raw_stable_observations)
+        except ValueError as exc:
+            raise ValueError(
+                f"{self.STABLE_OBSERVATIONS_ENV} must be an integer"
+            ) from exc
+        if not 1 <= self._stable_observations_required <= 10:
+            raise ValueError(
+                f"{self.STABLE_OBSERVATIONS_ENV} must be between 1 and 10"
             )
 
         self._max_actions_per_call = min(
@@ -204,7 +240,10 @@ class Policy:
         self._emit(
             "policy_startup",
             backend="sidclab_https_tcp",
-            cube_edge_mm=self.config.cube_edge_m * 1000.0,
+            simulator_task_cube_edge_mm=self.config.cube_edge_m * 1000.0,
+            hardware_vision_cube_edge_mm=self._vision_cube_edge_m * 1000.0,
+            hardware_destination_mode=self._destination_mode,
+            initial_stable_observations=self._stable_observations_required,
             tcp_beyond_fingertips_mm=self.config.frames.tcp_beyond_fingertips_mm,
             motion_interlock_env=self.MOTION_INTERLOCK_ENV,
             descent_interlock_env=self.DESCENT_INTERLOCK_ENV,
@@ -213,6 +252,14 @@ class Policy:
             descent_requires_both_interlocks=True,
             minimum_hardware_centre_clearance_mm=(
                 self._minimum_hardware_clearance_m * 1000.0
+            ),
+            cube_profile_warning=(
+                "The recorded 640x360 table videos suggest approximately 16 mm "
+                "silhouettes, but video resampling is not a dimensional "
+                "measurement. Confirm the placed 10/16 mm cube with the "
+                "operator or calipers before descent. The 16 mm nominal edge "
+                "is also slightly larger than the modeled 15.99 mm hook-open "
+                "gap and therefore requires explicit grasp-fit confirmation."
             ),
             warning=self.config.frames.tcp_conflict_note,
         )
@@ -229,6 +276,8 @@ class Policy:
         self._completed_colours: set[str] = set()
         self._pending_verification_colour: str | None = None
         self._reference_detections: dict[str, CubeDetection] = {}
+        self._initial_stability_reference: dict[str, CubeDetection] = {}
+        self._initial_stability_count = 0
         self._blocked_reason: str | None = None
         self._last_observation_time_s: float | None = None
         self._clock_offset_estimate_s: float | None = None
@@ -239,17 +288,37 @@ class Policy:
         self._scene_number = 0
         self._motion_enabled = _environment_flag(self.MOTION_INTERLOCK_ENV)
         self._descent_enabled = _environment_flag(self.DESCENT_INTERLOCK_ENV)
+        if (
+            self._descent_enabled
+            and self._vision_cube_edge_m >= self.config.gripper.hook_open_gap_m
+            and not self._grasp_fit_confirmed
+        ):
+            raise ValueError(
+                f"{self.VISION_CUBE_EDGE_ENV}={self._vision_cube_edge_m * 1000.0:g} "
+                "mm is not nominally smaller than the modeled "
+                f"{self.config.gripper.hook_open_gap_m * 1000.0:.2f} mm "
+                "hook-open gap; hover-only inspection is allowed, but descent "
+                f"requires {self.CONFIRM_GRASP_FIT_ENV}=1 after an operator "
+                "confirms the actual rounded cube/finger fit"
+            )
         self._emit(
             "rollout_reset",
             physical_motion_enabled=self._motion_enabled,
             physical_descent_enabled=self._descent_enabled,
-            active_assumption="10 mm cubes; UTOOL1 TCP at fingertips (0 mm extra)",
+            hardware_vision_cube_edge_mm=self._vision_cube_edge_m * 1000.0,
+            hardware_destination_mode=self._destination_mode,
+            grasp_fit_explicitly_confirmed=self._grasp_fit_confirmed,
+            active_assumption=(
+                "UTOOL1 TCP at fingertips (0 mm extra); cube size is an "
+                "explicit 10/16 mm hardware vision profile"
+            ),
             warning=(
                 "The pinned client labels its action point as the fingertip. "
                 "Separately, an organizer confirmed standard-finger table contact "
                 "near UF0 z=-335 mm and said the former -345 mm FAQ value was for "
                 "shorter fingers. Verify the installed fingers and active "
-                "UTOOL1/UF0 before setting the descent interlock."
+                "UTOOL1/UF0, placed cube size, and grasp fit before setting "
+                "the descent interlock."
             ),
         )
 
@@ -293,12 +362,19 @@ class Policy:
             if self._active_plan is None:
                 scenes = self._detect_scene_views(obs)
                 if self._pending_verification_colour is not None:
-                    self._verify_post_place(scenes.unplaced)
+                    self._verify_post_place(scenes)
                 if len(self._completed_colours) == len(self.config.task.colour_order):
                     return self._hold_action(
                         obs, "all configured colours camera-checked after placement"
                     )
-                self._start_next_plan(scenes.pickable)
+                if not self._start_next_plan(scenes.pickable):
+                    return self._hold_action(
+                        obs,
+                        "waiting for a stable complete camera scene: "
+                        f"{self._initial_stability_count}/"
+                        f"{self._stable_observations_required} accepted "
+                        "observations",
+                    )
 
             phase = self._phases[self._phase_index]
             if phase.requires_reobservation_before:
@@ -309,7 +385,8 @@ class Policy:
                         obs,
                         "physical descent interlock is closed; holding at hover. "
                         f"Set {self.DESCENT_INTERLOCK_ENV}=1 only after supervised "
-                        "10 mm cube and fingertip-TCP verification",
+                        f"{self._vision_cube_edge_m * 1000.0:g} mm cube, grasp-fit, "
+                        "and fingertip-TCP verification",
                     )
                 # The revalidated observation directly supplies the next
                 # descent command; no queued action separates the gate from it.
@@ -369,6 +446,7 @@ class Policy:
             self.config,
             scene_id=f"{trial_id}:scene-{self._scene_number}",
             capture_time_s=capture_time,
+            expected_cube_edge_m=self._vision_cube_edge_m,
         )
 
         # The bins are themselves red/yellow/blue. Exclude only a component in
@@ -380,6 +458,9 @@ class Policy:
         # obstacle map or swept-volume collision check.
         unplaced: list[CubeDetection] = []
         pickable: list[CubeDetection] = []
+        at_destination: dict[str, list[CubeDetection]] = {
+            colour: [] for colour in self.config.task.colour_order
+        }
         bin_components_excluded = 0
         outside_pickup_region_excluded = 0
         low_confidence_outside_region_retained = 0
@@ -401,6 +482,7 @@ class Policy:
             }
             if bin_membership[detection.colour]:
                 bin_components_excluded += 1
+                at_destination[detection.colour].append(detection)
                 continue
             wrong_bins = [
                 colour for colour, inside in bin_membership.items()
@@ -440,6 +522,10 @@ class Policy:
         pickable_scene = SceneDetections(
             raw.scene_id, raw.capture_time_s, tuple(pickable)
         )
+        destination_detections = {
+            colour: tuple(detections)
+            for colour, detections in at_destination.items()
+        }
         self._emit(
             "camera_scene",
             scene_id=raw.scene_id,
@@ -452,17 +538,69 @@ class Policy:
                 low_confidence_outside_region_retained
             ),
             pickable_colours=[cube.colour for cube in pickable_scene.cubes],
+            matching_destination_detections={
+                colour: len(detections)
+                for colour, detections in destination_detections.items()
+            },
         )
-        return _SceneViews(unplaced=unplaced_scene, pickable=pickable_scene)
+        return _SceneViews(
+            unplaced=unplaced_scene,
+            pickable=pickable_scene,
+            at_destination=destination_detections,
+        )
 
-    def _start_next_plan(self, scene: SceneDetections) -> None:
+    def _start_next_plan(self, scene: SceneDetections) -> bool:
         self._validate_hardware_clearance(scene.cubes)
         if not self._reference_detections:
-            plans = build_colour_sort_plans(scene, self.config)
-            self._reference_detections = {
+            try:
+                plans = build_colour_sort_plans(scene, self.config)
+            except PlanningError:
+                self._initial_stability_reference = {}
+                self._initial_stability_count = 0
+                raise
+            current = {
                 plan.target.colour: plan.target for plan in plans
             }
-            plan = plans[0]
+            if not self._initial_stability_reference:
+                self._initial_stability_reference = current
+                self._initial_stability_count = 1
+            else:
+                try:
+                    validate_reobserved_scene(
+                        scene,
+                        self._initial_stability_reference,
+                        (),
+                        self.config,
+                        maximum_motion_m=self._maximum_motion_m,
+                        maximum_yaw_motion_deg=self._maximum_yaw_motion_deg,
+                    )
+                except PlanningError as exc:
+                    # Before any motion, a changed but otherwise valid scene is
+                    # not a rollout fault. Start temporal confirmation over
+                    # from this newest observation. Once motion starts, the
+                    # stricter latched revalidation path below still applies.
+                    self._initial_stability_reference = current
+                    self._initial_stability_count = 1
+                    self._emit(
+                        "initial_scene_stability_reset",
+                        reason=str(exc),
+                        accepted_observations=1,
+                        required_observations=self._stable_observations_required,
+                    )
+                    return False
+                self._initial_stability_reference = current
+                self._initial_stability_count += 1
+            self._emit(
+                "initial_scene_stability",
+                accepted_observations=self._initial_stability_count,
+                required_observations=self._stable_observations_required,
+                colours=list(self.config.task.colour_order),
+            )
+            if self._initial_stability_count < self._stable_observations_required:
+                return False
+            self._reference_detections = current
+            first_colour = self.config.task.colour_order[0]
+            plan = self._plan_for_detection(current[first_colour], scene.scene_id)
         else:
             current = self._validate_scene_against_reference(scene)
             next_colour = next(
@@ -472,6 +610,7 @@ class Policy:
             )
             plan = self._plan_for_detection(current[next_colour], scene.scene_id)
         self._set_active_plan(plan)
+        return True
 
     def _set_active_plan(self, plan: PickPlacePlan) -> None:
         self._active_plan = plan
@@ -485,6 +624,8 @@ class Policy:
             plan_id=plan.plan_id,
             colour=plan.target.colour,
             target_xyz_m=list(plan.target.position_base_m),
+            destination_mode=self._destination_mode,
+            destination_xyz_m=list(plan.release_tip_pose.xyz_m),
             phase_names=[phase.name for phase in self._phases],
         )
 
@@ -493,6 +634,11 @@ class Policy:
     ) -> PickPlacePlan:
         colour = detection.colour
         bin_x, bin_y = self.config.task.bin_centres_base_m[colour]
+        release_z_m = (
+            self.config.bin_release_tip_base_z_m
+            if self._destination_mode == "bins"
+            else self.config.pick_tip_base_z_m
+        )
         return PickPlacePlan(
             plan_id=f"{scene_id}:{detection.track_id}:{colour}",
             scene_id=scene_id,
@@ -508,7 +654,7 @@ class Policy:
                 detection.yaw_rad,
             ),
             release_tip_pose=TipPoseBase(
-                (bin_x, bin_y, self.config.bin_release_tip_base_z_m), 0.0
+                (bin_x, bin_y, release_z_m), 0.0
             ),
         )
 
@@ -611,6 +757,21 @@ class Policy:
         )
 
         if not at_target:
+            all_rows = interpolate_tcp_rows(current, target, self.config)
+            if self._phase_motion_call_limit is None:
+                expected_calls = math.ceil(
+                    len(all_rows) / self._max_actions_per_call
+                )
+                self._phase_motion_call_limit = min(
+                    self.ABSOLUTE_MAX_MOTION_CALLS_PER_PHASE,
+                    expected_calls + self.MAX_NO_PROGRESS_CALLS + 2,
+                )
+                if expected_calls > self.ABSOLUTE_MAX_MOTION_CALLS_PER_PHASE:
+                    raise PlanningError(
+                        f"phase {phase.name} needs about {expected_calls} measured "
+                        "motion calls, above the absolute bounded limit "
+                        f"{self.ABSOLUTE_MAX_MOTION_CALLS_PER_PHASE}"
+                    )
             self._phase_motion_calls += 1
             position_improved = position_error < (
                 self._phase_best_position_error_mm - self.MIN_MEASURED_PROGRESS_MM
@@ -629,18 +790,17 @@ class Policy:
                 self._phase_no_progress_calls = 0
             else:
                 self._phase_no_progress_calls += 1
-            if self._phase_motion_calls > self.MAX_MOTION_CALLS_PER_PHASE:
+            if self._phase_motion_calls > self._phase_motion_call_limit:
                 raise PlanningError(
                     f"phase {phase.name} exceeded "
-                    f"{self.MAX_MOTION_CALLS_PER_PHASE} measured motion calls"
+                    f"{self._phase_motion_call_limit} measured motion calls"
                 )
             if self._phase_no_progress_calls >= self.MAX_NO_PROGRESS_CALLS:
                 raise PlanningError(
                     f"phase {phase.name} made no measured TCP progress for "
                     f"{self._phase_no_progress_calls} calls"
                 )
-            rows = interpolate_tcp_rows(current, target, self.config)
-            rows = rows[: self._max_actions_per_call]
+            rows = all_rows[: self._max_actions_per_call]
             rows = validate_tcp_chunk(rows, self.DT, self.config)
             self._emit(
                 "phase_action",
@@ -698,6 +858,7 @@ class Policy:
     def _reset_phase_watchdog(self) -> None:
         self._phase_motion_calls = 0
         self._phase_no_progress_calls = 0
+        self._phase_motion_call_limit: int | None = None
         self._phase_best_position_error_mm = math.inf
         self._phase_best_angle_error_deg = math.inf
 
@@ -724,32 +885,56 @@ class Policy:
             )
         return result
 
-    def _verify_post_place(self, scene: SceneDetections) -> None:
+    def _verify_post_place(self, scenes: _SceneViews) -> None:
         colour = self._pending_verification_colour
         if colour is None:
             raise PlanningError("post-place verification has no pending colour")
 
         forbidden = self._completed_colours | {colour}
-        visible = sorted({cube.colour for cube in scene.cubes if cube.colour in forbidden})
+        visible = sorted(
+            {
+                cube.colour
+                for cube in scenes.unplaced.cubes
+                if cube.colour in forbidden
+            }
+        )
         if visible:
             raise PlanningError(
                 "post-place verification found sorted colour(s) outside their "
-                f"matching bin: {', '.join(visible)}; no automatic retry"
+                f"matching destination: {', '.join(visible)}; no automatic retry"
             )
+
+        if self._destination_mode == "virtual-table":
+            matching = tuple(
+                cube
+                for cube in scenes.at_destination.get(colour, ())
+                if cube.confidence >= self._minimum_confidence
+            )
+            if len(matching) != 1:
+                raise PlanningError(
+                    "virtual-table post-place verification requires exactly one "
+                    f"confident {colour} cube in its configured destination "
+                    f"footprint, observed {len(matching)}"
+                )
 
         self._completed_colours.add(colour)
         self._pending_verification_colour = None
+        verification = (
+            "fresh table RGB found exactly one matching-colour cube in the "
+            "configured virtual-table destination and none outside it"
+            if self._destination_mode == "virtual-table"
+            else "fresh table RGB found no matching-colour cube outside the "
+            "configured same-colour bin footprint"
+        )
         self._emit(
             "plan_complete",
             colour=colour,
             completed_colours=sorted(self._completed_colours),
-            verification=(
-                "fresh table RGB found no matching-colour cube outside the "
-                "configured same-colour bin footprint"
-            ),
+            verification=verification,
             limitation=(
-                "This is not independent grasp/force confirmation; occlusion or "
-                "a missed detection can still hide a failed placement."
+                "This is camera verification, not independent grasp/force "
+                "confirmation; occlusion or a detector error can still hide a "
+                "failed placement."
             ),
         )
 

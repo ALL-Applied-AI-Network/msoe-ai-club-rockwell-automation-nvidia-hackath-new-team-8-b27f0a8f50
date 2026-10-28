@@ -59,6 +59,7 @@ def detect_coloured_cubes(
     *,
     scene_id: str,
     capture_time_s: float,
+    expected_cube_edge_m: float | None = None,
 ) -> SceneDetections:
     """Detect configured cube colours and estimate base XY/yaw from RGB.
 
@@ -72,6 +73,14 @@ def detect_coloured_cubes(
     the table plane; the returned detection position is the cube centre.  This
     avoids a systematic parallax error from treating visible top pixels as if
     they lay on the table.
+
+    ``expected_cube_edge_m`` is a hardware-observation profile, not an object
+    size estimate.  The shared simulator path deliberately omits it and keeps
+    using the checked-in 10 mm task configuration.  The physical adapter may
+    explicitly select the separately supplied 16 mm cube profile after the
+    operator confirms which cell object was placed.  Supporting both profiles
+    here prevents a camera-size mismatch from being "fixed" by globally
+    changing Isaac geometry or by weakening the known-size filter.
     """
 
     image = np.asarray(rgb)
@@ -83,10 +92,18 @@ def detect_coloured_cubes(
     if not str(scene_id).strip() or not math.isfinite(float(capture_time_s)):
         raise VisionError("scene id and capture timestamp are required")
 
+    cube_edge_m = (
+        config.cube_edge_m
+        if expected_cube_edge_m is None
+        else float(expected_cube_edge_m)
+    )
+    if not math.isfinite(cube_edge_m) or cube_edge_m <= 0.0:
+        raise VisionError("expected cube edge must be positive and finite")
+
     hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
     kernel_size = config.vision.morphology_kernel_px
     kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
-    top_z = config.cube_top_base_z_m
+    top_z = config.frames.surface_base_z_m + cube_edge_m
     maximum_area = width * height * config.vision.maximum_component_area_fraction
     pending: dict[str, list[dict[str, Any]]] = {
         colour: [] for colour in config.task.colour_order
@@ -159,12 +176,12 @@ def detect_coloured_cubes(
             # consumes a simulator pose or other evaluator-only truth.
             edge_length, world_edge = min(
                 projected_edges,
-                key=lambda item: abs(item[0] - config.cube_edge_m),
+                key=lambda item: abs(item[0] - cube_edge_m),
             )
             if edge_length <= 1e-9:
                 continue
-            minimum_edge = config.cube_edge_m * config.vision.cube_edge_minimum_factor
-            maximum_edge = config.cube_edge_m * config.vision.cube_edge_maximum_factor
+            minimum_edge = cube_edge_m * config.vision.cube_edge_minimum_factor
+            maximum_edge = cube_edge_m * config.vision.cube_edge_maximum_factor
             shortest_edge = min(length for length, _ in projected_edges)
             if (
                 shortest_edge < minimum_edge
@@ -193,7 +210,7 @@ def detect_coloured_cubes(
                     "position": (
                         float(centre_base[0]),
                         float(centre_base[1]),
-                        config.cube_centre_base_z_m,
+                        config.frames.surface_base_z_m + cube_edge_m / 2.0,
                     ),
                     "yaw": yaw,
                     "confidence": float(np.clip(fill * shape_score, 0.0, 1.0)),

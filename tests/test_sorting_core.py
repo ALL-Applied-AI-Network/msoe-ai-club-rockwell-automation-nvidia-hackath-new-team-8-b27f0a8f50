@@ -543,6 +543,44 @@ class VisionTests(unittest.TestCase):
         self.assertEqual([item.colour for item in scene.cubes], ["blue"])
         self.assertAlmostEqual(scene.cubes[0].position_base_m[0], 0.35, places=4)
 
+    def test_explicit_sixteen_mm_hardware_profile_does_not_change_sim_default(self):
+        image = np.full((180, 320, 3), 235, dtype=np.uint8)
+        cv2.rectangle(image, (145, 75), (175, 105), (0, 0, 255), -1)
+
+        def project(uv, z):
+            return np.array(
+                [
+                    0.35 + (uv[0] - 160) / 1875.0,
+                    (uv[1] - 90) / 1875.0,
+                    z,
+                ]
+            )
+
+        simulator_default = detect_coloured_cubes(
+            image,
+            project,
+            self.config,
+            scene_id="ten-mm-default",
+            capture_time_s=26.6,
+        )
+        self.assertEqual(simulator_default.cubes, ())
+
+        hardware_profile = detect_coloured_cubes(
+            image,
+            project,
+            self.config,
+            scene_id="sixteen-mm-hardware-profile",
+            capture_time_s=26.7,
+            expected_cube_edge_m=0.016,
+        )
+        self.assertEqual(
+            [item.colour for item in hardware_profile.cubes], ["blue"]
+        )
+        self.assertAlmostEqual(
+            hardware_profile.cubes[0].position_base_m[2],
+            self.config.frames.surface_base_z_m + 0.008,
+        )
+
     def test_zero_confidence_aspect_boundary_is_rejected(self):
         image = np.full((180, 320, 3), 235, dtype=np.uint8)
         # One projected dimension matches 10 mm, but this is a genuine 10x15
