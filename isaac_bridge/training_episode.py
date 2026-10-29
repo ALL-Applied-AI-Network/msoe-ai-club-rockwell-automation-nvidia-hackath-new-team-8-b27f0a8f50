@@ -48,8 +48,8 @@ MATERIAL_PARAMETER_NAMES = frozenset(
 TRAINING_APPEARANCE_PROFILE = {
     "name": "real-table-video-broad-fit-v1",
     "table_reference_asset": "reference-assets/table/manipbench-table-surface.png",
-    "fit_rollout": "HardwareResults/HardwareResultVideos/Rollout5TableCam.mp4",
-    "held_out_rollout": "HardwareResults/HardwareResultVideos/Rollout4TableCam.mp4",
+    "fit_rollout": "../HardwareResults/HardwareResultVideos/Rollout5TableCam.mp4",
+    "held_out_rollout": "../HardwareResults/HardwareResultVideos/rollout4TableCam.mp4",
     "fit_scope": "broad exposure, colour cast, vignetting, and tabletop appearance",
     "limitation": (
         "Compressed 640x360 rollout video cannot calibrate native sensor noise, "

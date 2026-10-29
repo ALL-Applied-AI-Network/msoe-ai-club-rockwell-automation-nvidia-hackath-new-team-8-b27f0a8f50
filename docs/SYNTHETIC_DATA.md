@@ -55,7 +55,7 @@ Reproduce that comparison without starting Isaac:
 
 ```powershell
 uv run --project hardware/fanuc_cell scripts/compare_camera_appearance.py `
-  --real-video HardwareResults/HardwareResultVideos/Rollout5TableCam.mp4 `
+  --real-video ../HardwareResults/HardwareResultVideos/Rollout5TableCam.mp4 `
   --sim-dir path/to/run/raw_frames --sim-domain raw `
   --output-json path/to/raw-vs-real.json `
   --contact-sheet path/to/raw-vs-real.png
