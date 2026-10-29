@@ -45,6 +45,49 @@ MATERIAL_PARAMETER_NAMES = frozenset(
     }
 )
 
+TRAINING_APPEARANCE_PROFILE = {
+    "name": "real-table-video-broad-fit-v1",
+    "table_reference_asset": "reference-assets/table/manipbench-table-surface.png",
+    "fit_rollout": "HardwareResults/HardwareResultVideos/Rollout5TableCam.mp4",
+    "held_out_rollout": "HardwareResults/HardwareResultVideos/Rollout4TableCam.mp4",
+    "fit_scope": "broad exposure, colour cast, vignetting, and tabletop appearance",
+    "limitation": (
+        "Compressed 640x360 rollout video cannot calibrate native sensor noise, "
+        "precise blur, camera response, or small-object edge quality."
+    ),
+}
+
+
+def apply_training_appearance_profile(scene_config: Any) -> dict[str, Any]:
+    """Enable the measured-cell tabletop only for opt-in training runs.
+
+    The starter scene places a pristine white paper backdrop slightly above its
+    optional scan of the real work surface. Leaving both enabled hides the
+    reference scan. Training mode therefore enables the scan and disables the
+    paper layer before ``cell.build(stage)``. Default simulation and hardware
+    paths never call this helper.
+    """
+
+    for name in ("MAT_MARKINGS", "SHOW_BACKDROP"):
+        if not hasattr(scene_config, name):
+            raise SyntheticDataError(
+                f"training appearance profile requires scene_config.{name}"
+            )
+    previous = {
+        "mat_markings": bool(scene_config.MAT_MARKINGS),
+        "clean_paper_backdrop": bool(scene_config.SHOW_BACKDROP),
+    }
+    scene_config.MAT_MARKINGS = True
+    scene_config.SHOW_BACKDROP = False
+    return {
+        **TRAINING_APPEARANCE_PROFILE,
+        "previous": previous,
+        "effective": {
+            "mat_markings": True,
+            "clean_paper_backdrop": False,
+        },
+    }
+
 
 def _with_sha256(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Return a JSON-safe mapping carrying a hash of its unhashed contents."""

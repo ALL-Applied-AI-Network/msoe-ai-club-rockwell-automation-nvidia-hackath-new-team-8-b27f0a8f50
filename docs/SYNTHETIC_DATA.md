@@ -43,6 +43,30 @@ distortion (`k1`) to a pinhole render and applies replayable exposure, white
 balance, gamma, noise, blur, vignette, and JPEG effects. These display-RGB
 effects are robustness approximations, not a physical camera model.
 
+Training mode also enables the checked-in scan of the real work surface,
+`reference-assets/table/manipbench-table-surface.png`, and removes the pristine
+paper layer that otherwise covers it. This is an opt-in runtime override; the
+default simulation and every hardware path remain unchanged. The first broad
+appearance fit used `Rollout5TableCam.mp4`, while rollout 4 is reserved as a
+held-out check. Both recordings are compressed 640x360 video, so they support
+coarse exposure, colour-cast, vignetting, and tabletop matching only.
+
+Reproduce that comparison without starting Isaac:
+
+```powershell
+uv run --project hardware/fanuc_cell scripts/compare_camera_appearance.py `
+  --real-video HardwareResults/HardwareResultVideos/Rollout5TableCam.mp4 `
+  --sim-dir path/to/run/raw_frames --sim-domain raw `
+  --output-json path/to/raw-vs-real.json `
+  --contact-sheet path/to/raw-vs-real.png
+```
+
+The tool downsamples synthetic frames to the real recording instead of
+inventing detail by upsampling the video. Its exposure and white-balance hints
+deliberately exclude the moving robot corridor and saturated objects. Collect
+a native, lossless 1920x1080 real table-camera still before fitting sensor
+noise, precise blur, camera response, or small-object edge appearance.
+
 ## Sample a replayable episode
 
 This part runs in ordinary host Python and does not start Isaac:
@@ -156,10 +180,13 @@ The checked-in ranges cover:
 - independent cube position/yaw perturbations; and
 - cube mass, physically ordered static/dynamic friction, and restitution.
 
-Every range is marked `provisional_unmeasured`. The values are conservative
-engineering starting points only. Broad randomization can reduce accuracy or
-erase the red/yellow/blue class meaning. Replace/bound the ranges using real
-samples and physical measurements before claiming sim-to-real accuracy.
+Every range remains marked `provisional_unmeasured`. Broad light intensity,
+white-balance, exposure, gamma, and vignette bounds now use compressed hardware
+video as a starting constraint, but that is not a native photometric camera
+calibration. Other values remain engineering starting points. Broad
+randomization can reduce accuracy or erase the red/yellow/blue class meaning.
+Replace/bound the ranges using native real samples and physical measurements
+before claiming sim-to-real accuracy.
 
 ## Isaac integration and remaining annotation work
 

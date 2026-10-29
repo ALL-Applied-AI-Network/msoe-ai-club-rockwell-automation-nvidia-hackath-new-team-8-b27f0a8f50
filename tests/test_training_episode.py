@@ -49,6 +49,21 @@ class ReadbackMetadataTests(unittest.TestCase):
 
 @unittest.skipUnless(HAS_NUMPY, "NumPy is available in the pinned Isaac environment")
 class TrainingEpisodeTests(unittest.TestCase):
+    def test_camera_matched_table_profile_is_training_only_and_auditable(self):
+        from isaac_bridge.training_episode import apply_training_appearance_profile
+
+        scene = SimpleNamespace(MAT_MARKINGS=False, SHOW_BACKDROP=True)
+        evidence = apply_training_appearance_profile(scene)
+
+        self.assertTrue(scene.MAT_MARKINGS)
+        self.assertFalse(scene.SHOW_BACKDROP)
+        self.assertEqual(evidence["name"], "real-table-video-broad-fit-v1")
+        self.assertEqual(
+            evidence["previous"],
+            {"mat_markings": False, "clean_paper_backdrop": True},
+        )
+        self.assertIn("Compressed 640x360", evidence["limitation"])
+
     def test_prebuild_values_are_pending_until_usd_readback(self):
         from isaac_bridge.training_episode import prepare_prebuild_randomization
 

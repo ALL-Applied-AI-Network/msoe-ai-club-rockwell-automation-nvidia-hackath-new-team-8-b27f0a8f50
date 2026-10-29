@@ -74,6 +74,7 @@ from sorting_core import (  # noqa: E402
 from sorting_core.synthetic_data import distort_points_uv, write_json_atomic  # noqa: E402
 from isaac_bridge import CalibratedPinholeCamera, IsaacCameraSortAdapter  # noqa: E402
 from isaac_bridge.training_episode import (  # noqa: E402
+    apply_training_appearance_profile,
     apply_postbuild_randomization,
     prepare_prebuild_randomization,
     readback_effective_camera,
@@ -403,6 +404,7 @@ def main() -> None:
     applied_randomization: set[str] = set()
     stage_randomization_readback = None
     effective_camera = None
+    appearance_profile = None
     if args.training_data:
         synthetic_spec = load_synthetic_data_spec()
         randomization = sample_randomization(
@@ -478,6 +480,8 @@ def main() -> None:
     C.SHOW_FIXTURE = False
     C.TABLE_CAM = dict(C.TABLE_CAM)
     C.TABLE_CAM["resolution"] = render_resolution
+    if randomization is not None:
+        appearance_profile = apply_training_appearance_profile(C)
 
     from isaacsim import SimulationApp
 
@@ -1547,6 +1551,7 @@ def main() -> None:
                     if camera_perception
                     else None
                 ),
+                "appearance_profile": appearance_profile,
             },
             "initial": initial,
             "final": final,

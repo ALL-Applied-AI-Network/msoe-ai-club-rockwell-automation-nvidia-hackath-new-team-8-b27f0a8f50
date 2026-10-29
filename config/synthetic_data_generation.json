@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "purpose": "Seeded, replayable synthetic-data capture for the colour-bucket sorting task. These are conservative engineering starting ranges, not measurements of the physical cell.",
+  "purpose": "Seeded, replayable synthetic-data capture for the colour-bucket sorting task. Broad exposure, colour-cast, vignetting, and tabletop appearance ranges were fitted from compressed real table-camera rollouts; remaining ranges are conservative engineering starting values.",
   "capture": {
     "camera_name": "table",
     "resolution": [1920, 1080],
@@ -15,7 +15,7 @@
   },
   "range_status": {
     "name": "provisional_unmeasured",
-    "warning": "Every enabled range must be replaced or bounded using physical measurements before claiming sim-to-real accuracy. Record sampled and actually applied values separately."
+    "warning": "The appearance profile is only a broad fit to compressed 640x360 hardware video. Native sensor noise, precise blur, camera response, small-object edges, materials, and physics remain unmeasured. Record sampled and actually applied values separately and validate on native held-out images before claiming sim-to-real accuracy."
   },
   "parameters": {
     "materials.coloured_plastic_roughness": {
@@ -45,34 +45,34 @@
     "lighting.dome_intensity_scale": {
       "consumer": "isaac_stage",
       "distribution": "uniform",
-      "minimum": 0.75,
-      "maximum": 1.25,
+      "minimum": 0.45,
+      "maximum": 0.75,
       "unit": "multiplier",
-      "nominal": 1.0
+      "nominal": 0.60
     },
     "lighting.key_intensity_scale": {
       "consumer": "isaac_stage",
       "distribution": "uniform",
-      "minimum": 0.70,
-      "maximum": 1.30,
+      "minimum": 0.45,
+      "maximum": 0.75,
       "unit": "multiplier",
-      "nominal": 1.0
+      "nominal": 0.60
     },
     "lighting.fill_intensity_scale": {
       "consumer": "isaac_stage",
       "distribution": "uniform",
-      "minimum": 0.60,
-      "maximum": 1.40,
+      "minimum": 0.45,
+      "maximum": 0.75,
       "unit": "multiplier",
-      "nominal": 1.0
+      "nominal": 0.60
     },
     "lighting.rim_intensity_scale": {
       "consumer": "isaac_stage",
       "distribution": "uniform",
-      "minimum": 0.50,
-      "maximum": 1.50,
+      "minimum": 0.45,
+      "maximum": 0.75,
       "unit": "multiplier",
-      "nominal": 1.0
+      "nominal": 0.60
     },
     "lighting.source_size_scale": {
       "consumer": "isaac_stage",
@@ -141,20 +141,12 @@
     "sensor.exposure_stops": {
       "consumer": "sensor_postprocess",
       "distribution": "uniform",
-      "minimum": -0.5,
-      "maximum": 0.5,
+      "minimum": -0.15,
+      "maximum": 0.15,
       "unit": "stops",
       "nominal": 0.0
     },
     "sensor.white_balance_r": {
-      "consumer": "sensor_postprocess",
-      "distribution": "uniform",
-      "minimum": 0.93,
-      "maximum": 1.07,
-      "unit": "multiplier",
-      "nominal": 1.0
-    },
-    "sensor.white_balance_g": {
       "consumer": "sensor_postprocess",
       "distribution": "uniform",
       "minimum": 0.97,
@@ -162,19 +154,27 @@
       "unit": "multiplier",
       "nominal": 1.0
     },
+    "sensor.white_balance_g": {
+      "consumer": "sensor_postprocess",
+      "distribution": "uniform",
+      "minimum": 0.99,
+      "maximum": 1.01,
+      "unit": "multiplier",
+      "nominal": 1.0
+    },
     "sensor.white_balance_b": {
       "consumer": "sensor_postprocess",
       "distribution": "uniform",
-      "minimum": 0.93,
-      "maximum": 1.07,
+      "minimum": 0.97,
+      "maximum": 1.03,
       "unit": "multiplier",
       "nominal": 1.0
     },
     "sensor.gamma": {
       "consumer": "sensor_postprocess",
       "distribution": "uniform",
-      "minimum": 0.90,
-      "maximum": 1.10,
+      "minimum": 0.96,
+      "maximum": 1.04,
       "unit": "unitless",
       "nominal": 1.0
     },
@@ -197,10 +197,10 @@
     "sensor.vignette_strength": {
       "consumer": "sensor_postprocess",
       "distribution": "uniform",
-      "minimum": 0.0,
-      "maximum": 0.15,
+      "minimum": 0.12,
+      "maximum": 0.22,
       "unit": "unitless",
-      "nominal": 0.0
+      "nominal": 0.17
     },
     "sensor.jpeg_quality": {
       "consumer": "sensor_postprocess",
