@@ -15,7 +15,7 @@ operator/controller remains responsible for stopping.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import math
 import os
@@ -55,7 +55,35 @@ from sorting_core import (  # noqa: E402
     load_config,
     semantic_phase_plan,
     validate_tcp_chunk,
+    validate_colour_sort_scene,
     validate_reobserved_scene,
+)
+from sorting_core.grasping import (  # noqa: E402
+    GraspPlanningContext,
+    GraspPlanningError,
+    GraspPlanningPipeline,
+)
+from sorting_core.perception import (  # noqa: E402
+    CameraFrame,
+    DepthEncoding,
+    DetectedObject,
+    PerceptionRequest,
+    RobotState,
+    SceneObservation,
+    VisionProvider,
+    validate_scene_for_request,
+)
+from sorting_core.task_perception import cube_scene_from_observation  # noqa: E402
+from sorting_core.team_integrations import (  # noqa: E402
+    CUBE_TASK_CLASS_IDS,
+    GRASP_CHECKPOINT_ENV,
+    PERCEPTION_CALIBRATION_IDS,
+    PERCEPTION_CAMERA_IDS,
+    PERCEPTION_DEPTH_CALIBRATION_IDS,
+    PERCEPTION_DEPTH_CAMERA_IDS,
+    VISION_CHECKPOINT_ENV,
+    create_grasp_pipeline,
+    create_vision_provider,
 )
 
 
@@ -87,6 +115,8 @@ class _SceneViews:
     unplaced: SceneDetections
     pickable: SceneDetections
     at_destination: dict[str, tuple[CubeDetection, ...]]
+    unsupported_objects: tuple[DetectedObject, ...] = ()
+    observation: SceneObservation | None = None
 
 
 class Policy:
@@ -97,7 +127,7 @@ class Policy:
     Each ``act`` call returns at most one short absolute-TCP action chunk.
     """
 
-    CAMERAS = ["table"]
+    CAMERAS = list(PERCEPTION_CAMERA_IDS)
     IMAGE_SIZE = (1920, 1080)  # native table RGB; calibration pixels stay valid
     IMAGE_FORMAT = "png"  # preserve tiny cube edges until JPEG is validated on real images
     ACTION = "tcp"
@@ -105,7 +135,7 @@ class Policy:
     # Phase transitions still require measured feedback; this only removes
     # network/camera pauses between chunks of the same phase.
     PREFETCH = True
-    DEPTH: list[str] = []  # depth is not recorded; start with reproducible RGB only
+    DEPTH = list(PERCEPTION_DEPTH_CAMERA_IDS)
     DT = 0.1
 
     MOTION_INTERLOCK_ENV = "ROCKWELL_ENABLE_PHYSICAL_MOTION"
@@ -134,7 +164,13 @@ class Policy:
     )
     _CLOSED_FEEDBACK_PHASES = frozenset({"dwell", "lift", "carry", "lower"})
 
-    def __init__(self, checkpoint: str | None = None):
+    def __init__(
+        self,
+        checkpoint: str | None = None,
+        *,
+        perception_provider: VisionProvider | None = None,
+        grasp_pipeline: GraspPlanningPipeline | None = None,
+    ):
         self.config = load_config()
         calibration = load_calibration()
         if "table" not in calibration:
@@ -154,6 +190,35 @@ class Policy:
                 f"{self.VISION_CUBE_EDGE_ENV} must be 10 or 16 millimetres"
             )
         self._vision_cube_edge_m = float(cube_profile) / 1000.0
+        self._perception_provider = (
+            perception_provider
+            if perception_provider is not None
+            else create_vision_provider(
+                config=self.config,
+                camera_projectors={
+                    "table": lambda uv, z: pixel_to_base(
+                        self._table_camera, uv, z=z
+                    )
+                },
+                calibration_ids=PERCEPTION_CALIBRATION_IDS,
+                expected_cube_edge_m=self._vision_cube_edge_m,
+                checkpoint=os.environ.get(VISION_CHECKPOINT_ENV, checkpoint),
+                # Preserve the old module-level patch seam used by the
+                # hardware replay tests while routing production through the
+                # explicit provider contract.
+                detector=lambda *args, **kwargs: detect_coloured_cubes(
+                    *args, **kwargs
+                ),
+            )
+        )
+        self._grasp_pipeline = (
+            grasp_pipeline
+            if grasp_pipeline is not None
+            else create_grasp_pipeline(
+                config=self.config,
+                checkpoint=os.environ.get(GRASP_CHECKPOINT_ENV, checkpoint),
+            )
+        )
 
         self._destination_mode = os.environ.get(
             self.DESTINATION_MODE_ENV, "bins"
@@ -281,6 +346,8 @@ class Policy:
         """Reset all task state at the start of an official rollout."""
 
         self._active_plan: PickPlacePlan | None = None
+        self._active_attempt_id: str | None = None
+        self._active_attempt_started_at_s: float | None = None
         self._phases: tuple[MotionPhase, ...] = ()
         self._phase_index = 0
         self._phase_dwell_rows_remaining: int | None = None
@@ -288,6 +355,9 @@ class Policy:
         self._reset_phase_watchdog()
         self._completed_colours: set[str] = set()
         self._pending_verification_colour: str | None = None
+        self._pending_verification_plan: PickPlacePlan | None = None
+        self._pending_attempt_id: str | None = None
+        self._pending_attempt_started_at_s: float | None = None
         self._reference_detections: dict[str, CubeDetection] = {}
         self._initial_stability_reference: dict[str, CubeDetection] = {}
         self._initial_stability_count = 0
@@ -297,6 +367,7 @@ class Policy:
         self._last_valid_tcp: tuple[float, ...] | None = None
         self._last_valid_gripper_feedback: float | None = None
         self._last_commanded_gripper: float | None = None
+        self._latest_robot_state: RobotState | None = None
         self._last_hold_log: str | None = None
         self._scene_number = 0
         self._motion_enabled = _environment_flag(self.MOTION_INTERLOCK_ENV)
@@ -346,6 +417,8 @@ class Policy:
         if self._blocked_reason is not None:
             return self._hold_action(obs, self._blocked_reason)
 
+        started_with_active_plan = self._active_plan is not None
+        revalidated_this_call = False
         try:
             self._accept_observation_timestamp(obs)
         except (TypeError, ValueError) as exc:
@@ -380,7 +453,11 @@ class Policy:
                     return self._hold_action(
                         obs, "all configured colours camera-checked after placement"
                     )
-                if not self._start_next_plan(scenes.pickable):
+                if not self._start_next_plan(
+                    scenes.pickable,
+                    generic_scene=scenes.observation,
+                    unsupported_objects=scenes.unsupported_objects,
+                ):
                     return self._hold_action(
                         obs,
                         "waiting for a stable complete camera scene: "
@@ -393,7 +470,12 @@ class Policy:
             if phase.requires_reobservation_before:
                 scenes = self._detect_scene_views(obs)
                 try:
-                    self._revalidate_before_descent(scenes.pickable)
+                    self._revalidate_before_descent(
+                        scenes.pickable,
+                        generic_scene=scenes.observation,
+                        unsupported_objects=scenes.unsupported_objects,
+                    )
+                    revalidated_this_call = True
                 except PlanningError as exc:
                     message = str(exc)
                     retryable = (
@@ -419,6 +501,36 @@ class Policy:
                         )
                     raise
                 phase = self._phases[self._phase_index]
+
+            processing_age_s = self._relative_observation_age_s(obs)
+            if processing_age_s > self._maximum_observation_age_s:
+                reason = (
+                    "camera observation expired during perception/planning: "
+                    f"{processing_age_s:.2f} s > "
+                    f"{self._maximum_observation_age_s:.2f} s"
+                )
+                self._emit(
+                    "planning_deadline_missed",
+                    **self._plan_evidence_fields(self._active_plan),
+                    attempt_id=self._active_attempt_id,
+                    observation_age_s=processing_age_s,
+                    maximum_observation_age_s=(
+                        self._maximum_observation_age_s
+                    ),
+                    forward_motion_emitted=False,
+                )
+                if not started_with_active_plan:
+                    self._cancel_unexecuted_plan(reason)
+                elif revalidated_this_call:
+                    self._phase_index = next(
+                        index
+                        for index, candidate_phase in enumerate(self._phases)
+                        if candidate_phase.requires_reobservation_before
+                    )
+                    self._reset_phase_watchdog()
+                else:
+                    self._block(reason)
+                return self._hold_action(obs, reason)
 
             # Revalidation is performed from a laterally offset inspection
             # pose. Align over the refreshed target first, then apply the
@@ -467,28 +579,147 @@ class Policy:
             raise ValueError("obs['t'] did not advance")
         self._last_observation_time_s = timestamp
 
+    def _relative_observation_age_s(self, obs: dict) -> float:
+        if self._clock_offset_estimate_s is None:
+            raise ValueError("observation clock offset has not been established")
+        timestamp = float(obs.get("t"))
+        if not math.isfinite(timestamp):
+            raise ValueError("obs['t'] is not finite")
+        return time.time() - timestamp - self._clock_offset_estimate_s
+
+    def _cancel_unexecuted_plan(self, reason: str) -> None:
+        plan = self._active_plan
+        self._emit(
+            "plan_cancelled_before_motion",
+            **self._plan_evidence_fields(plan),
+            attempt_id=self._active_attempt_id,
+            attempt_started_at_s=self._active_attempt_started_at_s,
+            outcome="cancelled_stale_observation",
+            reason=reason,
+        )
+        self._active_plan = None
+        self._active_attempt_id = None
+        self._active_attempt_started_at_s = None
+        self._phases = ()
+        self._phase_index = 0
+        self._phase_dwell_rows_remaining = None
+        self._reset_phase_watchdog()
+
     def _detect_scene_views(self, obs: dict) -> _SceneViews:
         images = obs.get("images")
-        if not isinstance(images, dict) or "table" not in images:
-            raise VisionError("obs['images']['table'] is required")
-        image = np.asarray(images["table"])
-        if image.shape != (self.IMAGE_SIZE[1], self.IMAGE_SIZE[0], 3):
+        if not isinstance(images, dict):
+            raise VisionError("obs['images'] must contain the configured cameras")
+        missing_cameras = [name for name in self.CAMERAS if name not in images]
+        if missing_cameras:
             raise VisionError(
-                "table RGB must be the uncropped native 1920x1080 frame for calibration"
+                "missing configured RGB cameras: " + ", ".join(missing_cameras)
             )
+        for camera_id in self.CAMERAS:
+            image = np.asarray(images[camera_id])
+            if image.shape != (self.IMAGE_SIZE[1], self.IMAGE_SIZE[0], 3):
+                raise VisionError(
+                    f"{camera_id} RGB must have requested uncropped shape "
+                    f"{(self.IMAGE_SIZE[1], self.IMAGE_SIZE[0], 3)}, got "
+                    f"{image.shape}"
+                )
+            if image.dtype != np.uint8:
+                raise VisionError(
+                    f"{camera_id} RGB must be uint8 RGB, got {image.dtype}"
+                )
 
         capture_time = float(obs["t"])
         trial = obs.get("trial") or {}
         trial_id = str(trial.get("trial_id") or "unknown-trial")
         self._scene_number += 1
-        raw = detect_coloured_cubes(
-            image,
-            lambda uv, z: pixel_to_base(self._table_camera, uv, z=z),
-            self.config,
+        depth_images = obs.get("depth")
+        if not isinstance(depth_images, dict):
+            depth_images = {}
+        missing_depth = [name for name in self.DEPTH if name not in depth_images]
+        if missing_depth:
+            raise VisionError(
+                "missing configured depth cameras: " + ", ".join(missing_depth)
+            )
+        expected_depth_shapes = {
+            "table": (400, 640),
+            "wrist": (480, 848),
+        }
+        for camera_id in self.DEPTH:
+            depth = np.asarray(depth_images[camera_id])
+            expected_shape = expected_depth_shapes.get(camera_id)
+            if expected_shape is None:
+                raise VisionError(
+                    f"no validated hardware depth geometry for {camera_id}"
+                )
+            if depth.shape != expected_shape or depth.dtype != np.uint16:
+                raise VisionError(
+                    f"{camera_id} depth must be uint16 with shape "
+                    f"{expected_shape}, got {depth.dtype} {depth.shape}"
+                )
+        frame_camera_ids = tuple(
+            dict.fromkeys((*self.CAMERAS, *self.DEPTH))
+        )
+        frames = []
+        for camera_id in frame_camera_ids:
+            rgb = (
+                None
+                if camera_id not in images
+                else np.asarray(images[camera_id])
+            )
+            depth = (
+                None
+                if camera_id not in depth_images
+                else np.asarray(depth_images[camera_id])
+            )
+            frames.append(
+                CameraFrame(
+                camera_id=camera_id,
+                capture_time_s=capture_time,
+                calibration_id=(
+                    None
+                    if rgb is None
+                    else PERCEPTION_CALIBRATION_IDS.get(camera_id)
+                ),
+                rgb=rgb,
+                depth=depth,
+                depth_calibration_id=(
+                    None
+                    if depth is None
+                    else PERCEPTION_DEPTH_CALIBRATION_IDS.get(camera_id)
+                ),
+                depth_encoding=(
+                    None
+                    if depth is None
+                    else DepthEncoding(
+                        meters_per_unit=0.001,
+                        invalid_values=(0.0,),
+                        aligned_to_rgb=False,
+                    )
+                ),
+            )
+            )
+        frames = tuple(frames)
+        robot_state = self._perception_robot_state(obs)
+        request = PerceptionRequest(
             scene_id=f"{trial_id}:scene-{self._scene_number}",
             capture_time_s=capture_time,
-            expected_cube_edge_m=self._vision_cube_edge_m,
+            frames=frames,
+            robot_state=robot_state,
+            metadata={"trial_id": trial_id},
         )
+        self._latest_robot_state = request.robot_state
+        try:
+            provider_result = self._perception_provider.observe(request)
+            observation = validate_scene_for_request(request, provider_result)
+        except VisionError:
+            raise
+        except Exception as exc:
+            raise VisionError(
+                f"vision provider failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        projection = cube_scene_from_observation(
+            observation, class_ids=CUBE_TASK_CLASS_IDS
+        )
+        raw = projection.scene
 
         # The bins are themselves red/yellow/blue. Exclude only a component in
         # its same-colour destination footprint. A cube of one colour near a
@@ -607,6 +838,10 @@ class Policy:
             outside_hardware_workspace_excluded=(
                 outside_hardware_workspace_excluded
             ),
+            generic_objects=len(observation.objects),
+            unsupported_generic_objects=len(projection.unsupported_objects),
+            vision_provider=observation.provider_name,
+            vision_provider_version=observation.provider_version,
             pickable_colours=[cube.colour for cube in pickable_scene.cubes],
             matching_destination_detections={
                 colour: len(detections)
@@ -617,6 +852,53 @@ class Policy:
             unplaced=unplaced_scene,
             pickable=pickable_scene,
             at_destination=destination_detections,
+            unsupported_objects=projection.unsupported_objects,
+            observation=observation,
+        )
+
+    def _perception_robot_state(self, obs: dict) -> RobotState | None:
+        """Convert official mm/degrees feedback into the shared SI contract."""
+
+        raw_joints = obs.get("joints")
+        raw_tcp = obs.get("tcp_pose")
+        if raw_joints is None and raw_tcp is None:
+            return None
+
+        arm_joints_rad = None
+        gripper_state = None
+        if raw_joints is not None:
+            joints = np.asarray(raw_joints, dtype=float)
+            if joints.shape != (7,) or not np.all(np.isfinite(joints)):
+                raise VisionError(
+                    "obs['joints'] must contain six finite degree values and "
+                    "one finite gripper value"
+                )
+            if not 0.0 <= float(joints[6]) <= 1.0:
+                raise VisionError("obs['joints'] gripper value must be in [0, 1]")
+            arm_joints_rad = tuple(float(value) for value in np.radians(joints[:6]))
+            gripper_state = float(joints[6])
+
+        tcp_pose_base_m_wpr_rad = None
+        if raw_tcp is not None:
+            tcp = np.asarray(raw_tcp, dtype=float)
+            if tcp.shape != (6,) or not np.all(np.isfinite(tcp)):
+                raise VisionError(
+                    "obs['tcp_pose'] must contain six finite mm/degree values"
+                )
+            tcp_pose_base_m_wpr_rad = (
+                float(tcp[0]) / 1000.0,
+                float(tcp[1]) / 1000.0,
+                (
+                    float(tcp[2]) - self.config.frames.uf0_z_offset_mm
+                )
+                / 1000.0,
+                *(float(value) for value in np.radians(tcp[3:6])),
+            )
+
+        return RobotState(
+            arm_joints_rad=arm_joints_rad,
+            tcp_pose_base_m_wpr_rad=tcp_pose_base_m_wpr_rad,
+            gripper_state=gripper_state,
         )
 
     def _detection_in_outcome_workspace(self, detection: CubeDetection) -> bool:
@@ -639,17 +921,23 @@ class Policy:
             <= self.config.hardware.maximum_radial_reach_m
         )
 
-    def _start_next_plan(self, scene: SceneDetections) -> bool:
+    def _start_next_plan(
+        self,
+        scene: SceneDetections,
+        *,
+        generic_scene: SceneObservation | None = None,
+        unsupported_objects: tuple[DetectedObject, ...] | None = None,
+    ) -> bool:
         self._validate_hardware_clearance(scene.cubes)
         if not self._reference_detections:
             try:
-                plans = build_colour_sort_plans(scene, self.config)
+                targets = validate_colour_sort_scene(scene, self.config)
             except PlanningError:
                 self._initial_stability_reference = {}
                 self._initial_stability_count = 0
                 raise
             current = {
-                plan.target.colour: plan.target for plan in plans
+                target.colour: target for target in targets
             }
             if not self._initial_stability_reference:
                 self._initial_stability_reference = current
@@ -690,7 +978,12 @@ class Policy:
                 return False
             self._reference_detections = current
             first_colour = self.config.task.colour_order[0]
-            plan = self._plan_for_detection(current[first_colour], scene.scene_id)
+            plan = self._plan_for_detection(
+                current[first_colour],
+                scene,
+                generic_scene=generic_scene,
+                unsupported_objects=unsupported_objects,
+            )
         else:
             current = self._validate_scene_against_reference(scene)
             next_colour = next(
@@ -698,12 +991,21 @@ class Policy:
                 for colour in self.config.task.colour_order
                 if colour not in self._completed_colours
             )
-            plan = self._plan_for_detection(current[next_colour], scene.scene_id)
+            plan = self._plan_for_detection(
+                current[next_colour],
+                scene,
+                generic_scene=generic_scene,
+                unsupported_objects=unsupported_objects,
+            )
         self._set_active_plan(plan)
         return True
 
     def _set_active_plan(self, plan: PickPlacePlan) -> None:
         self._active_plan = plan
+        self._active_attempt_id = (
+            f"{plan.plan_id}|attempt-{len(self._completed_colours) + 1}"
+        )
+        self._active_attempt_started_at_s = plan.capture_time_s
         self._phases = self._hardware_phase_plan(plan)
         self._phase_index = 0
         self._phase_dwell_rows_remaining = None
@@ -712,13 +1014,59 @@ class Policy:
         self._last_hold_log = None
         self._emit(
             "plan_selected",
-            plan_id=plan.plan_id,
+            **self._plan_evidence_fields(plan),
+            attempt_id=self._active_attempt_id,
+            attempt_started_at_s=self._active_attempt_started_at_s,
             colour=plan.target.colour,
             target_xyz_m=list(plan.target.position_base_m),
             destination_mode=self._destination_mode,
             destination_xyz_m=list(plan.release_tip_pose.xyz_m),
             phase_names=[phase.name for phase in self._phases],
         )
+
+    @staticmethod
+    def _plan_evidence_fields(plan: PickPlacePlan | None) -> dict:
+        if plan is None:
+            return {}
+        selection = plan.grasp_selection
+        decision_key = None
+        if selection is not None:
+            decision_key = "|".join(
+                (
+                    plan.scene_id,
+                    plan.target.track_id,
+                    selection.candidate_id,
+                    selection.selector_id,
+                )
+            )
+        return {
+            "plan_id": plan.plan_id,
+            "plan_capture_time_s": plan.capture_time_s,
+            "scene_id": plan.scene_id,
+            "target_track_id": plan.target.track_id,
+            "grasp_decision_key": decision_key,
+            "grasp_candidate_id": (
+                None if selection is None else selection.candidate_id
+            ),
+            "grasp_success_probability": (
+                None if selection is None else selection.success_probability
+            ),
+            "grasp_expected_total_episode_time_s": (
+                None
+                if selection is None
+                else selection.expected_total_episode_time_s
+            ),
+            "grasp_scorer": None if selection is None else selection.scorer_id,
+            "grasp_model_version": (
+                None if selection is None else selection.model_version
+            ),
+            "grasp_selector": (
+                None if selection is None else selection.selector_id
+            ),
+            "grasp_selection_objective": (
+                None if selection is None else selection.selection_objective
+            ),
+        }
 
     def _hardware_phase_plan(self, plan: PickPlacePlan) -> tuple[MotionPhase, ...]:
         """Add a visible inspection/alignment pair without changing Isaac."""
@@ -751,7 +1099,12 @@ class Policy:
         )
 
     def _plan_for_detection(
-        self, detection: CubeDetection, scene_id: str
+        self,
+        detection: CubeDetection,
+        scene: SceneDetections,
+        *,
+        generic_scene: SceneObservation | None = None,
+        unsupported_objects: tuple[DetectedObject, ...] | None = None,
     ) -> PickPlacePlan:
         colour = detection.colour
         bin_x, bin_y = self.config.task.bin_centres_base_m[colour]
@@ -760,24 +1113,71 @@ class Policy:
             if self._destination_mode == "bins"
             else self.config.pick_tip_base_z_m
         )
-        return PickPlacePlan(
-            plan_id=f"{scene_id}:{detection.track_id}:{colour}",
-            scene_id=scene_id,
-            capture_time_s=detection.capture_time_s,
-            target=detection,
+        context = GraspPlanningContext(
             destination=BinTarget(colour, (bin_x, bin_y)),
-            pick_tip_pose=TipPoseBase(
-                (
-                    detection.position_base_m[0],
-                    detection.position_base_m[1],
-                    self.config.pick_tip_base_z_m,
-                ),
-                detection.yaw_rad,
-            ),
             release_tip_pose=TipPoseBase(
                 (bin_x, bin_y, release_z_m), 0.0
             ),
+            pick_tip_z_m=self.config.pick_tip_base_z_m,
+            approach_clearance_m=self.config.task.approach_clearance_m,
+            generic_scene=generic_scene,
+            unsupported_objects=unsupported_objects,
+            robot_state=self._latest_robot_state,
         )
+        try:
+            decision = self._grasp_pipeline.decide_for_target(
+                scene, detection, context
+            )
+        except GraspPlanningError as exc:
+            raise PlanningError(
+                f"no executable grasp for {detection.track_id}: {exc}"
+            ) from exc
+        self._emit(
+            "grasp_candidates_evaluated",
+            **self._plan_evidence_fields(decision.plan),
+            attempt_id=self._active_attempt_id,
+            selected_candidate_id=decision.selected.candidate.candidate_id,
+            accepted_candidates=[
+                {
+                    "candidate_id": item.candidate.candidate_id,
+                    "pick_tip_pose": {
+                        "xyz_m": list(item.candidate.pick_tip_pose.xyz_m),
+                        "yaw_rad": item.candidate.pick_tip_pose.yaw_rad,
+                    },
+                    "approach_tip_pose": {
+                        "xyz_m": list(item.candidate.approach_tip_pose.xyz_m),
+                        "yaw_rad": item.candidate.approach_tip_pose.yaw_rad,
+                    },
+                    "checker_id": item.feasibility.checker_id,
+                    "feasibility_metrics": dict(item.feasibility.metrics),
+                    "feature_schema": item.features.schema_id,
+                    "features": dict(item.features.values),
+                    "success_probability": item.score.success_probability,
+                    "expected_total_episode_time_s": (
+                        item.score.expected_total_episode_time_s
+                    ),
+                    "expected_execution_time_s": (
+                        item.score.expected_execution_time_s
+                    ),
+                    "expected_recovery_time_s": (
+                        item.score.expected_recovery_time_s
+                    ),
+                    "scorer_id": item.score.scorer_id,
+                    "model_version": item.score.model_version,
+                }
+                for item in decision.evaluations
+            ],
+            rejected_candidates=[
+                {
+                    "candidate_id": item.candidate.candidate_id,
+                    "reasons": list(item.feasibility.rejection_reasons),
+                    "checker_id": item.feasibility.checker_id,
+                    "metrics": dict(item.feasibility.metrics),
+                }
+                for item in decision.rejections
+            ],
+        )
+        return decision.plan
 
     def _validate_scene_against_reference(
         self, scene: SceneDetections
@@ -810,24 +1210,29 @@ class Policy:
                         f"< {self._minimum_hardware_clearance_m * 1000.0:.1f} mm"
                     )
 
-    def _revalidate_before_descent(self, scene: SceneDetections) -> None:
+    def _revalidate_before_descent(
+        self,
+        scene: SceneDetections,
+        *,
+        generic_scene: SceneObservation | None = None,
+        unsupported_objects: tuple[DetectedObject, ...] | None = None,
+    ) -> None:
         if self._active_plan is None:
             raise PlanningError("revalidation has no active plan")
         current = self._validate_scene_against_reference(scene)
         colour = self._active_plan.target.colour
-        refreshed = self._plan_for_detection(current[colour], scene.scene_id)
+        refreshed = self._plan_for_detection(
+            current[colour],
+            scene,
+            generic_scene=generic_scene,
+            unsupported_objects=unsupported_objects,
+        )
         # Keep the original identity in logs while binding motion to the fresh
         # scene. The detector's scene-local track IDs are not persistent IDs.
         # Keep the ID bounded if the closed descent interlock causes repeated
         # revalidation polls at the hover pose.
-        refreshed = PickPlacePlan(
-            plan_id=f"{refreshed.plan_id}:revalidated",
-            scene_id=refreshed.scene_id,
-            capture_time_s=refreshed.capture_time_s,
-            target=refreshed.target,
-            destination=refreshed.destination,
-            pick_tip_pose=refreshed.pick_tip_pose,
-            release_tip_pose=refreshed.release_tip_pose,
+        refreshed = replace(
+            refreshed, plan_id=f"{refreshed.plan_id}:revalidated"
         )
         self._active_plan = refreshed
         self._phases = self._hardware_phase_plan(refreshed)
@@ -965,14 +1370,34 @@ class Policy:
     def _finish_active_plan(self) -> None:
         if self._active_plan is None:
             raise PlanningError("cannot finish a missing plan")
-        colour = self._active_plan.target.colour
+        completed_plan = self._active_plan
+        colour = completed_plan.target.colour
         self._pending_verification_colour = colour
+        self._pending_verification_plan = completed_plan
+        self._pending_attempt_id = self._active_attempt_id
+        self._pending_attempt_started_at_s = self._active_attempt_started_at_s
+        motion_finished_at_s = self._last_observation_time_s
         self._emit(
             "plan_motion_complete",
+            **self._plan_evidence_fields(completed_plan),
+            attempt_id=self._pending_attempt_id,
+            attempt_started_at_s=self._pending_attempt_started_at_s,
+            motion_finished_at_s=motion_finished_at_s,
+            motion_elapsed_s=(
+                None
+                if motion_finished_at_s is None
+                or self._pending_attempt_started_at_s is None
+                else max(
+                    0.0,
+                    motion_finished_at_s - self._pending_attempt_started_at_s,
+                )
+            ),
             colour=colour,
             verification="pending fresh table-camera observation",
         )
         self._active_plan = None
+        self._active_attempt_id = None
+        self._active_attempt_started_at_s = None
         self._phases = ()
         self._phase_index = 0
         self._phase_dwell_rows_remaining = None
@@ -1041,8 +1466,15 @@ class Policy:
                         f"destination footprint, observed {len(matching)}"
                     )
 
+        verified_plan = self._pending_verification_plan
+        attempt_id = self._pending_attempt_id
+        attempt_started_at_s = self._pending_attempt_started_at_s
+        verification_time_s = scenes.pickable.capture_time_s
         self._completed_colours.add(colour)
         self._pending_verification_colour = None
+        self._pending_verification_plan = None
+        self._pending_attempt_id = None
+        self._pending_attempt_started_at_s = None
         verification = (
             "fresh table RGB found exactly one matching-colour cube in the "
             "configured virtual-table destination for every completed colour "
@@ -1053,6 +1485,17 @@ class Policy:
         )
         self._emit(
             "plan_complete",
+            **self._plan_evidence_fields(verified_plan),
+            attempt_id=attempt_id,
+            attempt_started_at_s=attempt_started_at_s,
+            verification_capture_time_s=verification_time_s,
+            total_episode_time_s=(
+                None
+                if attempt_started_at_s is None
+                else max(0.0, verification_time_s - attempt_started_at_s)
+            ),
+            recovery_attempted=False,
+            outcome="correct_placement_camera_verified",
             colour=colour,
             completed_colours=sorted(self._completed_colours),
             verification=verification,
@@ -1221,8 +1664,27 @@ class Policy:
     def _block(self, reason: str) -> None:
         if self._blocked_reason is None:
             self._blocked_reason = reason
+            attempt_id = self._active_attempt_id or self._pending_attempt_id
+            attempt_started_at_s = (
+                self._active_attempt_started_at_s
+                if self._active_attempt_started_at_s is not None
+                else self._pending_attempt_started_at_s
+            )
+            blocked_at_s = self._last_observation_time_s
             self._emit(
                 "policy_blocked",
+                **self._plan_evidence_fields(
+                    self._active_plan or self._pending_verification_plan
+                ),
+                attempt_id=attempt_id,
+                attempt_started_at_s=attempt_started_at_s,
+                blocked_at_s=blocked_at_s,
+                total_episode_time_s=(
+                    None
+                    if attempt_started_at_s is None or blocked_at_s is None
+                    else max(0.0, blocked_at_s - attempt_started_at_s)
+                ),
+                outcome="unresolved_blocked",
                 reason=reason,
                 automatic_retry=False,
                 hold_is_emergency_stop=False,
@@ -1230,4 +1692,14 @@ class Policy:
 
     @staticmethod
     def _emit(event: str, **fields) -> None:
-        print(json.dumps({"event": event, **fields}, sort_keys=True), flush=True)
+        print(
+            json.dumps(
+                {
+                    "event": event,
+                    "event_wall_time_s": time.time(),
+                    **fields,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )

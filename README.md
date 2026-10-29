@@ -46,6 +46,15 @@ installed fingers, cube fit, and active UTOOL1/UF0 still require a supervised
 high check before physical descent. Do not treat a policy-issued hold as an
 emergency stop.
 
+## Team integration points
+
+Computer-vision and grasping work plugs into the shared pipeline through
+versioned contracts and one composition file; teammates should not need to
+rewrite the Isaac or FANUC state machines. See
+[`docs/TEAM_INTEGRATION.md`](docs/TEAM_INTEGRATION.md) for every intended
+extension point, exact inputs/outputs, minimal implementations, and contract
+tests.
+
 ## Key dates
 
 | When | What |

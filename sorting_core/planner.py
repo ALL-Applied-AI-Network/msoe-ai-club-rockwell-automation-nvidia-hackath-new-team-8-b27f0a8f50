@@ -15,6 +15,12 @@ from .contracts import (
     SceneDetections,
     TipPoseBase,
 )
+from .grasping import (
+    GraspPlanningContext,
+    GraspPlanningError,
+    GraspPlanningPipeline,
+)
+from .perception import DetectedObject, RobotState, SceneObservation
 
 
 class PlanningError(ValueError):
@@ -98,15 +104,16 @@ def validate_reobserved_scene(
     return selected
 
 
-def build_colour_sort_plans(
+def validate_colour_sort_scene(
     scene: SceneDetections, config: SortConfig
-) -> tuple[PickPlacePlan, ...]:
-    """Return exactly one plan per configured colour, in configured order.
+) -> tuple[CubeDetection, ...]:
+    """Validate the cube task and return one target per configured colour.
 
     The initial task deliberately requires one red, one yellow, and one blue
     cube.  Missing colours, unknown colours, duplicate same-colour targets, and
-    centres closer than the ambiguity threshold all fail closed.  The function
-    consumes only camera detections and known bin configuration.
+    centres closer than the ambiguity threshold all fail closed.  Separating
+    scene validation from grasp generation prevents a learned scorer from
+    being run repeatedly while hardware waits for temporal scene stability.
     """
 
     known = set(config.task.colour_order)
@@ -166,31 +173,53 @@ def build_colour_sort_plans(
                 f"{separation:.4f} m < {minimum:.4f} m"
             )
 
+    return tuple(selected)
+
+
+def build_colour_sort_plans(
+    scene: SceneDetections,
+    config: SortConfig,
+    *,
+    grasp_pipeline: GraspPlanningPipeline | None = None,
+    generic_scene: SceneObservation | None = None,
+    unsupported_objects: tuple[DetectedObject, ...] | None = None,
+    robot_state: RobotState | None = None,
+) -> tuple[PickPlacePlan, ...]:
+    """Return one selected grasp plan per configured colour.
+
+    The optional pipeline is the grasp team's integration seam.  Omitting it
+    uses the legacy single top-down candidate and preserves current behavior.
+    """
+
+    selected = validate_colour_sort_scene(scene, config)
+
+    pipeline = (
+        grasp_pipeline
+        if grasp_pipeline is not None
+        else GraspPlanningPipeline.legacy_default(config)
+    )
     plans = []
     for colour, cube in zip(config.task.colour_order, selected):
         bx, by = config.task.bin_centres_base_m[colour]
         destination = BinTarget(colour=colour, centre_base_m=(bx, by))
-        plans.append(
-            PickPlacePlan(
-                plan_id=f"{scene.scene_id}:{cube.track_id}:{colour}",
-                scene_id=scene.scene_id,
-                capture_time_s=scene.capture_time_s,
-                target=cube,
-                destination=destination,
-                pick_tip_pose=TipPoseBase(
-                    xyz_m=(
-                        cube.position_base_m[0],
-                        cube.position_base_m[1],
-                        config.pick_tip_base_z_m,
-                    ),
-                    yaw_rad=cube.yaw_rad,
-                ),
-                release_tip_pose=TipPoseBase(
-                    xyz_m=(bx, by, config.bin_release_tip_base_z_m),
-                    yaw_rad=0.0,
-                ),
-            )
+        context = GraspPlanningContext(
+            destination=destination,
+            release_tip_pose=TipPoseBase(
+                xyz_m=(bx, by, config.bin_release_tip_base_z_m),
+                yaw_rad=0.0,
+            ),
+            pick_tip_z_m=config.pick_tip_base_z_m,
+            approach_clearance_m=config.task.approach_clearance_m,
+            generic_scene=generic_scene,
+            unsupported_objects=unsupported_objects,
+            robot_state=robot_state,
         )
+        try:
+            plans.append(pipeline.plan_for_target(scene, cube, context))
+        except GraspPlanningError as exc:
+            raise PlanningError(
+                f"no executable grasp for {cube.track_id}: {exc}"
+            ) from exc
     return tuple(plans)
 
 
@@ -208,7 +237,9 @@ def semantic_phase_plan(
     clearance = config.task.approach_clearance_m
     px, py, pz = plan.pick_tip_pose.xyz_m
     dx, dy, dz = plan.release_tip_pose.xyz_m
-    above_pick = TipPoseBase((px, py, pz + clearance), plan.pick_tip_pose.yaw_rad)
+    above_pick = plan.approach_tip_pose or TipPoseBase(
+        (px, py, pz + clearance), plan.pick_tip_pose.yaw_rad
+    )
     above_bin = TipPoseBase((dx, dy, dz + clearance), plan.release_tip_pose.yaw_rad)
 
     return (

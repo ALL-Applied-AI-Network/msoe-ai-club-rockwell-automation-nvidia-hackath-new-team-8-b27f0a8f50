@@ -22,10 +22,14 @@ from policy import Policy  # noqa: E402
 from sorting_core import (  # noqa: E402
     ActionValidationError,
     CubeDetection,
+    DetectedObject,
     MotionPhase,
     PlanningError,
+    Pose3D,
+    SceneObservation,
     SceneDetections,
     TipPoseBase,
+    VisionError,
 )
 
 
@@ -111,6 +115,149 @@ class FanucPolicyTests(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def test_injected_vision_provider_reaches_hardware_without_detector_patch(self):
+        class FakeProvider:
+            request = None
+
+            def observe(self, request):
+                self.request = request
+                objects = tuple(
+                    DetectedObject(
+                        track_id=f"external-{colour}",
+                        class_id="cube",
+                        sort_label=colour,
+                        capture_time_s=request.capture_time_s,
+                        pose=Pose3D.from_yaw((0.44, y, -0.0001), 0.0),
+                        dimensions_m=(0.010, 0.010, 0.010),
+                        confidence=0.95,
+                        source_camera_ids=("table",),
+                    )
+                    for colour, y in (
+                        ("red", -0.19),
+                        ("yellow", 0.0),
+                        ("blue", 0.19),
+                    )
+                )
+                return SceneObservation(
+                    scene_id=request.scene_id,
+                    capture_time_s=request.capture_time_s,
+                    objects=objects,
+                    provider_name="fake-team-vision",
+                    provider_version="test",
+                    calibration_ids=(request.frame("table").calibration_id,),
+                )
+
+        provider = FakeProvider()
+        policy = Policy(perception_provider=provider)
+        obs = _observation(policy._scan_tcp[:6])
+        with mock.patch.object(
+            policy_module,
+            "detect_coloured_cubes",
+            side_effect=AssertionError("legacy detector should not run"),
+        ):
+            views = policy._detect_scene_views(obs)
+        self.assertEqual(
+            [cube.colour for cube in views.pickable.cubes],
+            ["red", "yellow", "blue"],
+        )
+        self.assertEqual(views.observation.provider_name, "fake-team-vision")
+        self.assertIsNotNone(provider.request)
+        self.assertEqual(provider.request.frame("table").calibration_id,
+                         "sidclab-cameras.json:table")
+        self.assertEqual(len(provider.request.robot_state.arm_joints_rad), 6)
+        self.assertAlmostEqual(provider.request.robot_state.gripper_state, 0.0)
+        self.assertAlmostEqual(
+            provider.request.robot_state.tcp_pose_base_m_wpr_rad[2],
+            (float(obs["tcp_pose"][2]) + 330.0) / 1000.0,
+        )
+
+    def test_hardware_feedback_is_converted_to_typed_si_robot_state(self):
+        policy = Policy()
+        state = policy._perception_robot_state(
+            {
+                "joints": [180.0, 90.0, -45.0, 30.0, 0.0, 15.0, 0.25],
+                "tcp_pose": [420.0, -100.0, -260.0, -180.0, 0.0, 90.0],
+            }
+        )
+        self.assertIsNotNone(state)
+        np.testing.assert_allclose(
+            state.arm_joints_rad,
+            [math.pi, math.pi / 2.0, -math.pi / 4.0, math.pi / 6.0, 0.0, math.pi / 12.0],
+        )
+        np.testing.assert_allclose(
+            state.tcp_pose_base_m_wpr_rad,
+            [0.420, -0.100, 0.070, -math.pi, 0.0, math.pi / 2.0],
+        )
+        self.assertAlmostEqual(state.gripper_state, 0.25)
+
+    def test_vision_provider_runtime_error_fails_closed(self):
+        class ExplodingProvider:
+            def observe(self, request):
+                raise RuntimeError("inference device unavailable")
+
+        policy = Policy(perception_provider=ExplodingProvider())
+        obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
+        with self.assertRaisesRegex(VisionError, "inference device unavailable"):
+            policy._detect_scene_views(obs)
+
+    def test_slow_provider_cancels_plan_before_forward_motion(self):
+        clock = {"now": 100.0}
+
+        class SlowProvider:
+            def observe(self, request):
+                clock["now"] += 4.0
+                return SceneObservation(
+                    scene_id=request.scene_id,
+                    capture_time_s=request.capture_time_s,
+                    objects=tuple(
+                        DetectedObject(
+                            track_id=f"slow-{colour}",
+                            class_id="cube",
+                            sort_label=colour,
+                            capture_time_s=request.capture_time_s,
+                            pose=Pose3D.from_yaw((0.44, y, -0.0001), 0.0),
+                            dimensions_m=(0.01, 0.01, 0.01),
+                            source_camera_ids=("table",),
+                        )
+                        for colour, y in (
+                            ("red", -0.19),
+                            ("yellow", 0.0),
+                            ("blue", 0.19),
+                        )
+                    ),
+                    provider_name="slow-test-provider",
+                    provider_version="1",
+                    calibration_ids=("sidclab-cameras.json:table",),
+                )
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "0",
+                Policy.STABLE_OBSERVATIONS_ENV: "1",
+            },
+        ):
+            policy = Policy(perception_provider=SlowProvider())
+        obs = _observation(
+            policy._scan_tcp[:6], timestamp=100.0, trial_id="real-rollout"
+        )
+        with mock.patch.object(
+            policy_module.time, "time", side_effect=lambda: clock["now"]
+        ), mock.patch.object(policy, "_emit", wraps=policy._emit) as emit:
+            chunk = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+        self.assertEqual(len(chunk), 1)
+        np.testing.assert_allclose(chunk[0, :6], obs["tcp_pose"])
+        self.assertIsNone(policy._active_plan)
+        self.assertIsNone(policy._blocked_reason)
+        deadline_events = [
+            call
+            for call in emit.call_args_list
+            if call.args and call.args[0] == "planning_deadline_missed"
+        ]
+        self.assertEqual(len(deadline_events), 1)
+        self.assertFalse(deadline_events[0].kwargs["forward_motion_emitted"])
 
     def test_default_hold_only_repeats_current_measurement_without_perception(self):
         with mock.patch.dict(

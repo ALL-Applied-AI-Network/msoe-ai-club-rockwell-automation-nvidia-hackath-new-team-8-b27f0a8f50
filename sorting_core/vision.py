@@ -8,13 +8,15 @@ camera projection only—never simulator object poses or evaluation ground truth
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Mapping
 
 import cv2
 import numpy as np
 
 from .config import SortConfig
 from .contracts import CubeDetection, SceneDetections, normalise_square_yaw_rad
+from .perception import PerceptionRequest, SceneObservation
+from .task_perception import cube_scene_to_observation
 
 
 class VisionError(ValueError):
@@ -276,3 +278,82 @@ def filter_scene_to_pickup_region(
             if detection_in_pickup_region(detection, config)
         ),
     )
+
+
+class ColourCubeVisionProvider:
+    """Compatibility provider around the existing deterministic HSV detector.
+
+    This is the default implementation of the generic ``VisionProvider``
+    contract.  Its output is deliberately converted back through the task
+    adapter by the current cube demo, so introducing the provider seam does not
+    alter detections, poses, or planning decisions.
+    """
+
+    PROVIDER_NAME = "legacy-hsv-colour-cubes"
+    PROVIDER_VERSION = "1"
+
+    def __init__(
+        self,
+        *,
+        config: SortConfig,
+        camera_projectors: Mapping[str, Any],
+        calibration_ids: Mapping[str, str],
+        camera_id: str = "table",
+        expected_cube_edge_m: float | None = None,
+        detector: Any | None = None,
+    ) -> None:
+        self.config = config.validate()
+        self.camera_id = str(camera_id).strip()
+        if not self.camera_id:
+            raise ValueError("camera_id must not be empty")
+        if self.camera_id not in camera_projectors:
+            raise ValueError(f"missing projector for camera {self.camera_id}")
+        if self.camera_id not in calibration_ids:
+            raise ValueError(f"missing calibration id for camera {self.camera_id}")
+        self._projector = camera_projectors[self.camera_id]
+        self._detector = detector or detect_coloured_cubes
+        self._calibration_id = str(calibration_ids[self.camera_id]).strip()
+        if not self._calibration_id:
+            raise ValueError("calibration id must not be empty")
+        self._cube_edge_m = (
+            self.config.cube_edge_m
+            if expected_cube_edge_m is None
+            else float(expected_cube_edge_m)
+        )
+        if not math.isfinite(self._cube_edge_m) or self._cube_edge_m <= 0.0:
+            raise ValueError("expected cube edge must be positive and finite")
+
+    def observe(self, request: PerceptionRequest) -> SceneObservation:
+        frame = request.frame(self.camera_id)
+        if frame.rgb is None:
+            raise VisionError(f"camera {self.camera_id} has no RGB frame")
+        cubes = self._detector(
+            np.asarray(frame.rgb),
+            self._projector,
+            self.config,
+            scene_id=request.scene_id,
+            capture_time_s=request.capture_time_s,
+            expected_cube_edge_m=self._cube_edge_m,
+        )
+        if not isinstance(cubes, SceneDetections):
+            raise VisionError("legacy detector must return SceneDetections")
+        if abs(cubes.capture_time_s - request.capture_time_s) > 1e-6:
+            raise VisionError("legacy detector returned a stale capture timestamp")
+        # The provider, rather than the low-level pixel routine, owns runtime
+        # request identity. Rebind a test/custom detector's descriptive local
+        # scene name while preserving every detection and its timestamp.
+        if cubes.scene_id != request.scene_id:
+            cubes = SceneDetections(
+                scene_id=request.scene_id,
+                capture_time_s=cubes.capture_time_s,
+                cubes=cubes.cubes,
+            )
+        return cube_scene_to_observation(
+            cubes,
+            class_id="cube",
+            dimensions_m=(self._cube_edge_m,) * 3,
+            provider_name=self.PROVIDER_NAME,
+            provider_version=self.PROVIDER_VERSION,
+            calibration_ids=(self._calibration_id,),
+            source_camera_ids=(self.camera_id,),
+        )

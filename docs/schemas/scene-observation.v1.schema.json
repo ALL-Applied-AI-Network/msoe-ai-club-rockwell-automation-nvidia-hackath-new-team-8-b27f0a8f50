@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rockwell-hackathon:scene-observation:v1",
+  "title": "SceneObservation v1",
+  "description": "Camera-derived runtime observations in robot-base coordinates. Simulator truth is not permitted in this record.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "scene_id",
+    "capture_time_s",
+    "coordinate_frame",
+    "objects",
+    "provider_name",
+    "provider_version",
+    "calibration_ids"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "scene_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "capture_time_s": {
+      "type": "number"
+    },
+    "coordinate_frame": {
+      "const": "robot_base"
+    },
+    "objects": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/detectedObject"
+      }
+    },
+    "provider_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "calibration_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "$defs": {
+    "vector3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        { "type": "number" },
+        { "type": "number" },
+        { "type": "number" }
+      ],
+      "items": false
+    },
+    "positiveVector3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        { "type": "number", "exclusiveMinimum": 0.0 },
+        { "type": "number", "exclusiveMinimum": 0.0 },
+        { "type": "number", "exclusiveMinimum": 0.0 }
+      ],
+      "items": false
+    },
+    "quaternionXyzw": {
+      "description": "Quaternion in x, y, z, w order. Unit norm is enforced by the Python contract because portable JSON Schema cannot express the sum-of-squares tolerance.",
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "prefixItems": [
+        { "type": "number", "minimum": -1.0, "maximum": 1.0 },
+        { "type": "number", "minimum": -1.0, "maximum": 1.0 },
+        { "type": "number", "minimum": -1.0, "maximum": 1.0 },
+        { "type": "number", "minimum": -1.0, "maximum": 1.0 }
+      ],
+      "items": false
+    },
+    "pose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["position_base_m", "orientation_xyzw"],
+      "properties": {
+        "position_base_m": {
+          "$ref": "#/$defs/vector3"
+        },
+        "orientation_xyzw": {
+          "$ref": "#/$defs/quaternionXyzw"
+        }
+      }
+    },
+    "jsonValue": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "integer" },
+        { "type": "number" },
+        { "type": "string" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/jsonValue" }
+        },
+        {
+          "type": "object",
+          "propertyNames": { "minLength": 1 },
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        }
+      ]
+    },
+    "detectedObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "track_id",
+        "class_id",
+        "sort_label",
+        "capture_time_s",
+        "pose",
+        "dimensions_m",
+        "confidence",
+        "pose_quality",
+        "visibility",
+        "source_camera_ids",
+        "attributes"
+      ],
+      "properties": {
+        "track_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "class_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sort_label": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "capture_time_s": {
+          "type": "number"
+        },
+        "pose": {
+          "$ref": "#/$defs/pose"
+        },
+        "dimensions_m": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/positiveVector3" }
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "pose_quality": {
+          "type": ["number", "null"],
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "visibility": {
+          "type": ["number", "null"],
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "source_camera_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "attributes": {
+          "type": "object",
+          "propertyNames": {
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/jsonValue"
+          }
+        }
+      }
+    }
+  }
+}

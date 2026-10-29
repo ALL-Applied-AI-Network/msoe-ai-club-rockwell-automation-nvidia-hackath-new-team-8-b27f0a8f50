@@ -27,7 +27,18 @@ def normalise_square_yaw_rad(yaw_rad: float) -> float:
     if not math.isfinite(yaw):
         raise ValueError("yaw must be finite")
     quarter_turn = math.pi / 2.0
-    return (yaw + quarter_turn / 2.0) % quarter_turn - quarter_turn / 2.0
+    result = (yaw + quarter_turn / 2.0) % quarter_turn - quarter_turn / 2.0
+    # Floating-point trig round trips can land an epsilon below -pi/4 before
+    # modulo, producing +pi/4 even though the documented interval excludes it.
+    # Snap that square-equivalent boundary to the canonical negative endpoint.
+    if math.isclose(
+        result,
+        quarter_turn / 2.0,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        return -quarter_turn / 2.0
+    return result
 
 
 @dataclass(frozen=True)
@@ -129,6 +140,62 @@ class BinTarget:
 
 
 @dataclass(frozen=True)
+class GraspSelectionProvenance:
+    """Auditable summary of the candidate selected for a pick/place plan.
+
+    The detailed candidate evaluations live in :mod:`sorting_core.grasping`.
+    This small backend-neutral summary travels with the executable plan so
+    Isaac and hardware logs can identify the generator, feature schema and
+    scorer that influenced motion without importing a model runtime.
+    """
+
+    candidate_id: str
+    generator_id: str
+    checker_id: str
+    feature_schema_id: str
+    scorer_id: str
+    model_version: str
+    selector_id: str
+    selection_objective: str
+    success_probability: float
+    expected_total_episode_time_s: Optional[float] = None
+    expected_execution_time_s: Optional[float] = None
+    expected_recovery_time_s: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "candidate_id",
+            "generator_id",
+            "checker_id",
+            "feature_schema_id",
+            "scorer_id",
+            "model_version",
+            "selector_id",
+            "selection_objective",
+        ):
+            value = str(getattr(self, field_name)).strip()
+            if not value:
+                raise ValueError(f"{field_name} must not be empty")
+            object.__setattr__(self, field_name, value)
+        probability = float(self.success_probability)
+        if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
+            raise ValueError("success_probability must be in [0, 1]")
+        object.__setattr__(self, "success_probability", probability)
+        for field_name in (
+            "expected_total_episode_time_s",
+            "expected_execution_time_s",
+            "expected_recovery_time_s",
+        ):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            number = float(value)
+            if not math.isfinite(number) or number < 0.0:
+                raise ValueError(f"{field_name} must be finite and non-negative")
+            object.__setattr__(self, field_name, number)
+
+
+@dataclass(frozen=True)
 class PickPlacePlan:
     """One plan tied to a specific camera scene and target identity."""
 
@@ -139,6 +206,8 @@ class PickPlacePlan:
     destination: BinTarget
     pick_tip_pose: TipPoseBase
     release_tip_pose: TipPoseBase
+    approach_tip_pose: Optional[TipPoseBase] = None
+    grasp_selection: Optional[GraspSelectionProvenance] = None
 
     def __post_init__(self) -> None:
         if not str(self.plan_id).strip() or not str(self.scene_id).strip():
@@ -147,6 +216,9 @@ class PickPlacePlan:
             raise ValueError("target and destination colours must match")
         if self.target.capture_time_s != float(self.capture_time_s):
             raise ValueError("plan and target timestamps differ")
+        if self.approach_tip_pose is not None:
+            if self.approach_tip_pose.xyz_m[2] < self.pick_tip_pose.xyz_m[2]:
+                raise ValueError("approach tip pose must not be below the pick pose")
 
 
 @dataclass(frozen=True)

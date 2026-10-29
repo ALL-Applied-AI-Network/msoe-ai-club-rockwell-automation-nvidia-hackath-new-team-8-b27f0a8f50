@@ -29,8 +29,22 @@ from sorting_core import (
     SceneDetections,
     SortConfig,
     build_colour_sort_plans,
-    detect_coloured_cubes,
     filter_scene_to_pickup_region,
+)
+from sorting_core.grasping import GraspPlanningPipeline
+from sorting_core.perception import (
+    CameraFrame,
+    PerceptionRequest,
+    RobotState,
+    SceneObservation,
+    VisionProvider,
+    validate_scene_for_request,
+)
+from sorting_core.task_perception import cube_scene_from_observation
+from sorting_core.team_integrations import (
+    CUBE_TASK_CLASS_IDS,
+    create_grasp_pipeline,
+    create_vision_provider,
 )
 
 
@@ -333,14 +347,133 @@ class CameraSortDecision:
     raw_scene: SceneDetections
     scene: SceneDetections
     plans: tuple[PickPlacePlan, ...]
+    # Appended and optional so existing callers that construct this public
+    # compatibility result positionally remain valid.
+    observation: SceneObservation | None = None
 
 
 class IsaacCameraSortAdapter:
     """Convert one native Isaac RGB frame into shared detections and plans."""
 
-    def __init__(self, camera: CalibratedPinholeCamera, config: SortConfig):
+    def __init__(
+        self,
+        camera: CalibratedPinholeCamera,
+        config: SortConfig,
+        *,
+        perception_provider: VisionProvider | None = None,
+        grasp_pipeline: GraspPlanningPipeline | None = None,
+        vision_checkpoint: str | None = None,
+        grasp_checkpoint: str | None = None,
+    ):
         self.camera = camera
         self.config = config.validate()
+        self.perception_provider = (
+            perception_provider
+            if perception_provider is not None
+            else create_vision_provider(
+                config=self.config,
+                camera_projectors={"table": camera},
+                calibration_ids={"table": "isaac-live-camera-metadata"},
+                checkpoint=vision_checkpoint,
+            )
+        )
+        self.grasp_pipeline = (
+            grasp_pipeline
+            if grasp_pipeline is not None
+            else create_grasp_pipeline(
+                config=self.config,
+                checkpoint=grasp_checkpoint,
+            )
+        )
+
+    def observe_request(self, request: PerceptionRequest) -> SceneObservation:
+        """Run an already assembled single- or multi-camera request.
+
+        This is the backend-neutral seam for team providers that consume more
+        than Isaac's legacy single table-camera convenience method.  The
+        caller remains responsible for supplying calibrated frames and any
+        joint/TCP state needed to transform a moving wrist camera.
+        """
+
+        if not isinstance(request, PerceptionRequest):
+            raise TypeError("request must be a PerceptionRequest")
+        try:
+            result = self.perception_provider.observe(request)
+            return validate_scene_for_request(request, result)
+        except IsaacObservationError:
+            raise
+        except Exception as exc:
+            raise IsaacObservationError(
+                f"vision provider failed: {type(exc).__name__}: {exc}"
+            ) from exc
+
+    def plan_observation(
+        self,
+        observation: SceneObservation,
+        *,
+        robot_state: RobotState | None = None,
+    ) -> CameraSortDecision:
+        """Project one validated generic observation and plan the cube task."""
+
+        if not isinstance(observation, SceneObservation):
+            raise TypeError("observation must be a SceneObservation")
+        projection = cube_scene_from_observation(
+            observation, class_ids=CUBE_TASK_CLASS_IDS
+        )
+        raw_scene = projection.scene
+        scene = filter_scene_to_pickup_region(raw_scene, self.config)
+        return CameraSortDecision(
+            raw_scene=raw_scene,
+            scene=scene,
+            plans=build_colour_sort_plans(
+                scene,
+                self.config,
+                grasp_pipeline=self.grasp_pipeline,
+                generic_scene=observation,
+                unsupported_objects=projection.unsupported_objects,
+                robot_state=robot_state,
+            ),
+            observation=observation,
+        )
+
+    def observe_request_and_plan(
+        self, request: PerceptionRequest
+    ) -> CameraSortDecision:
+        """Run a complete multi-camera perception-to-grasp-planning pass."""
+
+        return self.plan_observation(
+            self.observe_request(request), robot_state=request.robot_state
+        )
+
+    def observe_generic(
+        self,
+        rgb: np.ndarray,
+        *,
+        scene_id: str,
+        capture_time_s: float,
+    ) -> SceneObservation:
+        """Return the provider-neutral scene used at the team integration seam."""
+
+        image = np.asarray(rgb)
+        width, height = self.camera.resolution_px
+        if image.shape != (height, width, 3):
+            raise IsaacObservationError(
+                "RGB resolution does not match camera calibration: "
+                f"got {image.shape[:2][::-1]}, expected {(width, height)}"
+            )
+        request = PerceptionRequest(
+            scene_id=scene_id,
+            capture_time_s=capture_time_s,
+            frames=(
+                CameraFrame(
+                    camera_id="table",
+                    capture_time_s=capture_time_s,
+                    calibration_id="isaac-live-camera-metadata",
+                    rgb=image,
+                ),
+            ),
+        )
+        return self.observe_request(request)
 
     def observe(
         self,
@@ -365,20 +498,12 @@ class IsaacCameraSortAdapter:
     ) -> SceneDetections:
         """Return broad cube-like detections before pick-eligibility filtering."""
 
-        image = np.asarray(rgb)
-        width, height = self.camera.resolution_px
-        if image.shape[:2] != (height, width):
-            raise IsaacObservationError(
-                "RGB resolution does not match camera calibration: "
-                f"got {image.shape[:2][::-1]}, expected {(width, height)}"
-            )
-        return detect_coloured_cubes(
-            image,
-            self.camera,
-            self.config,
-            scene_id=scene_id,
-            capture_time_s=capture_time_s,
+        observation = self.observe_generic(
+            rgb, scene_id=scene_id, capture_time_s=capture_time_s
         )
+        return cube_scene_from_observation(
+            observation, class_ids=CUBE_TASK_CLASS_IDS
+        ).scene
 
     def observe_and_plan(
         self,
@@ -389,12 +514,7 @@ class IsaacCameraSortAdapter:
     ) -> CameraSortDecision:
         """Run the same detector and deterministic planner used by hardware."""
 
-        raw_scene = self.observe_raw(
+        observation = self.observe_generic(
             rgb, scene_id=scene_id, capture_time_s=capture_time_s
         )
-        scene = filter_scene_to_pickup_region(raw_scene, self.config)
-        return CameraSortDecision(
-            raw_scene=raw_scene,
-            scene=scene,
-            plans=build_colour_sort_plans(scene, self.config),
-        )
+        return self.plan_observation(observation)

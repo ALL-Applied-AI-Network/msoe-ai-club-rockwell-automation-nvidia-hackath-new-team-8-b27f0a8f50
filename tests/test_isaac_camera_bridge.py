@@ -23,7 +23,21 @@ from demos.scripted_colour_bucket_sort.colour_bucket_demo import (  # noqa: E402
     _phase_interpolates_spread,
     _should_stop_after_truth_evaluation,
 )
-from sorting_core import load_config  # noqa: E402
+from sorting_core import (  # noqa: E402
+    CameraFrame,
+    ConstantSuccessScorer,
+    DetectedObject,
+    PerceptionRequest,
+    Pose3D,
+    RobotState,
+    SceneObservation,
+    GraspPlanningPipeline,
+    HighestSuccessSelector,
+    LegacyFeatureExtractor,
+    LegacyGeometricChecker,
+    LegacyTopDownCubeGenerator,
+    load_config,
+)
 
 
 class PinholeCameraTests(unittest.TestCase):
@@ -153,6 +167,154 @@ class IsaacCameraSortAdapterTests(unittest.TestCase):
                 image, np.round(pixels).astype(np.int32), colours[colour]
             )
         return image
+
+    def test_injected_provider_bypasses_hsv_and_keeps_generic_scene(self):
+        config = self.config
+
+        class FakeProvider:
+            request = None
+
+            def observe(self, request):
+                self.request = request
+                objects = tuple(
+                    DetectedObject(
+                        track_id=f"model-{colour}",
+                        class_id="cube",
+                        sort_label=colour,
+                        capture_time_s=request.capture_time_s,
+                        pose=Pose3D.from_yaw((x, y, -0.0001), 0.1),
+                        dimensions_m=(0.01, 0.01, 0.01),
+                        confidence=0.95,
+                        source_camera_ids=("table",),
+                    )
+                    for colour, (x, y, _) in (
+                        (colour, config.task.cube_spawns_base_xy_yaw_deg[colour])
+                        for colour in config.task.colour_order
+                    )
+                )
+                return SceneObservation(
+                    scene_id=request.scene_id,
+                    capture_time_s=request.capture_time_s,
+                    objects=objects,
+                    provider_name="fake-team-model",
+                    provider_version="test",
+                    calibration_ids=(request.frame("table").calibration_id,),
+                )
+
+        provider = FakeProvider()
+        adapter = IsaacCameraSortAdapter(
+            self.camera, self.config, perception_provider=provider
+        )
+        width, height = self.camera.resolution_px
+        result = adapter.observe_and_plan(
+            np.zeros((height, width, 3), dtype=np.uint8),
+            scene_id="external-model-scene",
+            capture_time_s=8.0,
+        )
+        self.assertEqual(result.observation.provider_name, "fake-team-model")
+        self.assertEqual(len(result.plans), 3)
+        self.assertEqual(provider.request.scene_id, "external-model-scene")
+
+    def test_observe_request_exposes_multi_camera_provider_seam(self):
+        config = self.config
+
+        class RecordingExtractor(LegacyFeatureExtractor):
+            def __init__(self):
+                self.robot_states = []
+
+            def extract(self, scene, candidate, context):
+                self.robot_states.append(context.robot_state)
+                return super().extract(scene, candidate, context)
+
+        class MultiCameraProvider:
+            request = None
+
+            def observe(self, request):
+                self.request = request
+                return SceneObservation(
+                    scene_id=request.scene_id,
+                    capture_time_s=request.capture_time_s,
+                    objects=tuple(
+                        DetectedObject(
+                            track_id=f"fused-{colour}",
+                            class_id="cube",
+                            sort_label=colour,
+                            capture_time_s=request.capture_time_s,
+                            pose=Pose3D.from_yaw((x, y, -0.0001), 0.0),
+                            dimensions_m=(0.01, 0.01, 0.01),
+                            source_camera_ids=("table", "side"),
+                        )
+                        for colour, (x, y, _) in (
+                            (
+                                colour,
+                                config.task.cube_spawns_base_xy_yaw_deg[colour],
+                            )
+                            for colour in config.task.colour_order
+                        )
+                    ),
+                    provider_name="multi-camera-test",
+                    provider_version="1",
+                    calibration_ids=("table-cal", "side-cal"),
+                )
+
+        provider = MultiCameraProvider()
+        extractor = RecordingExtractor()
+        grasp_pipeline = GraspPlanningPipeline(
+            LegacyTopDownCubeGenerator(),
+            LegacyGeometricChecker(
+                maximum_radial_reach_m=(
+                    self.config.hardware.maximum_radial_reach_m
+                ),
+                minimum_centre_clearance_m=(
+                    self.config.task.minimum_distinct_centres_m
+                ),
+            ),
+            extractor,
+            ConstantSuccessScorer(),
+            HighestSuccessSelector(),
+        )
+        adapter = IsaacCameraSortAdapter(
+            self.camera,
+            self.config,
+            perception_provider=provider,
+            grasp_pipeline=grasp_pipeline,
+        )
+        request = PerceptionRequest(
+            scene_id="multi-camera-scene",
+            capture_time_s=9.0,
+            frames=(
+                CameraFrame("table", 8.99, "table-cal", rgb=object()),
+                CameraFrame("side", 8.96, "side-cal", rgb=object()),
+            ),
+            robot_state=RobotState(
+                arm_joints_rad=(0.0,) * 6,
+                tcp_pose_base_m_wpr_rad=(0.4, 0.0, 0.1, -math.pi, 0.0, 0.0),
+                gripper_state=0.0,
+            ),
+        )
+        result = adapter.observe_request_and_plan(request)
+        self.assertIs(provider.request, request)
+        self.assertEqual(result.observation.provider_name, "multi-camera-test")
+        self.assertEqual(len(result.plans), 3)
+        self.assertEqual(extractor.robot_states, [request.robot_state] * 3)
+
+    def test_provider_runtime_error_is_an_isaac_observation_error(self):
+        class ExplodingProvider:
+            def observe(self, request):
+                raise RuntimeError("accelerator unavailable")
+
+        adapter = IsaacCameraSortAdapter(
+            self.camera, self.config, perception_provider=ExplodingProvider()
+        )
+        width, height = self.camera.resolution_px
+        with self.assertRaisesRegex(
+            IsaacObservationError, "accelerator unavailable"
+        ):
+            adapter.observe_generic(
+                np.zeros((height, width, 3), dtype=np.uint8),
+                scene_id="provider-failure",
+                capture_time_s=9.5,
+            )
 
     def test_rendered_rgb_produces_shared_detections_and_plans(self):
         image = self._render_top_faces()
