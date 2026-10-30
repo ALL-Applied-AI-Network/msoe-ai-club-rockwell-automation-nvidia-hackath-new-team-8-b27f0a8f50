@@ -16,6 +16,14 @@ This repository now has a separate, host-testable data contract:
 - The demo's default presentation behavior remains unchanged. Its opt-in
   `--training-data` mode consumes this contract and its `--camera-perception`
   mode makes runtime decisions from rendered pixels rather than object poses.
+- `config/hardware_frame_curation.json` default-denies downloaded real frames.
+  Ranges with observed hands, people, laptops, phones, or setup activity are
+  excluded. The retained ranges are provisional because the current
+  contact-sheet review sampled at 20-second intervals; fine-scrub every frame
+  used for training or publication.
+- `config/real_camera_profiles.json` provides separate coarse table, side, and
+  wrist appearance targets. Those targets come from compressed 640x360 video,
+  not a photometric calibration.
 
 ## Non-negotiable capture rules
 
@@ -55,17 +63,42 @@ Reproduce that comparison without starting Isaac:
 
 ```powershell
 uv run --project hardware/fanuc_cell scripts/compare_camera_appearance.py `
-  --real-video ../HardwareResults/HardwareResultVideos/Rollout5TableCam.mp4 `
+  --real-video /path/to/frame-by-frame-reviewed-table-video.mp4 `
   --sim-dir path/to/run/raw_frames --sim-domain raw `
+  --camera table --assume-precurated-input `
   --output-json path/to/raw-vs-real.json `
   --contact-sheet path/to/raw-vs-real.png
 ```
+
+`--assume-precurated-input` is an explicit acknowledgement for a video that was
+already reviewed frame by frame outside the checked-in archive manifest; the
+flag does not perform a privacy scrub. When comparing a downloaded archive episode, use
+`--curation-manifest config/hardware_frame_curation.json`, `--dataset-id`,
+`--episode`, and the intended `--curation-split` instead. A missing or
+nonmatching reviewed range is an error rather than permission to read the whole
+video. Repeat the comparison with `--camera side` and `--camera wrist`; each
+view uses a different neutral region and must be assessed independently.
 
 The tool downsamples synthetic frames to the real recording instead of
 inventing detail by upsampling the video. Its exposure and white-balance hints
 deliberately exclude the moving robot corridor and saturated objects. Collect
 a native, lossless 1920x1080 real table-camera still before fitting sensor
 noise, precise blur, camera response, or small-object edge appearance.
+
+For an Isaac training run, `--training-cameras table,side,wrist` opt-in saves
+native raw RGB for all three views and camera-specific 640x360 derived previews.
+Raw renders are never overwritten. The optional `--wrist-hose-stress` flag
+adds only a seeded derived wrist occluder and conservative geometry mask; table and side views
+are never hose-augmented. Treat hose views as unlabeled robustness data unless
+the mask is incorporated into visibility labels. See the
+[scripted demo guide](../demos/scripted_colour_bucket_sort/README.md) for the
+complete command.
+
+For camera/framing checks at measured robot poses, use the
+[hardware-pose shadow replay](../demos/hardware_pose_replay/README.md). It sets
+the simulated articulation from measured joint state, renders all three views,
+and never sends recorded actions to hardware. It is a visual diagnostic, not a
+controller or proof of timing equivalence.
 
 ## Sample a replayable episode
 

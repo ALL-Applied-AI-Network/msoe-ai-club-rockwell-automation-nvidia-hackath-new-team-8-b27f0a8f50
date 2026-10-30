@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "frame_index_semantics": "zero-based [start_frame, end_frame_exclusive)",
+  "default_policy": "deny",
+  "review_method": "Manual review of synchronized table, side, and wrist contact sheets sampled every 20 seconds. Whole questionable episodes are excluded conservatively; this is not an exhaustive per-frame human annotation.",
+  "privacy_rule": "Frames containing hands, people, laptops, phones, or setup activity must not be used for simulator appearance fitting, background extraction, or model training.",
+  "archives": {
+    "r20261027-4a4b7d": {
+      "sha256": "031d2825f140b535150427115ab7fd9de8ecf7867144a7945ce9395ed1c4659d",
+      "frames": 19405,
+      "episodes": 11
+    },
+    "r20261029-88a87b": {
+      "sha256": "696162095ecc1f8b158637b4b2bac03ef006eafdd60f05424de8083b1be55714",
+      "frames": 3821,
+      "episodes": 1
+    }
+  },
+  "splits": {
+    "appearance_fit": [
+      {
+        "dataset": "r20261027-4a4b7d",
+        "episode": 1,
+        "ranges": [[0, 2185]],
+        "tags": ["clean_cell", "static_bins_and_cubes"]
+      },
+      {
+        "dataset": "r20261027-4a4b7d",
+        "episode": 2,
+        "ranges": [[0, 1904]],
+        "tags": ["clean_cell", "static_bins_and_cubes"]
+      },
+      {
+        "dataset": "r20261029-88a87b",
+        "episode": 0,
+        "ranges": [[0, 3400]],
+        "tags": ["clean_cell", "current_moving_robot"]
+      }
+    ],
+    "wrist_hose_occlusion_stress": [
+      {
+        "dataset": "r20261027-4a4b7d",
+        "episode": 6,
+        "ranges": [[0, 1222]],
+        "tags": ["clean_cell", "large_blue_hose_occlusion"]
+      },
+      {
+        "dataset": "r20261027-4a4b7d",
+        "episode": 7,
+        "ranges": [[0, 928]],
+        "tags": ["clean_cell", "large_blue_hose_occlusion"]
+      },
+      {
+        "dataset": "r20261027-4a4b7d",
+        "episode": 8,
+        "ranges": [[0, 1972]],
+        "tags": ["clean_cell", "large_blue_hose_occlusion"]
+      },
+      {
+        "dataset": "r20261027-4a4b7d",
+        "episode": 9,
+        "ranges": [[0, 641]],
+        "tags": ["clean_cell", "large_blue_hose_occlusion"]
+      }
+    ],
+    "held_out_validation": [
+      {
+        "dataset": "r20261027-4a4b7d",
+        "episode": 10,
+        "ranges": [[0, 3389]],
+        "tags": ["clean_cell", "moving_robot", "whole_episode_holdout"]
+      }
+    ],
+    "excluded_human_or_setup": [
+      {
+        "dataset": "r20261027-4a4b7d",
+        "episode": 0,
+        "ranges": [[0, 3923]],
+        "tags": ["human", "setup"],
+        "reason": "Brief human intrusions were observed; exclude the whole episode unless it is exhaustively re-annotated."
+      },
+      {
+        "dataset": "r20261027-4a4b7d",
+        "episode": 3,
+        "ranges": [[0, 1982]],
+        "tags": ["human", "laptop", "setup"],
+        "reason": "Hands, a person, a laptop, and manual object rearrangement appear in several portions."
+      },
+      {
+        "dataset": "r20261027-4a4b7d",
+        "episode": 4,
+        "ranges": [[0, 735]],
+        "tags": ["human", "laptop", "phone", "setup"],
+        "reason": "Person, hands, laptop, phone, and setup activity occur throughout."
+      },
+      {
+        "dataset": "r20261027-4a4b7d",
+        "episode": 5,
+        "ranges": [[0, 524]],
+        "tags": ["human", "setup"],
+        "reason": "Hands and manual object removal/setup activity are visible."
+      },
+      {
+        "dataset": "r20261029-88a87b",
+        "episode": 0,
+        "ranges": [[3400, 3821]],
+        "tags": ["human"],
+        "reason": "A hand intervention was observed near 360 seconds; the tail is excluded conservatively."
+      }
+    ]
+  },
+  "limitations": [
+    "Twenty-second review sampling can miss short intrusions between reviewed frames.",
+    "Before model training or publication, run a finer privacy review or an approved privacy scrub.",
+    "Human-free does not mean object-free: cubes, bins, cables, robot, and fixtures must still be masked for background extraction.",
+    "Use whole episodes for train/validation splitting to prevent temporal leakage."
+  ]
+}

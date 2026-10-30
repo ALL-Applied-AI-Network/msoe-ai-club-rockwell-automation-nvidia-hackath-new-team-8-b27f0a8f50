@@ -71,6 +71,10 @@ from sorting_core import (  # noqa: E402
     square_yaw_delta_degrees,
     validate_reobserved_scene,
 )
+from sorting_core.camera_appearance import (  # noqa: E402
+    create_deployment_preview,
+    load_camera_appearance_profiles,
+)
 from sorting_core.synthetic_data import distort_points_uv, write_json_atomic  # noqa: E402
 from isaac_bridge import CalibratedPinholeCamera, IsaacCameraSortAdapter  # noqa: E402
 from isaac_bridge.training_episode import (  # noqa: E402
@@ -192,7 +196,42 @@ def parse_args() -> argparse.Namespace:
         default=15,
         help="save one training record every N rendered presentation frames",
     )
+    parser.add_argument(
+        "--training-cameras",
+        default="table",
+        help=(
+            "comma-separated native RGB streams saved by --training-data; "
+            "choices are table,side,wrist and table is always required"
+        ),
+    )
+    parser.add_argument(
+        "--wrist-hose-stress",
+        action="store_true",
+        help=(
+            "add the measured blue-hose stress augmentation only to derived "
+            "wrist previews; raw RGB remains unchanged"
+        ),
+    )
     return parser.parse_args()
+
+
+def parse_training_cameras(value: str, *, training_data: bool) -> tuple[str, ...]:
+    """Validate opt-in camera capture without changing the default demo."""
+
+    requested = tuple(
+        dict.fromkeys(part.strip().lower() for part in str(value).split(",") if part.strip())
+    )
+    allowed = {"table", "side", "wrist"}
+    unknown = set(requested) - allowed
+    if unknown:
+        raise ValueError(f"unknown training cameras: {sorted(unknown)}")
+    if not requested:
+        raise ValueError("at least one training camera is required")
+    if "table" not in requested:
+        raise ValueError("training camera capture must include table")
+    if not training_data and requested != ("table",):
+        raise ValueError("--training-cameras requires --training-data")
+    return requested
 
 
 def resolve_bin_model(value: str | None) -> Path:
@@ -395,6 +434,19 @@ def main() -> None:
         raise SystemExit(
             "--physics-only cannot be combined with camera perception or training-data capture"
         )
+    try:
+        training_camera_names = parse_training_cameras(
+            args.training_cameras, training_data=bool(args.training_data)
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.wrist_hose_stress and (
+        not args.training_data or "wrist" not in training_camera_names
+    ):
+        raise SystemExit(
+            "--wrist-hose-stress requires --training-data and wrist in "
+            "--training-cameras"
+        )
     render_resolution = (
         NATIVE_TABLE_RESOLUTION if camera_perception else VIDEO_RESOLUTION
     )
@@ -405,6 +457,7 @@ def main() -> None:
     stage_randomization_readback = None
     effective_camera = None
     appearance_profile = None
+    camera_profiles = None
     if args.training_data:
         synthetic_spec = load_synthetic_data_spec()
         randomization = sample_randomization(
@@ -413,6 +466,7 @@ def main() -> None:
             episode_id=Path(args.run).resolve().name,
         )
         capture_calibration = load_capture_calibration(synthetic_spec)
+        camera_profiles = load_camera_appearance_profiles()
     print(
         f"[bucket-demo] shared config schema={TASK_CONFIG.schema_version}; "
         f"cube edge={TASK_CONFIG.cube_edge_m * 1000.0:.1f} mm",
@@ -571,17 +625,33 @@ def main() -> None:
             UsdPhysics.RigidBodyAPI(prim).CreateKinematicEnabledAttr().Set(True)
             wrappers[colour] = SingleXFormPrim(path)
 
+        camera_specs = {
+            "table": (cell.TABLE_CAM_PATH, C.TABLE_CAM),
+            "side": (cell.SIDE_CAM_PATH, C.SIDE_CAM),
+            "wrist": (cell.WRIST_CAM_PATH, C.WRIST_CAM),
+        }
         camera = None
+        capture_cameras = {}
         if not args.physics_only:
             camera = Camera(
                 prim_path=cell.TABLE_CAM_PATH,
                 resolution=render_resolution,
             )
+            capture_cameras["table"] = camera
+            if randomization is not None:
+                for camera_name in training_camera_names:
+                    if camera_name == "table":
+                        continue
+                    prim_path, camera_config = camera_specs[camera_name]
+                    capture_cameras[camera_name] = Camera(
+                        prim_path=prim_path,
+                        resolution=tuple(camera_config["resolution"]),
+                    )
 
         cell.enable_ccd(world)
         world.reset()
-        if camera is not None:
-            camera.initialize()
+        for capture_camera in capture_cameras.values():
+            capture_camera.initialize()
 
         camera_model = None
         camera_adapter = None
@@ -753,12 +823,12 @@ def main() -> None:
                 "tilt_deg": tilt,
             }
 
-        def capture_rgb() -> np.ndarray:
-            if camera is None:
+        def capture_rgb(camera_name: str = "table") -> np.ndarray:
+            if camera_name not in capture_cameras:
                 raise RuntimeError("Camera capture requested in physics-only mode")
-            rgba = camera.get_rgba()
+            rgba = capture_cameras[camera_name].get_rgba()
             if rgba is None:
-                raise RuntimeError("Table camera returned no image")
+                raise RuntimeError(f"{camera_name} camera returned no image")
             return rgba[:, :, :3].astype(np.uint8)
 
         def save_decision_frame(filename: str, rgb: np.ndarray) -> str:
@@ -801,10 +871,13 @@ def main() -> None:
         frames.mkdir(parents=True, exist_ok=True)
         raw_frames = run / "raw_frames"
         sensor_frames = run / "sensor_frames"
+        deployment_frames = run / "deployment_frames"
+        occluder_masks = run / "occluder_masks"
         frame_labels = run / "frame_labels"
         if randomization is not None:
             raw_frames.mkdir(parents=True, exist_ok=True)
             sensor_frames.mkdir(parents=True, exist_ok=True)
+            deployment_frames.mkdir(parents=True, exist_ok=True)
             frame_labels.mkdir(parents=True, exist_ok=True)
         frame_tip_pose = TipPoseBase(tuple(float(v) for v in home), 0.0)
         frame_jaw_target = C.JAW_OPEN
@@ -933,6 +1006,78 @@ def main() -> None:
                     cv2.cvtColor(sensor_result.image_rgb, cv2.COLOR_RGB2BGR),
                 ):
                     raise RuntimeError(f"OpenCV could not write {sensor_path}")
+                camera_views = {}
+                for camera_name in training_camera_names:
+                    view_rgb = raw_rgb if camera_name == "table" else capture_rgb(camera_name)
+                    view_raw_relative = (
+                        raw_relative
+                        if camera_name == "table"
+                        else f"raw_frames/{camera_name}/f{frame_number:05d}.png"
+                    )
+                    view_raw_path = run / view_raw_relative
+                    if camera_name != "table":
+                        view_raw_path.parent.mkdir(parents=True, exist_ok=True)
+                        if not cv2.imwrite(
+                            str(view_raw_path),
+                            cv2.cvtColor(view_rgb, cv2.COLOR_RGB2BGR),
+                        ):
+                            raise RuntimeError(f"OpenCV could not write {view_raw_path}")
+                    preview_result = create_deployment_preview(
+                        view_rgb,
+                        camera_profiles,
+                        camera_id=camera_name,
+                        episode_seed=args.seed,
+                        frame_index=frame_number,
+                        add_wrist_occlusion=(
+                            args.wrist_hose_stress and camera_name == "wrist"
+                        ),
+                    )
+                    preview_relative = (
+                        f"deployment_frames/{camera_name}/f{frame_number:05d}.png"
+                    )
+                    preview_path = run / preview_relative
+                    preview_path.parent.mkdir(parents=True, exist_ok=True)
+                    if not cv2.imwrite(
+                        str(preview_path),
+                        cv2.cvtColor(preview_result.image_rgb, cv2.COLOR_RGB2BGR),
+                    ):
+                        raise RuntimeError(f"OpenCV could not write {preview_path}")
+                    mask_relative = None
+                    if np.count_nonzero(preview_result.occluder_mask):
+                        mask_relative = (
+                            f"occluder_masks/{camera_name}/f{frame_number:05d}.png"
+                        )
+                        mask_path = run / mask_relative
+                        mask_path.parent.mkdir(parents=True, exist_ok=True)
+                        if not cv2.imwrite(
+                            str(mask_path), preview_result.occluder_mask
+                        ):
+                            raise RuntimeError(f"OpenCV could not write {mask_path}")
+                    prim_path, camera_config = camera_specs[camera_name]
+                    transform = UsdGeom.Xformable(
+                        stage.GetPrimAtPath(prim_path)
+                    ).ComputeLocalToWorldTransform(0)
+                    camera_views[camera_name] = {
+                        "camera_prim_path": prim_path,
+                        "parent": camera_config["parent"],
+                        "raw_image_relpath": view_raw_relative,
+                        "raw_resolution": [
+                            int(view_rgb.shape[1]),
+                            int(view_rgb.shape[0]),
+                        ],
+                        "deployment_preview_relpath": preview_relative,
+                        "synthetic_occluder_mask_relpath": mask_relative,
+                        "deployment_processing": dict(preview_result.processing),
+                        "camera_to_world_row_major": [
+                            [float(transform[row][column]) for column in range(4)]
+                            for row in range(4)
+                        ],
+                        "labels": (
+                            "table-camera evaluator-only projected cuboids"
+                            if camera_name == "table"
+                            else "unlabeled auxiliary view"
+                        ),
+                    }
                 capture_time = float(world.current_time)
                 (
                     measured_q,
@@ -990,6 +1135,16 @@ def main() -> None:
                 record["camera"]["sensor_processing"] = dict(
                     sensor_result.processing
                 )
+                record["camera_views"] = camera_views
+                record["camera_view_synchronization"] = {
+                    "clock_source": "single Isaac world tick; no step between camera reads",
+                    "capture_time_s": capture_time,
+                    "physical_equivalence_warning": (
+                        "The hardware archives have no independent per-camera "
+                        "capture timestamps, so this simulated synchrony does not "
+                        "prove physical exposure synchrony."
+                    ),
+                }
                 record["policy_input"]["measured_robot_state"]["gripper"].update(
                     {
                         "raw_closure_fraction": measured_closure_fraction_raw,
@@ -1503,6 +1658,17 @@ def main() -> None:
             "training_data": {
                 "enabled": randomization is not None,
                 "episode_seed": args.seed if randomization is not None else None,
+                "captured_cameras": (
+                    list(training_camera_names) if randomization is not None else []
+                ),
+                "camera_native_resolutions": (
+                    None
+                    if camera_profiles is None
+                    else {
+                        name: list(camera_profiles.camera(name).native_resolution)
+                        for name in training_camera_names
+                    }
+                ),
                 "raw_frame_count": (
                     len(list(raw_frames.glob("*.png")))
                     if randomization is not None
@@ -1512,6 +1678,35 @@ def main() -> None:
                     len(list(sensor_frames.glob("*.png")))
                     if randomization is not None
                     else 0
+                ),
+                "raw_frame_count_by_camera": (
+                    None
+                    if randomization is None
+                    else {
+                        name: len(
+                            list(
+                                (
+                                    raw_frames
+                                    if name == "table"
+                                    else raw_frames / name
+                                ).glob("*.png")
+                            )
+                        )
+                        for name in training_camera_names
+                    }
+                ),
+                "deployment_preview_count_by_camera": (
+                    None
+                    if randomization is None
+                    else {
+                        name: len(
+                            list((deployment_frames / name).glob("*.png"))
+                        )
+                        for name in training_camera_names
+                    }
+                ),
+                "wrist_hose_stress_enabled": bool(
+                    randomization is not None and args.wrist_hose_stress
                 ),
                 "label_record_count": (
                     len(list(frame_labels.glob("*.json")))

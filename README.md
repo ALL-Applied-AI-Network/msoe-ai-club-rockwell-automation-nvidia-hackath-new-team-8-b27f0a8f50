@@ -22,6 +22,17 @@ See [BREV_SETUP.md](BREV_SETUP.md). Coding agents can simply be told: “Set thi
   then grasps two supplied ISO 10642 M6 x 30 screw CAD models by their shafts
   and places both in the red bin. Screw targets are configured simulator poses;
   the current colour/cube camera detector does not perceive screws.
+- [Measured hardware-pose shadow replay](demos/hardware_pose_replay/README.md):
+  an Isaac-only diagnostic that renders the table, side, and wrist cameras at
+  curated measured robot poses. It never replays recorded actions or sends a
+  command to the physical robot.
+
+The privacy/default-deny rules and limits of the compressed real-camera
+evidence are documented in
+[`docs/REAL_CAMERA_EVIDENCE.md`](docs/REAL_CAMERA_EVIDENCE.md). Frames containing
+observed hands, people, laptops, phones, or setup activity are excluded from
+appearance fitting and training. The retained ranges are provisional until a
+fine-grained privacy review checks every frame used.
 
 ## FANUC hardware path
 

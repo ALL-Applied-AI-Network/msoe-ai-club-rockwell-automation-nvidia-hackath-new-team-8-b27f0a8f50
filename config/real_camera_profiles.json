@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "purpose": "Evidence-backed camera targets and deployment-preview settings for table, side, and wrist views. These compressed-video statistics constrain broad appearance only; they are not a photometric or geometric calibration.",
+  "curation_manifest": "config/hardware_frame_curation.json",
+  "deployment_stream": {
+    "resolution": [640, 360],
+    "fps": 10,
+    "pixel_format": "yuv420p",
+    "codec_evidence": "av1",
+    "crf_evidence": 30,
+    "preview_approximation": "area resize followed by an RGB-to-I420-to-RGB round trip; no claim of AV1 bitstream equivalence"
+  },
+  "evidence": {
+    "appearance_fit_split": "appearance_fit",
+    "held_out_split": "held_out_validation",
+    "wrist_occlusion_split": "wrist_hose_occlusion_stress",
+    "training_authorization": "unconfirmed; use for simulator fitting and held-out evaluation until organizers clarify",
+    "cube_size_note": "Archive task metadata says 10 mm, but compressed pixels cannot resolve the project's 10 mm versus 16 mm physical-cube question."
+  },
+  "cameras": {
+    "table": {
+      "native_resolution": [1920, 1080],
+      "calibration_file": "hardware/fanuc_cell/calibration/cameras.json",
+      "calibration_entry": "table",
+      "latest_archive_rgb_mean_01": [0.4743645919, 0.4685511028, 0.4258588443],
+      "older_archive_rgb_mean_01": [0.4751753860, 0.4705604406, 0.4355611016],
+      "curated_fit_sampled_frames": 750,
+      "fit_neutral_rgb_median_8bit": [141, 140, 139],
+      "fit_neutral_rgb_p05_8bit": [63, 60, 57],
+      "fit_neutral_rgb_p95_8bit": [165, 168, 168],
+      "fit_neutral_luma_p05_median_p95_8bit": [60, 141, 167],
+      "heldout_neutral_rgb_median_8bit": [140, 139, 138],
+      "heldout_neutral_luma_p05_median_p95_8bit": [52, 139, 166],
+      "profile_status": "curated decoded compressed-video fit; whole-episode held-out check",
+      "synthetic_hose_occlusion": {"enabled": false}
+    },
+    "side": {
+      "native_resolution": [1920, 1080],
+      "calibration_file": "hardware/fanuc_cell/calibration/cameras.json",
+      "calibration_entry": "side",
+      "latest_archive_rgb_mean_01": [0.6054783331, 0.5569461245, 0.5131136604],
+      "older_archive_rgb_mean_01": [0.5918937823, 0.5488271751, 0.5074274951],
+      "curated_fit_sampled_frames": 750,
+      "fit_neutral_rgb_median_8bit": [165, 155, 151],
+      "fit_neutral_rgb_p05_8bit": [114, 107, 100],
+      "fit_neutral_rgb_p95_8bit": [243, 223, 217],
+      "fit_neutral_luma_p05_median_p95_8bit": [108, 157, 227],
+      "heldout_neutral_rgb_median_8bit": [166, 157, 152],
+      "heldout_neutral_luma_p05_median_p95_8bit": [68, 158, 228],
+      "profile_status": "curated decoded compressed-video fit; whole-episode held-out check",
+      "synthetic_hose_occlusion": {"enabled": false}
+    },
+    "wrist": {
+      "native_resolution": [1280, 720],
+      "calibration_file": "hardware/fanuc_cell/calibration/cameras.json",
+      "calibration_entry": "wrist",
+      "latest_archive_rgb_mean_01": [0.5825393656, 0.5861588612, 0.5889804337],
+      "older_archive_rgb_mean_01": [0.5514351917, 0.5544717780, 0.5596294444],
+      "curated_fit_sampled_frames": 750,
+      "fit_neutral_rgb_median_8bit": [150, 151, 152],
+      "fit_neutral_rgb_p05_8bit": [134, 135, 134],
+      "fit_neutral_rgb_p95_8bit": [163, 163, 165],
+      "fit_neutral_luma_p05_median_p95_8bit": [135, 151, 163],
+      "heldout_neutral_rgb_median_8bit": [147, 147, 149],
+      "heldout_neutral_luma_p05_median_p95_8bit": [131, 147, 161],
+      "profile_status": "curated decoded compressed-video fit; wrist held-out shift tracks hose occlusion",
+      "synthetic_hose_occlusion": {
+        "enabled": true,
+        "application_probability": 0.6,
+        "curve_count": [1, 2],
+        "width_px_at_deployment_resolution": [18, 34],
+        "blue_rgb": [26, 126, 188],
+        "shadow_rgb": [20, 27, 31],
+        "shadow_offset_px": [3, 6],
+        "status": "provisional image-space robustness augmentation",
+        "evidence": "The curated stress episodes show a large blue component in 100% of 1 Hz samples with median largest-component area about 9-10%; held-out episode 10 exceeds 2% in about 60% of samples and reaches about 15.5%. The proxy can include blue hardware/cubes and is not a semantic mask."
+      }
+    }
+  },
+  "limitations": [
+    "The archived videos are 640x360 AV1/YUV420 and cannot recover native sensor noise, camera response, sharpness, or fine material properties.",
+    "No independent per-camera capture timestamps are present, so file alignment does not prove simultaneous physical exposure.",
+    "Image-space hose augmentation is for robustness; it is not a flexible-body physics model.",
+    "Generated occluder masks must either update visibility labels or be stored as unlabeled robustness views."
+  ]
+}

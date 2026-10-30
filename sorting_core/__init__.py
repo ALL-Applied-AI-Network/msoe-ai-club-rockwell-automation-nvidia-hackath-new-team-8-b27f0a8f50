@@ -110,6 +110,26 @@ _LAZY_EXPORTS = {
         "load_synthetic_data_spec",
     ),
     "sample_randomization": (".synthetic_data", "sample_randomization"),
+    "CameraAppearanceError": (
+        ".camera_appearance",
+        "CameraAppearanceError",
+    ),
+    "camera_neutral_region_masks": (
+        ".camera_appearance",
+        "camera_neutral_region_masks",
+    ),
+    "create_deployment_preview": (
+        ".camera_appearance",
+        "create_deployment_preview",
+    ),
+    "load_camera_appearance_profiles": (
+        ".camera_appearance",
+        "load_camera_appearance_profiles",
+    ),
+    "load_frame_curation": (
+        ".camera_appearance",
+        "load_frame_curation",
+    ),
 }
 
 
@@ -126,6 +146,7 @@ __all__ = [
     "ActionValidationError",
     "BinTarget",
     "CameraFrame",
+    "CameraAppearanceError",
     "ColourCubeVisionProvider",
     "ConfigurationError",
     "ConstantSuccessScorer",
@@ -168,7 +189,9 @@ __all__ = [
     "build_colour_sort_plans",
     "build_trajectory_chunks",
     "build_synchronized_frame_record",
+    "camera_neutral_region_masks",
     "config_from_dict",
+    "create_deployment_preview",
     "cube_scene_from_observation",
     "cube_scene_to_observation",
     "detection_in_pickup_region",
@@ -179,6 +202,8 @@ __all__ = [
     "interpolate_tcp_rows",
     "load_config",
     "load_capture_calibration",
+    "load_camera_appearance_profiles",
+    "load_frame_curation",
     "load_synthetic_data_spec",
     "normalise_square_yaw_rad",
     "scene_observation_from_dict",

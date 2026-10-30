@@ -142,6 +142,33 @@ artifacts with:
   --training-data --seed 7 --dataset-stride 15
 ```
 
+The default remains table-camera-only. To capture all three simulated cameras
+for teammate integration, opt in explicitly:
+
+```bash
+"$ISAAC/python.sh" \
+  /workspace/rockwell-hackathon/demos/scripted_colour_bucket_sort/colour_bucket_demo.py \
+  --run "$ROCKWELL_RUNS_ROOT/training_bucket_sort_multicam_seed_7" \
+  --training-data --training-cameras table,side,wrist \
+  --seed 7 --dataset-stride 15
+```
+
+This writes native, lossless table RGB to `raw_frames/`, native side/wrist RGB
+to `raw_frames/side/` and `raw_frames/wrist/`, and separate 640x360
+camera-matched previews to `deployment_frames/<camera>/`. The previews apply a
+bounded, recorded neutral-colour adjustment and an I420 chroma round trip based
+on privacy-curated compressed hardware video. They do not overwrite the raw
+renders and are not a photometric calibration.
+
+The blue hose sometimes blocks the physical wrist camera. Treat that as an
+occlusion robustness problem, not normal appearance. Add
+`--wrist-hose-stress` only with `--training-data --training-cameras
+table,side,wrist`. It affects only derived wrist previews and stores a
+conservative pre-I420 cable-and-shadow geometry mask under
+`occluder_masks/wrist/`; it never alters table/side images or native
+raw frames. These augmented images are unlabeled robustness views unless the
+mask is propagated into the training labels.
+
 Training mode implies camera perception and native 1920×1080 rendering. It
 keeps presentation overlays under `frames/`, lossless unannotated renderer
 images under `raw_frames/`, derived distorted/sensor-augmented images under
@@ -154,6 +181,12 @@ claiming a sampled parameter that was not actually applied and read back. Each
 label keeps six measured arm-joint angles separate from measured gripper
 opening/closure, derives the measured TCP from articulation readback through
 FK, and records the last commanded state separately.
+
+The real-video profiles are governed by the default-deny curation manifest in
+`config/hardware_frame_curation.json`. Ranges where hands, people, laptops,
+phones, or setup activity were observed are excluded. Because the initial
+review sampled at 20-second intervals, the retained ranges remain provisional:
+run a finer privacy review before any model training or publication.
 
 The [synthetic-data contract](../../docs/SYNTHETIC_DATA.md) explains the
 provisional ranges and remaining gaps. In particular, the available 2D boxes

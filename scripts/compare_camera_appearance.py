@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Compare broad table-camera appearance between real video and Isaac images.
+"""Compare broad per-camera appearance between reviewed real and Isaac images.
 
 This tool deliberately measures only low-frequency colour and exposure from
 compressed rollout video.  It downsamples synthetic images to the real video
-resolution and excludes saturated objects plus the central robot corridor.
+resolution and excludes saturated objects plus camera-specific robot regions.
 It must not be used to claim a calibrated noise, blur, or camera-response
-model; that requires native, lossless real-camera frames.
+model; that requires native, lossless real-camera frames. Raw rollout videos
+require a default-deny curation manifest unless the caller explicitly asserts
+that the entire input was independently privacy-reviewed.
 """
 
 from __future__ import annotations
@@ -14,10 +16,18 @@ import argparse
 import json
 import math
 from pathlib import Path
+import sys
 from typing import Iterable
 
 import cv2
 import numpy as np
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from sorting_core.camera_appearance import camera_neutral_region_masks  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
@@ -25,9 +35,39 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--real-video", required=True, type=Path)
     parser.add_argument("--sim-dir", required=True, type=Path)
     parser.add_argument("--sim-pattern", default="*.png")
+    parser.add_argument(
+        "--camera",
+        choices=("table", "side", "wrist"),
+        default="table",
+        help="Selects camera-specific neutral regions and report metadata.",
+    )
     parser.add_argument("--samples", type=int, default=24)
     parser.add_argument("--output-json", required=True, type=Path)
     parser.add_argument("--contact-sheet", type=Path)
+    privacy_source = parser.add_mutually_exclusive_group(required=True)
+    privacy_source.add_argument(
+        "--curation-manifest",
+        type=Path,
+        help=(
+            "Privacy/default-deny frame manifest. When supplied, --dataset-id, "
+            "--episode and --curation-split are required."
+        ),
+    )
+    privacy_source.add_argument(
+        "--assume-precurated-input",
+        action="store_true",
+        help=(
+            "Explicitly assert that the entire input video was independently "
+            "privacy-reviewed. Never use this for the downloaded raw rollouts."
+        ),
+    )
+    parser.add_argument("--dataset-id")
+    parser.add_argument("--episode", type=int)
+    parser.add_argument(
+        "--curation-split",
+        default="appearance_fit",
+        help="Named split in the curation manifest (default: appearance_fit).",
+    )
     parser.add_argument(
         "--sim-domain",
         choices=("raw", "sensor"),
@@ -50,7 +90,117 @@ def _uniform_indices(count: int, requested: int) -> tuple[int, ...]:
     )
 
 
-def _read_video(path: Path, samples: int) -> tuple[list[np.ndarray], dict]:
+def _curated_ranges(
+    manifest_path: Path | None,
+    *,
+    dataset_id: str | None,
+    episode: int | None,
+    split: str,
+    assume_precurated_input: bool = False,
+) -> tuple[tuple[int, int], ...] | None:
+    """Resolve reviewed frame ranges without ever loading excluded imagery.
+
+    The checked-in curation contract is intentionally default-deny.  Supplying
+    a manifest without an exact dataset/episode match is an error rather than a
+    silent fallback to the complete video.
+    """
+
+    if manifest_path is None:
+        if dataset_id is not None or episode is not None:
+            raise ValueError("dataset/episode require --curation-manifest")
+        if not assume_precurated_input:
+            raise ValueError(
+                "real video requires --curation-manifest or the explicit "
+                "--assume-precurated-input acknowledgement"
+            )
+        return None
+    if assume_precurated_input:
+        raise ValueError(
+            "--curation-manifest and --assume-precurated-input are mutually exclusive"
+        )
+    if not dataset_id or episode is None:
+        raise ValueError(
+            "--curation-manifest requires --dataset-id and --episode"
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("default_policy") != "deny":
+            raise ValueError("curation manifest must be default-deny")
+        splits = manifest["splits"]
+        entries = splits[split]
+        excluded_entries = splits["excluded_human_or_setup"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise ValueError(f"cannot read curation split {split!r}: {exc}") from exc
+    matches = [
+        entry
+        for entry in entries
+        if entry.get("dataset") == dataset_id
+        and int(entry.get("episode", -1)) == episode
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"curation split {split!r} has no unique {dataset_id} episode {episode}"
+        )
+    result = []
+    for index, value in enumerate(matches[0].get("ranges", ())):
+        if not isinstance(value, list) or len(value) != 2:
+            raise ValueError(f"curation range {index} must be [start, end)")
+        start, end = (int(item) for item in value)
+        if start < 0 or end <= start:
+            raise ValueError(f"curation range {index} is invalid: {value!r}")
+        result.append((start, end))
+    if not result:
+        raise ValueError("curation entry contains no accepted ranges")
+    excluded_ranges = []
+    for excluded in excluded_entries:
+        if (
+            excluded.get("dataset") != dataset_id
+            or int(excluded.get("episode", -1)) != episode
+        ):
+            continue
+        for value in excluded.get("ranges", ()):
+            if not isinstance(value, list) or len(value) != 2:
+                raise ValueError("privacy exclusion range must be [start, end)")
+            start, end = (int(item) for item in value)
+            if start < 0 or end <= start:
+                raise ValueError(f"privacy exclusion range is invalid: {value!r}")
+            excluded_ranges.append((start, end))
+    for accepted_start, accepted_end in result:
+        for excluded_start, excluded_end in excluded_ranges:
+            if accepted_start < excluded_end and excluded_start < accepted_end:
+                raise ValueError(
+                    "curated frame range overlaps excluded human/setup imagery"
+                )
+    return tuple(result)
+
+
+def _indices_in_ranges(
+    count: int,
+    requested: int,
+    accepted_ranges: tuple[tuple[int, int], ...] | None,
+) -> tuple[int, ...]:
+    if accepted_ranges is None:
+        return _uniform_indices(count, requested)
+    chunks = [
+        np.arange(max(0, start), min(count, end), dtype=np.int64)
+        for start, end in accepted_ranges
+        if min(count, end) > max(0, start)
+    ]
+    if not chunks:
+        raise ValueError("curated frame ranges retain no frames from this video")
+    eligible = np.concatenate(chunks)
+    if eligible.size == 0:
+        raise ValueError("curated frame ranges retain no frames from this video")
+    positions = _uniform_indices(len(eligible), requested)
+    return tuple(int(eligible[position]) for position in positions)
+
+
+def _read_video(
+    path: Path,
+    samples: int,
+    *,
+    accepted_ranges: tuple[tuple[int, int], ...] | None = None,
+) -> tuple[list[np.ndarray], dict]:
     capture = cv2.VideoCapture(str(path))
     if not capture.isOpened():
         raise RuntimeError(f"cannot open real video: {path}")
@@ -59,7 +209,7 @@ def _read_video(path: Path, samples: int) -> tuple[list[np.ndarray], dict]:
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = float(capture.get(cv2.CAP_PROP_FPS))
     frames = []
-    indices = _uniform_indices(count, samples)
+    indices = _indices_in_ranges(count, samples, accepted_ranges)
     for index in indices:
         capture.set(cv2.CAP_PROP_POS_FRAMES, index)
         ok, frame = capture.read()
@@ -74,6 +224,11 @@ def _read_video(path: Path, samples: int) -> tuple[list[np.ndarray], dict]:
         "sampled_indices": list(indices),
         "fps": fps,
         "resolution": [width, height],
+        "accepted_frame_ranges": (
+            None
+            if accepted_ranges is None
+            else [list(value) for value in accepted_ranges]
+        ),
     }
 
 
@@ -104,26 +259,10 @@ def _read_images(
     }
 
 
-def _region_masks(width: int, height: int) -> dict[str, np.ndarray]:
-    table = np.zeros((height, width), dtype=np.uint8)
-    table_points = np.asarray(
-        [
-            (0.20 * width, 0.24 * height),
-            (0.80 * width, 0.24 * height),
-            (0.97 * width, 0.93 * height),
-            (0.03 * width, 0.93 * height),
-        ],
-        dtype=np.int32,
-    )
-    cv2.fillConvexPoly(table, table_points, 255)
-    # Robot, gripper and hoses move through this corridor.  Their colours must
-    # not determine the table's exposure or white-balance estimate.
-    table[: int(0.62 * height), int(0.36 * width) : int(0.64 * width)] = 0
-
-    background = np.zeros((height, width), dtype=np.uint8)
-    background[: int(0.17 * height), : int(0.34 * width)] = 255
-    background[: int(0.17 * height), int(0.66 * width) :] = 255
-    return {"neutral_table": table, "neutral_background": background}
+def _region_masks(
+    width: int, height: int, camera: str = "table"
+) -> dict[str, np.ndarray]:
+    return dict(camera_neutral_region_masks(width, height, camera))
 
 
 def _neutral_pixels(frames: Iterable[np.ndarray], mask: np.ndarray) -> np.ndarray:
@@ -190,11 +329,19 @@ def _compare(real: dict, sim: dict) -> dict:
 
 
 def _write_contact_sheet(
-    path: Path, real_frames: list[np.ndarray], sim_frames: list[np.ndarray]
+    path: Path,
+    real_frames: list[np.ndarray],
+    sim_frames: list[np.ndarray],
+    *,
+    camera: str = "table",
 ) -> None:
     real = real_frames[len(real_frames) // 2].copy()
     sim = sim_frames[len(sim_frames) // 2].copy()
-    for image, label in ((real, "REAL TABLE VIDEO"), (sim, "SYNTHETIC")):
+    camera_label = camera.upper()
+    for image, label in (
+        (real, f"REAL {camera_label} VIDEO"),
+        (sim, f"SYNTHETIC {camera_label}"),
+    ):
         cv2.rectangle(image, (0, 0), (260, 32), (15, 15, 15), -1)
         cv2.putText(
             image,
@@ -213,7 +360,21 @@ def _write_contact_sheet(
 
 def main() -> None:
     args = _parse_args()
-    real_frames, real_source = _read_video(args.real_video, args.samples)
+    try:
+        accepted_ranges = _curated_ranges(
+            args.curation_manifest,
+            dataset_id=args.dataset_id,
+            episode=args.episode,
+            split=args.curation_split,
+            assume_precurated_input=args.assume_precurated_input,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    real_frames, real_source = _read_video(
+        args.real_video,
+        args.samples,
+        accepted_ranges=accepted_ranges,
+    )
     height, width = real_frames[0].shape[:2]
     sim_frames, sim_source = _read_images(
         args.sim_dir,
@@ -221,7 +382,7 @@ def main() -> None:
         args.samples,
         (width, height),
     )
-    masks = _region_masks(width, height)
+    masks = _region_masks(width, height, args.camera)
     regions = {}
     for name, mask in masks.items():
         real_stats = _statistics(_neutral_pixels(real_frames, mask))
@@ -233,6 +394,7 @@ def main() -> None:
         }
     report = {
         "schema_version": 1,
+        "camera": args.camera,
         "real": real_source,
         "sim": {**sim_source, "domain": args.sim_domain},
         "regions": regions,
@@ -240,8 +402,26 @@ def main() -> None:
             "colour_space": "RGB plus OpenCV 8-bit Lab",
             "neutral_pixel_rule": "HSV saturation <= 48",
             "geometry": (
-                "fixed normalized table/background masks; central moving robot "
-                "corridor excluded"
+                f"fixed normalized {args.camera}-camera neutral masks; saturated "
+                "objects and hoses excluded by the neutral-pixel rule"
+            ),
+            "curation": (
+                {
+                    "manifest": None,
+                    "assume_precurated_input": True,
+                    "warning": (
+                        "The caller explicitly asserted that the entire video was "
+                        "independently privacy-reviewed."
+                    ),
+                }
+                if args.curation_manifest is None
+                else {
+                    "manifest": str(args.curation_manifest.resolve()),
+                    "dataset_id": args.dataset_id,
+                    "episode": args.episode,
+                    "split": args.curation_split,
+                    "default_deny": True,
+                }
             ),
             "limitation": (
                 "Real input is compressed 640x360 rollout video. Results support "
@@ -253,7 +433,12 @@ def main() -> None:
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     if args.contact_sheet is not None:
-        _write_contact_sheet(args.contact_sheet, real_frames, sim_frames)
+        _write_contact_sheet(
+            args.contact_sheet,
+            real_frames,
+            sim_frames,
+            camera=args.camera,
+        )
     print(json.dumps(report["regions"], indent=2))
 
 

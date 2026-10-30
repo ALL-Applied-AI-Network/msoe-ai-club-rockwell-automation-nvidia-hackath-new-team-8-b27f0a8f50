@@ -22,6 +22,7 @@ from demos.scripted_colour_bucket_sort.colour_bucket_demo import (  # noqa: E402
     _clipped_amodal_bbox,
     _phase_interpolates_spread,
     _should_stop_after_truth_evaluation,
+    parse_training_cameras,
 )
 from sorting_core import (  # noqa: E402
     CameraFrame,
@@ -109,6 +110,20 @@ class PinholeCameraTests(unittest.TestCase):
                 tuple(tuple(row) for row in column_translation),
                 0.0,
             )
+
+    def test_training_camera_selection_is_opt_in_and_keeps_table(self):
+        self.assertEqual(
+            parse_training_cameras("table,side,wrist", training_data=True),
+            ("table", "side", "wrist"),
+        )
+        self.assertEqual(
+            parse_training_cameras("table,table,side", training_data=True),
+            ("table", "side"),
+        )
+        with self.assertRaisesRegex(ValueError, "must include table"):
+            parse_training_cameras("side,wrist", training_data=True)
+        with self.assertRaisesRegex(ValueError, "requires --training-data"):
+            parse_training_cameras("table,side", training_data=False)
 
     def test_amodal_projected_box_is_clipped_or_invalid(self):
         clipped, status = _clipped_amodal_bbox(
