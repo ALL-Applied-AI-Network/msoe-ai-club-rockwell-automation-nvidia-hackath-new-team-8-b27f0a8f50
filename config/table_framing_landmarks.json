@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "purpose": "Manual 640x360 landmark evidence for auditing table-camera framing. This file diagnoses a mismatch; it does not authorize changing camera calibration or table geometry.",
+  "image_resolution_px": [640, 360],
+  "sources": {
+    "real_fit_frame_0": {
+      "workspace_relative_path": "HardwareResults/HardwareResultVideos/table_frame0.png",
+      "sha256": "a8ebeecc9569d27d03faba86bb6071ec168ac8e11148d48bf76b115d0e556949",
+      "byte_size": 198746,
+      "role": "manual landmark fit"
+    },
+    "real_check_frame_400": {
+      "workspace_relative_path": "HardwareResults/HardwareResultVideos/table_frame400.png",
+      "sha256": "2de31e3d323d2c792b3f01a617811e29477b3844ec669041d6eee07f6730dc14",
+      "byte_size": 211787,
+      "role": "independent same-rollout stability check"
+    },
+    "sim_seed7_frame_0": {
+      "workspace_relative_path": "HardwareResults/SimRealism/realism_multicam_seed7_2106d79-review/deployment_frames/table/f00000.png",
+      "sha256": "cb6915b69262322c7bd686860745543649a4d2d0c297c0d0e0f564eb9c9030b2",
+      "byte_size": 203930,
+      "role": "seed-7 deployment-preview candidate",
+      "project_commit": "2106d79b42d71f512a1d0201433f1cf1aae64ef4"
+    }
+  },
+  "frames": {
+    "real_fit": {
+      "source": "real_fit_frame_0",
+      "annotation_method": "manual inspection of the rear yellow table-band intersections at the left and right table corners",
+      "annotation_uncertainty_px": 3.0,
+      "landmarks_px": {
+        "rear_left_table_corner": [83.0, 70.0],
+        "rear_right_table_corner": [528.0, 70.0]
+      }
+    },
+    "real_check": {
+      "source": "real_check_frame_400",
+      "annotation_method": "manual repeat annotation using the same definitions as real_fit",
+      "annotation_uncertainty_px": 3.0,
+      "landmarks_px": {
+        "rear_left_table_corner": [83.0, 70.0],
+        "rear_right_table_corner": [528.0, 70.0]
+      }
+    },
+    "sim_seed7": {
+      "source": "sim_seed7_frame_0",
+      "annotation_method": "manual inspection of the rendered rear yellow table-band intersections",
+      "annotation_uncertainty_px": 3.0,
+      "landmarks_px": {
+        "rear_left_table_corner": [128.0, 96.0],
+        "rear_right_table_corner": [530.0, 96.0]
+      }
+    }
+  },
+  "camera_jitter_diagnostic": {
+    "translation_bound_m_per_axis": 0.001,
+    "rotation_bound_deg_per_axis": 0.15,
+    "focal_length_scale_bounds": [0.997, 1.003],
+    "conservative_pixel_budget_at_640x360": 4.0,
+    "status": "engineering diagnostic bound, not a propagated calibration covariance"
+  },
+  "comparisons": [
+    {
+      "name": "real_fit_repeatability",
+      "reference_frame": "real_fit",
+      "candidate_frame": "real_check",
+      "landmarks": ["rear_left_table_corner", "rear_right_table_corner"],
+      "segments": [["rear_left_table_corner", "rear_right_table_corner"]],
+      "maximum_explainable_residual_px": 6.0,
+      "expected_status": "within_budget"
+    },
+    {
+      "name": "real_fit_vs_seed7_sim",
+      "reference_frame": "real_fit",
+      "candidate_frame": "sim_seed7",
+      "landmarks": ["rear_left_table_corner", "rear_right_table_corner"],
+      "segments": [["rear_left_table_corner", "rear_right_table_corner"]],
+      "maximum_explainable_residual_px": 10.0,
+      "expected_status": "mismatch_requires_investigation"
+    }
+  ],
+  "candidate_causes_to_test": [
+    "table extents or robot-base-to-table origin in the twin",
+    "resize or crop applied between the native table stream and the downloaded 640x360 archive",
+    "stale or wrong physical camera extrinsics/intrinsics",
+    "physical camera mount movement after calibration"
+  ],
+  "limitations": [
+    "The landmarks are manually annotated from compressed 640x360 images and carry explicit pixel uncertainty.",
+    "Two table-edge corners cannot identify which candidate cause is correct.",
+    "Do not shift the simulated camera, alter the physical calibration, or resize the table solely to make these two landmarks agree.",
+    "The active 10 mm versus 16 mm cube-size question is independent of this table-edge audit."
+  ]
+}

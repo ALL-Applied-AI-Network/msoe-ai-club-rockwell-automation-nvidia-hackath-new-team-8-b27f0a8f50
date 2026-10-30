@@ -9,9 +9,11 @@ and motion path remain available as a regression test.
 from __future__ import annotations
 
 import colorsys
+from functools import lru_cache
 import hashlib
 import json
 import math
+from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
@@ -63,34 +65,236 @@ LIGHT_COLOR_PARAMETER_NAMES = frozenset(
     }
 )
 
-# The logical destination labels deliberately remain red/yellow/blue so the
-# sorting policy and ground-truth schema do not change.  Only their rendered
-# appearances follow the physical orange/yellow/light-blue containers.  The
-# observed hue/saturation values are stable medians from manually isolated
-# regions in table_frame0.png and table_frame400.png (compressed 640x360
-# rollout video).  They are display-RGB evidence, not measured material
-# albedos.  The nominal diffuse values preserve those hue/saturation targets
-# at conservative brightnesses suitable for the existing lighting rig.
-DESTINATION_APPEARANCE_TARGETS: Mapping[str, Mapping[str, Any]] = {
-    "red": {
-        "appearance_name": "orange",
-        "observed_display_hue_deg": 16.5,
-        "observed_display_saturation": 0.760,
-        "nominal_diffuse_rgb": (0.640, 0.288, 0.154),
-    },
-    "yellow": {
-        "appearance_name": "yellow",
-        "observed_display_hue_deg": 46.0,
-        "observed_display_saturation": 0.724,
-        "nominal_diffuse_rgb": (0.780, 0.648, 0.215),
-    },
-    "blue": {
-        "appearance_name": "light_blue",
-        "observed_display_hue_deg": 208.0,
-        "observed_display_saturation": 0.520,
-        "nominal_diffuse_rgb": (0.326, 0.515, 0.680),
-    },
-}
+COLOUR_PATCH_EVIDENCE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "config"
+    / "real_camera_colour_patches.json"
+)
+
+
+@lru_cache(maxsize=1)
+def load_colour_patch_evidence() -> tuple[Mapping[str, Any], str]:
+    """Load the self-contained patch audit without requiring external images."""
+
+    try:
+        payload = json.loads(COLOUR_PATCH_EVIDENCE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SyntheticDataError(
+            f"cannot load colour-patch evidence: {exc}"
+        ) from exc
+    if not isinstance(payload, Mapping) or payload.get("schema_version") != 1:
+        raise SyntheticDataError("unsupported colour-patch evidence schema")
+    sources = payload.get("sources")
+    if not isinstance(sources, Mapping) or len(sources) < 3:
+        raise SyntheticDataError("colour-patch evidence requires paired sources")
+    for source_name, source_value in sources.items():
+        if not isinstance(source_value, Mapping):
+            raise SyntheticDataError(
+                f"colour-patch source {source_name!r} must be an object"
+            )
+        digest = str(source_value.get("sha256", "")).lower()
+        if len(digest) != 64 or any(
+            character not in "0123456789abcdef" for character in digest
+        ):
+            raise SyntheticDataError(
+                f"colour-patch source {source_name!r} has invalid SHA-256"
+            )
+        if source_value.get("resolution") != [640, 360]:
+            raise SyntheticDataError(
+                f"colour-patch source {source_name!r} must be 640x360"
+            )
+        patches = source_value.get("patches")
+        if not isinstance(patches, Mapping) or len(patches) != 6:
+            raise SyntheticDataError(
+                f"colour-patch source {source_name!r} must define six patches"
+            )
+        for patch_name, patch_value in patches.items():
+            if not isinstance(patch_value, Mapping):
+                raise SyntheticDataError(
+                    f"colour patch {source_name}/{patch_name} must be an object"
+                )
+            roi = patch_value.get("roi_xyxy")
+            rgb = patch_value.get("rgb_median_8bit")
+            if (
+                not isinstance(roi, list)
+                or len(roi) != 4
+                or any(isinstance(value, bool) or not isinstance(value, int) for value in roi)
+                or not (0 <= roi[0] < roi[2] <= 640)
+                or not (0 <= roi[1] < roi[3] <= 360)
+            ):
+                raise SyntheticDataError(
+                    f"colour patch {source_name}/{patch_name} has invalid ROI"
+                )
+            if (
+                not isinstance(rgb, list)
+                or len(rgb) != 3
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    or not 0.0 <= float(value) <= 255.0
+                    for value in rgb
+                )
+            ):
+                raise SyntheticDataError(
+                    f"colour patch {source_name}/{patch_name} has invalid RGB"
+                )
+    targets = payload.get("targets")
+    if not isinstance(targets, Mapping):
+        raise SyntheticDataError("colour-patch evidence requires targets")
+    for group_name in ("cubes", "destinations"):
+        group = targets.get(group_name)
+        if not isinstance(group, Mapping) or set(group) != set(COLOURS):
+            raise SyntheticDataError(
+                f"colour-patch target group {group_name!r} must define {COLOURS}"
+            )
+        for colour, target_value in group.items():
+            if not isinstance(target_value, Mapping):
+                raise SyntheticDataError(
+                    f"colour-patch target {group_name}/{colour} must be an object"
+                )
+            for name, upper in (
+                ("physical_display_rgb_target_8bit", 255.0),
+                ("baseline_sim_display_rgb_8bit", 255.0),
+                ("previous_nominal_diffuse_rgb", 1.0),
+                ("fitted_nominal_diffuse_rgb", 1.0),
+            ):
+                values = target_value.get(name)
+                if (
+                    not isinstance(values, list)
+                    or len(values) != 3
+                    or any(
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(float(value))
+                        or not 0.0 <= float(value) <= upper
+                        for value in values
+                    )
+                ):
+                    raise SyntheticDataError(
+                        f"colour-patch target {group_name}/{colour}/{name} is invalid"
+                    )
+            if not str(target_value.get("appearance_name", "")).strip():
+                raise SyntheticDataError(
+                    f"colour-patch target {group_name}/{colour} needs an appearance name"
+                )
+            if any(
+                float(value) <= 0.0
+                for value in target_value["baseline_sim_display_rgb_8bit"]
+            ):
+                raise SyntheticDataError(
+                    f"colour-patch target {group_name}/{colour} baseline RGB "
+                    "must be positive"
+                )
+    physical_sources = [
+        value
+        for value in sources.values()
+        if str(value.get("role", "")).startswith("physical")
+    ]
+    if len(physical_sources) != 2:
+        raise SyntheticDataError(
+            "colour-patch evidence requires exactly two physical fit sources"
+        )
+    patch_names = {
+        "cubes": {colour: f"cube_{colour}" for colour in COLOURS},
+        "destinations": {
+            "red": "destination_orange",
+            "yellow": "destination_yellow",
+            "blue": "destination_light_blue",
+        },
+    }
+    for group_name in ("cubes", "destinations"):
+        for colour in COLOURS:
+            target = targets[group_name][colour]
+            patch_name = patch_names[group_name][colour]
+            expected_target = []
+            for channel in range(3):
+                values = sorted(
+                    float(source["patches"][patch_name]["rgb_median_8bit"][channel])
+                    for source in physical_sources
+                )
+                median = (values[0] + values[1]) / 2.0
+                expected_target.append(int(math.floor(median + 0.5)))
+            if list(target["physical_display_rgb_target_8bit"]) != expected_target:
+                raise SyntheticDataError(
+                    f"colour-patch target {group_name}/{colour} does not match "
+                    "the rounded physical-source median"
+                )
+            previous = target["previous_nominal_diffuse_rgb"]
+            baseline = target["baseline_sim_display_rgb_8bit"]
+            fitted = target["fitted_nominal_diffuse_rgb"]
+            expected_fitted = [
+                min(
+                    1.0,
+                    max(
+                        0.0,
+                        float(previous[index])
+                        * expected_target[index]
+                        / float(baseline[index]),
+                    ),
+                )
+                for index in range(3)
+            ]
+            if any(
+                not math.isclose(
+                    float(actual), expected, rel_tol=0.0, abs_tol=0.00051
+                )
+                for actual, expected in zip(fitted, expected_fitted)
+            ):
+                raise SyntheticDataError(
+                    f"colour-patch target {group_name}/{colour} does not match "
+                    "the recorded channel-ratio fit"
+                )
+    digest = hashlib.sha256(COLOUR_PATCH_EVIDENCE_PATH.read_bytes()).hexdigest()
+    return payload, digest
+
+
+def _appearance_targets(
+    evidence: Mapping[str, Any], group_name: str
+) -> Mapping[str, Mapping[str, Any]]:
+    group = evidence["targets"][group_name]
+    result: dict[str, Mapping[str, Any]] = {}
+    for colour in COLOURS:
+        row = dict(group[colour])
+        display_rgb = tuple(
+            float(value) / 255.0
+            for value in row["physical_display_rgb_target_8bit"]
+        )
+        hue, saturation, _ = colorsys.rgb_to_hsv(*display_rgb)
+        row["observed_display_hue_deg"] = float(hue * 360.0)
+        row["observed_display_saturation"] = float(saturation)
+        row["nominal_diffuse_rgb"] = tuple(
+            float(value) for value in row["fitted_nominal_diffuse_rgb"]
+        )
+        result[colour] = row
+    return result
+
+
+@lru_cache(maxsize=1)
+def _colour_patch_context() -> tuple[
+    Mapping[str, Any],
+    str,
+    Mapping[str, Mapping[str, Any]],
+    Mapping[str, Mapping[str, Any]],
+]:
+    """Load training-only colour evidence and its derived appearance targets."""
+
+    evidence, digest = load_colour_patch_evidence()
+    return (
+        evidence,
+        digest,
+        _appearance_targets(evidence, "cubes"),
+        _appearance_targets(evidence, "destinations"),
+    )
+
+
+def colour_patch_appearance_targets() -> tuple[
+    Mapping[str, Mapping[str, Any]], Mapping[str, Mapping[str, Any]]
+]:
+    """Return validated cube and destination targets for training mode."""
+
+    _, _, cubes, destinations = _colour_patch_context()
+    return cubes, destinations
 
 TRAINING_APPEARANCE_PROFILE = {
     "name": "real-table-video-broad-fit-v1",
@@ -98,6 +302,7 @@ TRAINING_APPEARANCE_PROFILE = {
     "fit_rollout": "../HardwareResults/HardwareResultVideos/Rollout5TableCam.mp4",
     "held_out_rollout": "../HardwareResults/HardwareResultVideos/rollout4TableCam.mp4",
     "fit_scope": "broad exposure, colour cast, vignetting, and tabletop appearance",
+    "colour_patch_manifest": "config/real_camera_colour_patches.json",
     "limitation": (
         "Compressed 640x360 rollout video cannot calibrate native sensor noise, "
         "precise blur, camera response, or small-object edge quality."
@@ -115,6 +320,7 @@ def apply_training_appearance_profile(scene_config: Any) -> dict[str, Any]:
     paths never call this helper.
     """
 
+    _, colour_patch_digest, _, _ = _colour_patch_context()
     for name in ("MAT_MARKINGS", "SHOW_BACKDROP"):
         if not hasattr(scene_config, name):
             raise SyntheticDataError(
@@ -128,6 +334,7 @@ def apply_training_appearance_profile(scene_config: Any) -> dict[str, Any]:
     scene_config.SHOW_BACKDROP = False
     return {
         **TRAINING_APPEARANCE_PROFILE,
+        "colour_patch_manifest_sha256": colour_patch_digest,
         "previous": previous,
         "effective": {
             "mat_markings": True,
@@ -292,11 +499,32 @@ def prepare_prebuild_randomization(
     names only after checking the resulting stage values.
     """
 
+    _, colour_patch_digest, cube_appearance_targets, _ = _colour_patch_context()
     applied: set[str] = set()
     if hasattr(scene_config, "_TRAINING_RANDOMIZATION_BASE"):
         raise SyntheticDataError(
             "prebuild randomization was already prepared in this runtime process"
         )
+    starter_cube_materials = {
+        name: (
+            tuple(float(value) for value in cell_module._MATERIAL_SPEC[name][0]),
+            float(cell_module._MATERIAL_SPEC[name][1]),
+            float(cell_module._MATERIAL_SPEC[name][2]),
+        )
+        for name in ("plastic_red", "plastic_yellow", "plastic_blue")
+    }
+    # This training-only override leaves the pristine twin and default demo
+    # untouched. The paired display-RGB fit is applied before the baseline is
+    # snapshotted so all later jitter/readback checks use one authoritative
+    # fitted nominal rather than silently referring back to the starter hue.
+    for colour in COLOURS:
+        name = f"plastic_{colour}"
+        _, metallic, roughness = starter_cube_materials[name]
+        fitted = tuple(
+            float(value)
+            for value in cube_appearance_targets[colour]["nominal_diffuse_rgb"]
+        )
+        cell_module._MATERIAL_SPEC[name] = (fitted, metallic, roughness)
     scene_config._TRAINING_RANDOMIZATION_BASE = {
         "cube_mass_kg": float(scene_config.CUBE_MASS),
         "camera": dict(scene_config.TABLE_CAM),
@@ -316,6 +544,11 @@ def prepare_prebuild_randomization(
                 "plastic_blue",
                 "table_white",
             )
+        },
+        "starter_cube_materials": starter_cube_materials,
+        "colour_patch_manifest": {
+            "path": "config/real_camera_colour_patches.json",
+            "sha256": colour_patch_digest,
         },
     }
     spawns: dict[str, tuple[float, float, float]] = {}
@@ -384,12 +617,18 @@ def apply_postbuild_randomization(
 
     from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
+    _, colour_patch_digest, cube_appearance_targets, _ = _colour_patch_context()
     applied: set[str] = set()
     base_values = getattr(cell_module.C, "_TRAINING_RANDOMIZATION_BASE", None)
     if not isinstance(base_values, Mapping):
         raise SyntheticDataError(
             "postbuild randomization is missing its prebuild baseline"
         )
+    if base_values.get("colour_patch_manifest") != {
+        "path": "config/real_camera_colour_patches.json",
+        "sha256": colour_patch_digest,
+    }:
+        raise SyntheticDataError("colour-patch baseline provenance changed")
     readback: dict[str, Any] = {
         "schema_version": 1,
         "source": "USD/PhysX readback after cell.build(stage)",
@@ -410,6 +649,9 @@ def apply_postbuild_randomization(
         base_diffuse, base_metallic, _ = base_values["materials"][
             f"plastic_{colour}"
         ]
+        starter_diffuse = base_values["starter_cube_materials"][
+            f"plastic_{colour}"
+        ][0]
         expected_diffuse = _vary_rgb(
             base_diffuse,
             hue_jitter_deg=_value(manifest, "materials.cube_hue_jitter_deg"),
@@ -493,8 +735,27 @@ def apply_postbuild_randomization(
             "binding_strength": "strongerThanDescendants",
             "shader_id": str(shader.GetIdAttr().Get()),
             "diffuse_color": diffuse_readback,
+            "colour_patch_manifest_path": (
+                "config/real_camera_colour_patches.json"
+            ),
+            "colour_patch_manifest_sha256": colour_patch_digest,
+            "physical_display_rgb_target_8bit": list(
+                cube_appearance_targets[colour][
+                    "physical_display_rgb_target_8bit"
+                ]
+            ),
+            "baseline_sim_display_rgb_8bit": list(
+                cube_appearance_targets[colour][
+                    "baseline_sim_display_rgb_8bit"
+                ]
+            ),
+            "starter_appearance": _rgb_evidence(starter_diffuse),
             "base_appearance": _rgb_evidence(base_diffuse),
             "effective_appearance": _rgb_evidence(diffuse_readback),
+            "evidence_limitation": (
+                "first-pass fit from paired compressed 640x360 display RGB; "
+                "not a measured material albedo"
+            ),
             "metallic": metallic_readback,
             "roughness": roughness_readback,
         }
@@ -795,6 +1056,10 @@ def apply_destination_material_randomization(
 
     from pxr import Gf, Sdf, UsdGeom, UsdShade
 
+    _, colour_patch_digest, _, destination_appearance_targets = (
+        _colour_patch_context()
+    )
+
     if stage_readback is None:
         readback: dict[str, Any] = {
             "schema_version": 1,
@@ -827,7 +1092,7 @@ def apply_destination_material_randomization(
     albedo_scale = _value(manifest, "materials.destination_albedo_scale")
     rows: dict[str, Any] = {}
     for semantic_label in COLOURS:
-        target = DESTINATION_APPEARANCE_TARGETS[semantic_label]
+        target = destination_appearance_targets[semantic_label]
         appearance_name = str(target["appearance_name"])
         base_diffuse = tuple(float(v) for v in target["nominal_diffuse_rgb"])
         expected_diffuse = _vary_rgb(
@@ -913,6 +1178,16 @@ def apply_destination_material_randomization(
                 "../HardwareResults/HardwareResultVideos/table_frame0.png",
                 "../HardwareResults/HardwareResultVideos/table_frame400.png",
             ],
+            "colour_patch_manifest_path": (
+                "config/real_camera_colour_patches.json"
+            ),
+            "colour_patch_manifest_sha256": colour_patch_digest,
+            "physical_display_rgb_target_8bit": list(
+                target["physical_display_rgb_target_8bit"]
+            ),
+            "baseline_sim_display_rgb_8bit": list(
+                target["baseline_sim_display_rgb_8bit"]
+            ),
             "observed_compressed_display_hue_deg": float(
                 target["observed_display_hue_deg"]
             ),
@@ -920,8 +1195,8 @@ def apply_destination_material_randomization(
                 target["observed_display_saturation"]
             ),
             "evidence_limitation": (
-                "display-RGB median from compressed 640x360 video; not a "
-                "measured physical albedo"
+                "first-pass paired display-RGB fit from compressed 640x360 "
+                "video; not a measured physical albedo"
             ),
             "base_appearance": _rgb_evidence(base_diffuse),
             "effective_appearance": _rgb_evidence(diffuse_readback),
@@ -1076,6 +1351,8 @@ def readback_effective_camera(
 __all__ = [
     "apply_destination_material_randomization",
     "apply_postbuild_randomization",
+    "colour_patch_appearance_targets",
+    "load_colour_patch_evidence",
     "prepare_prebuild_randomization",
     "readback_effective_camera",
 ]

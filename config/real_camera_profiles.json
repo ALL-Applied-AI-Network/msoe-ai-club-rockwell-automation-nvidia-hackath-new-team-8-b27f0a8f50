@@ -33,6 +33,9 @@
       "heldout_neutral_luma_p05_median_p95_8bit": [52, 139, 166],
       "fixed_training_rgb_gain": [0.70149255, 0.69651741, 0.68472904],
       "fixed_training_gain_status": "provisional gain from the current reference Isaac replay neutral median to the curated real-camera fit median; use without per-frame renormalization",
+      "fixed_neutral_luma_source_p05_median_p95_8bit": [88, 140, 147],
+      "fixed_neutral_luma_target_p05_median_p95_8bit": [60, 141, 167],
+      "fixed_neutral_tone_curve_status": "fixed three-knot luma curve from the aggregate 12-frame hardware-pose synthetic replay to 750 curated decoded real frames; no current-frame histogram fitting",
       "profile_status": "curated decoded compressed-video fit; whole-episode held-out check",
       "synthetic_hose_occlusion": {"enabled": false}
     },
@@ -51,6 +54,9 @@
       "heldout_neutral_luma_p05_median_p95_8bit": [68, 158, 228],
       "fixed_training_rgb_gain": [0.99397588, 0.92814374, 0.88304096],
       "fixed_training_gain_status": "provisional gain from the current reference Isaac replay neutral median to the curated real-camera fit median; use without per-frame renormalization",
+      "fixed_neutral_luma_source_p05_median_p95_8bit": [134, 157, 195],
+      "fixed_neutral_luma_target_p05_median_p95_8bit": [108, 157, 227],
+      "fixed_neutral_tone_curve_status": "fixed three-knot luma curve from the aggregate 12-frame hardware-pose synthetic replay to 750 curated decoded real frames; no current-frame histogram fitting",
       "profile_status": "curated decoded compressed-video fit; whole-episode held-out check",
       "synthetic_hose_occlusion": {"enabled": false}
     },
@@ -69,6 +75,9 @@
       "heldout_neutral_luma_p05_median_p95_8bit": [131, 147, 161],
       "fixed_training_rgb_gain": [0.72115386, 0.72248805, 0.72380954],
       "fixed_training_gain_status": "provisional gain from the current reference Isaac replay neutral median to the curated real-camera fit median; use without per-frame renormalization",
+      "fixed_neutral_luma_source_p05_median_p95_8bit": [147, 151, 154],
+      "fixed_neutral_luma_target_p05_median_p95_8bit": [135, 151, 163],
+      "fixed_neutral_tone_curve_status": "fixed three-knot luma curve from the aggregate 12-frame hardware-pose synthetic replay to 750 curated decoded real frames; no current-frame histogram fitting",
       "profile_status": "curated decoded compressed-video fit; wrist held-out shift tracks hose occlusion",
       "synthetic_hose_occlusion": {
         "enabled": true,
@@ -76,10 +85,16 @@
         "curve_count": [1, 2],
         "width_px_at_deployment_resolution": [18, 34],
         "blue_rgb": [26, 126, 188],
+        "rim_rgb": [8, 53, 78],
+        "highlight_rgb": [103, 191, 225],
         "shadow_rgb": [20, 27, 31],
         "shadow_offset_px": [3, 6],
-        "ignore_mask_dilation_px": 3,
-        "status": "provisional image-space robustness augmentation",
+        "shadow_alpha": 0.46,
+        "highlight_alpha": 0.38,
+        "defocus_sigma_px": 1.35,
+        "taper_ratio": [0.82, 1.18],
+        "ignore_mask_dilation_px": 8,
+        "status": "provisional layered, alpha-blended, defocused image-space robustness augmentation",
         "evidence": "The curated stress episodes show a large blue component in 100% of 1 Hz samples with median largest-component area about 9-10%; held-out episode 10 exceeds 2% in about 60% of samples and reaches about 15.5%. The proxy can include blue hardware/cubes and is not a semantic mask."
       }
     }

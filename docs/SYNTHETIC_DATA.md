@@ -52,8 +52,12 @@ postprocess adds each selected camera's measured one-term radial distortion
 (`k1`) to its pinhole render and applies replayable, camera-separated exposure,
 white balance, gamma, noise, blur, vignette, and JPEG effects. These display-RGB
 effects are robustness approximations, not a physical camera model. A separate
-archive preview applies fixed per-camera gains and an I420 round trip without
-claiming to reproduce the downloaded AV1 bitstream.
+archive preview applies fixed per-camera gains, then a fixed three-knot luma
+curve fitted from aggregate synthetic and curated real neutral-pixel
+percentiles, followed by an I420 round trip. The curve is logged and never
+refitted from the current frame, so it preserves episode exposure variation.
+It remains a decoded-display contrast fit and does not claim to reproduce a
+native camera response or the downloaded AV1 bitstream.
 
 Training mode also enables the checked-in scan of the real work surface,
 `reference-assets/table/manipbench-table-surface.png`, and removes the pristine
@@ -93,9 +97,13 @@ An Isaac training run now defaults to `--training-cameras table,side,wrist` and
 saves native raw and sensor-derived RGB for all three views plus camera-specific
 640x360 archive-domain previews. Raw renders are never overwritten. The
 optional `--wrist-hose-stress` flag adds only a seeded derived wrist occluder,
-its geometry mask, and a conservatively dilated ignore mask for antialias/chroma
-spill; table and side views are never hose-augmented. Exclude the ignore mask
-from supervised pixel loss or treat hose views as unlabeled robustness data. See the
+rendered as layered tapered strands with an alpha-blended shadow, dark rim,
+body highlight, and slight defocus. It also stores the unblurred cable/shadow
+geometry mask and an ignore mask dilated by at least the finite three-sigma
+shadow-blur support plus one deployment pixel for I420 chroma spill; table and
+side views are never hose-augmented.
+Exclude the ignore mask from supervised pixel loss or treat hose views as
+unlabeled robustness data. See the
 [scripted demo guide](../demos/scripted_colour_bucket_sort/README.md) for the
 complete command.
 
@@ -248,9 +256,17 @@ appearance requests as applied. Logical destination labels stay red/yellow/blue
 while independently bound materials render orange/yellow/light-blue to match
 the observed containers. The table material, lights, cube transforms/masses
 and PhysX coefficients receive the same readback treatment.
-The cube base colours are still inherited from the starter asset and have not
-been fitted to isolated real-cube masks. Their randomized jitter is therefore
-coverage around a provisional nominal, not a physical colour calibration.
+Cube and destination nominals now use the first-pass paired patch audit in
+`config/real_camera_colour_patches.json`. The manifest records the source
+image hashes, manually reviewed ROIs, retained core-pixel counts, physical and
+seed-7 simulated display-RGB medians, and the fitted authored diffuse values.
+It also retains the previous authored diffuse inputs so both the two-frame
+physical aggregation and channel-ratio fit can be reproduced and validated.
+This is deliberately a reproducible rendering iteration rather than a claim of
+physical albedo: the evidence is compressed 640x360 display RGB, the cubes
+span only a few pixels, and the fit still confounds renderer lighting and tone
+processing. Accept or replace the values only after a new Brev render repeats
+the same patch measurement and a separate held-out rollout improves.
 When the real printed tabletop artwork overlay is present, its texture remains
 enabled and the collector changes/verifies that overlay shader's roughness too;
 otherwise varying only the hidden material below it would not change pixels.

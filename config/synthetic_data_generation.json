@@ -15,7 +15,7 @@
   },
   "range_status": {
     "name": "provisional_unmeasured",
-    "warning": "The appearance profile is only a broad fit to compressed 640x360 hardware video. Orange/yellow/light-blue destination hue and saturation targets are display-RGB observations, not measured material albedos. Cube base colours still come from the starter asset and have not been fitted to masked real-cube samples. Native sensor noise, precise blur, camera response, small-object edges, materials, and physics remain unmeasured. Record sampled and actually applied values separately and validate on native held-out images before claiming sim-to-real accuracy."
+    "warning": "The appearance profile is only a broad fit to compressed 640x360 hardware video. Cube and orange/yellow/light-blue destination nominals now use the audited first-pass paired display-RGB fit in config/real_camera_colour_patches.json; those values are not measured material albedos and still require a new Isaac render plus held-out validation. Native sensor noise, precise blur, camera response, small-object edges, materials, and physics remain unmeasured. Record sampled and actually applied values separately and validate on native held-out images before claiming sim-to-real accuracy."
   },
   "parameters": {
     "materials.coloured_plastic_roughness": {

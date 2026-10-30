@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+import copy
+import importlib
 import importlib.util
+import json
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -22,6 +27,17 @@ HAS_NUMPY = importlib.util.find_spec("numpy") is not None
 
 @unittest.skipUnless(HAS_NUMPY, "NumPy is available in the pinned Isaac environment")
 class ReadbackMetadataTests(unittest.TestCase):
+    def test_default_module_import_does_not_read_training_colour_manifest(self):
+        import isaac_bridge.training_episode as training_episode
+
+        with mock.patch.object(
+            Path,
+            "read_text",
+            side_effect=AssertionError("training manifest read at import time"),
+        ):
+            reloaded = importlib.reload(training_episode)
+        self.assertTrue(callable(reloaded.load_colour_patch_evidence))
+
     def test_effective_readback_hash_is_stable_and_content_sensitive(self):
         from isaac_bridge.training_episode import _with_sha256
 
@@ -49,34 +65,86 @@ class ReadbackMetadataTests(unittest.TestCase):
 
 @unittest.skipUnless(HAS_NUMPY, "NumPy is available in the pinned Isaac environment")
 class TrainingEpisodeTests(unittest.TestCase):
-    def test_destination_appearance_keeps_semantics_but_matches_observed_hues(self):
+    def test_colour_fit_rejects_changed_aggregation_or_formula(self):
+        import isaac_bridge.training_episode as training_episode
+        from sorting_core.synthetic_data import SyntheticDataError
+
+        original_path = training_episode.COLOUR_PATCH_EVIDENCE_PATH
+        original = json.loads(original_path.read_text(encoding="utf-8"))
+        cases = {
+            "rounded physical-source median": (
+                "physical_display_rgb_target_8bit",
+                [96, 14, 39],
+            ),
+            "recorded channel-ratio fit": (
+                "fitted_nominal_diffuse_rgb",
+                [0.400, 0.020, 0.050],
+            ),
+        }
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                for expected, (field, value) in cases.items():
+                    with self.subTest(field=field):
+                        payload = copy.deepcopy(original)
+                        payload["targets"]["cubes"]["red"][field] = value
+                        path = Path(directory) / f"{field}.json"
+                        path.write_text(json.dumps(payload), encoding="utf-8")
+                        training_episode.COLOUR_PATCH_EVIDENCE_PATH = path
+                        training_episode.load_colour_patch_evidence.cache_clear()
+                        training_episode._colour_patch_context.cache_clear()
+                        with self.assertRaisesRegex(SyntheticDataError, expected):
+                            training_episode.load_colour_patch_evidence()
+        finally:
+            training_episode.COLOUR_PATCH_EVIDENCE_PATH = original_path
+            training_episode.load_colour_patch_evidence.cache_clear()
+            training_episode._colour_patch_context.cache_clear()
+
+    def test_paired_patch_fit_keeps_semantics_and_records_provenance(self):
         from isaac_bridge.training_episode import (
-            DESTINATION_APPEARANCE_TARGETS,
             DESTINATION_MATERIAL_PARAMETER_NAMES,
             MATERIAL_PARAMETER_NAMES,
-            _rgb_evidence,
+            colour_patch_appearance_targets,
+            load_colour_patch_evidence,
         )
 
+        colour_patch_evidence, colour_patch_sha256 = load_colour_patch_evidence()
+        cube_appearance_targets, destination_appearance_targets = (
+            colour_patch_appearance_targets()
+        )
         self.assertEqual(
-            set(DESTINATION_APPEARANCE_TARGETS), {"red", "yellow", "blue"}
+            set(cube_appearance_targets), {"red", "yellow", "blue"}
+        )
+        self.assertEqual(
+            set(destination_appearance_targets), {"red", "yellow", "blue"}
         )
         self.assertEqual(
             {
                 label: target["appearance_name"]
-                for label, target in DESTINATION_APPEARANCE_TARGETS.items()
+                for label, target in destination_appearance_targets.items()
             },
             {"red": "orange", "yellow": "yellow", "blue": "light_blue"},
         )
-        for target in DESTINATION_APPEARANCE_TARGETS.values():
-            evidence = _rgb_evidence(target["nominal_diffuse_rgb"])
-            self.assertAlmostEqual(
-                evidence["hue_deg"], target["observed_display_hue_deg"], delta=0.6
-            )
-            self.assertAlmostEqual(
-                evidence["saturation"],
-                target["observed_display_saturation"],
-                delta=0.01,
-            )
+        for group in (cube_appearance_targets, destination_appearance_targets):
+            for target in group.values():
+                self.assertEqual(len(target["nominal_diffuse_rgb"]), 3)
+                self.assertTrue(
+                    all(0.0 <= value <= 1.0 for value in target["nominal_diffuse_rgb"])
+                )
+                self.assertTrue(
+                    all(
+                        0.0 <= value <= 255.0
+                        for value in target["physical_display_rgb_target_8bit"]
+                    )
+                )
+        self.assertEqual(len(colour_patch_sha256), 64)
+        self.assertEqual(
+            colour_patch_evidence["sources"]["physical_fit_frame_0"]["sha256"],
+            "a8ebeecc9569d27d03faba86bb6071ec168ac8e11148d48bf76b115d0e556949",
+        )
+        self.assertIn(
+            "10 mm versus 16 mm",
+            " ".join(colour_patch_evidence["limitations"]),
+        )
         self.assertTrue(
             DESTINATION_MATERIAL_PARAMETER_NAMES.isdisjoint(
                 MATERIAL_PARAMETER_NAMES
@@ -137,6 +205,11 @@ class TrainingEpisodeTests(unittest.TestCase):
             "plastic_blue": ((0.045, 0.165, 0.62), 0.0, 0.28),
             "table_white": ((0.88, 0.88, 0.875), 0.0, 0.55),
         }
+        starter_diffuse = {
+            name: value[0]
+            for name, value in materials.items()
+            if name.startswith("plastic_")
+        }
         cell = SimpleNamespace(_MATERIAL_SPEC=materials)
         base = {
             "red": (0.44, -0.19, 0.0),
@@ -156,6 +229,25 @@ class TrainingEpisodeTests(unittest.TestCase):
         self.assertNotEqual(scene.TABLE_CAM["eye"], camera["eye"])
         self.assertNotEqual(
             cell._MATERIAL_SPEC["plastic_red"][2], 0.28
+        )
+        fitted_base = scene._TRAINING_RANDOMIZATION_BASE["materials"]
+        starter_base = scene._TRAINING_RANDOMIZATION_BASE[
+            "starter_cube_materials"
+        ]
+        from isaac_bridge.training_episode import colour_patch_appearance_targets
+
+        cube_appearance_targets, _ = colour_patch_appearance_targets()
+
+        for colour in ("red", "yellow", "blue"):
+            name = f"plastic_{colour}"
+            self.assertEqual(
+                fitted_base[name][0],
+                cube_appearance_targets[colour]["nominal_diffuse_rgb"],
+            )
+            self.assertEqual(starter_base[name][0], starter_diffuse[name])
+        self.assertEqual(
+            scene._TRAINING_RANDOMIZATION_BASE["colour_patch_manifest"]["path"],
+            "config/real_camera_colour_patches.json",
         )
         self.assertEqual(applied, set())
 

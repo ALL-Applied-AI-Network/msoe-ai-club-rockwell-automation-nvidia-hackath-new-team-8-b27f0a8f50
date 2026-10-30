@@ -259,9 +259,15 @@ class HoseOcclusionProfile:
     curve_count: tuple[int, int] = (0, 0)
     width_px: tuple[int, int] = (0, 0)
     blue_rgb: tuple[int, int, int] = (0, 0, 0)
+    rim_rgb: tuple[int, int, int] = (0, 0, 0)
+    highlight_rgb: tuple[int, int, int] = (0, 0, 0)
     shadow_rgb: tuple[int, int, int] = (0, 0, 0)
     shadow_offset_px: tuple[int, int] = (0, 0)
     ignore_mask_dilation_px: int = 0
+    shadow_alpha: float = 1.0
+    highlight_alpha: float = 0.0
+    defocus_sigma_px: float = 0.0
+    taper_ratio: tuple[float, float] = (1.0, 1.0)
 
 
 @dataclass(frozen=True)
@@ -283,6 +289,17 @@ class CameraAppearanceProfile:
     hose_occlusion: HoseOcclusionProfile
     fixed_training_rgb_gain: tuple[float, float, float] = (1.0, 1.0, 1.0)
     fixed_training_gain_status: str = "identity fallback"
+    fixed_neutral_luma_source_p05_median_p95_8bit: tuple[int, int, int] = (
+        1,
+        128,
+        254,
+    )
+    fixed_neutral_luma_target_p05_median_p95_8bit: tuple[int, int, int] = (
+        1,
+        128,
+        254,
+    )
+    fixed_neutral_tone_curve_status: str = "identity fallback"
 
 
 @dataclass(frozen=True)
@@ -340,6 +357,39 @@ def _integer_pair(value: Any, name: str, *, minimum: int = 0) -> tuple[int, int]
     return low, high
 
 
+def _finite_pair(
+    value: Any, name: str, *, minimum: float, maximum: float
+) -> tuple[float, float]:
+    try:
+        low, high = (_finite(item, name) for item in value)
+    except (TypeError, ValueError) as exc:
+        raise CameraAppearanceError(f"{name} must contain two numbers") from exc
+    if low < minimum or high < low or high > maximum:
+        raise CameraAppearanceError(f"{name} has invalid bounds")
+    return low, high
+
+
+def _minimum_hose_ignore_dilation_px(defocus_sigma_px: float) -> int:
+    """Cover the finite shadow blur support plus one YUV420 chroma pixel.
+
+    The shadow is the widest-blurred synthetic cable layer. ``_stroke_layer``
+    truncates its Gaussian kernel at three sigma, and the archive preview can
+    spread chroma by one deployment pixel during its I420 round trip.
+    """
+
+    shadow_sigma = float(defocus_sigma_px) * 1.65
+    return int(math.ceil(3.0 * shadow_sigma)) + 1
+
+
+def _strict_u8_triplet(value: Any, name: str) -> tuple[int, int, int]:
+    result = _rgb8(value, name)
+    if not (0 < result[0] < result[1] < result[2] < 255):
+        raise CameraAppearanceError(
+            f"{name} must be three strictly increasing values inside (0, 255)"
+        )
+    return result
+
+
 def _parse_hose(value: Any, camera_id: str) -> HoseOcclusionProfile:
     raw = _mapping(value, f"camera {camera_id} hose occlusion")
     enabled = bool(raw.get("enabled", False))
@@ -366,15 +416,48 @@ def _parse_hose(value: Any, camera_id: str) -> HoseOcclusionProfile:
         raise CameraAppearanceError(
             "hose ignore_mask_dilation_px must be in [0, 32]"
         )
+    shadow_alpha = _finite(raw.get("shadow_alpha", 1.0), "hose shadow_alpha")
+    highlight_alpha = _finite(
+        raw.get("highlight_alpha", 0.0), "hose highlight_alpha"
+    )
+    if not 0.0 <= shadow_alpha <= 1.0:
+        raise CameraAppearanceError("hose shadow_alpha must be in [0, 1]")
+    if not 0.0 <= highlight_alpha <= 1.0:
+        raise CameraAppearanceError("hose highlight_alpha must be in [0, 1]")
+    defocus_sigma = _finite(
+        raw.get("defocus_sigma_px", 0.0), "hose defocus_sigma_px"
+    )
+    if not 0.0 <= defocus_sigma <= 8.0:
+        raise CameraAppearanceError("hose defocus_sigma_px must be in [0, 8]")
+    minimum_dilation = _minimum_hose_ignore_dilation_px(defocus_sigma)
+    if dilation < minimum_dilation:
+        raise CameraAppearanceError(
+            "hose ignore_mask_dilation_px must be at least "
+            f"{minimum_dilation} for defocus_sigma_px={defocus_sigma:g}"
+        )
     return HoseOcclusionProfile(
         enabled=True,
         application_probability=probability,
         curve_count=curve_count,
         width_px=width,
         blue_rgb=_rgb8(raw.get("blue_rgb"), "hose blue_rgb"),
+        rim_rgb=_rgb8(raw.get("rim_rgb", raw.get("blue_rgb")), "hose rim_rgb"),
+        highlight_rgb=_rgb8(
+            raw.get("highlight_rgb", raw.get("blue_rgb")),
+            "hose highlight_rgb",
+        ),
         shadow_rgb=_rgb8(raw.get("shadow_rgb"), "hose shadow_rgb"),
         shadow_offset_px=offset,
         ignore_mask_dilation_px=dilation,
+        shadow_alpha=shadow_alpha,
+        highlight_alpha=highlight_alpha,
+        defocus_sigma_px=defocus_sigma,
+        taper_ratio=_finite_pair(
+            raw.get("taper_ratio", (1.0, 1.0)),
+            "hose taper_ratio",
+            minimum=0.5,
+            maximum=1.5,
+        ),
     )
 
 
@@ -497,10 +580,38 @@ def load_camera_appearance_profiles(
                     "identity fallback for a legacy profile without a fitted gain",
                 )
             ).strip(),
+            fixed_neutral_luma_source_p05_median_p95_8bit=(
+                _strict_u8_triplet(
+                    entry.get(
+                        "fixed_neutral_luma_source_p05_median_p95_8bit",
+                        (1, 128, 254),
+                    ),
+                    f"{camera_id} fixed_neutral_luma_source_p05_median_p95_8bit",
+                )
+            ),
+            fixed_neutral_luma_target_p05_median_p95_8bit=(
+                _strict_u8_triplet(
+                    entry.get(
+                        "fixed_neutral_luma_target_p05_median_p95_8bit",
+                        (1, 128, 254),
+                    ),
+                    f"{camera_id} fixed_neutral_luma_target_p05_median_p95_8bit",
+                )
+            ),
+            fixed_neutral_tone_curve_status=str(
+                entry.get(
+                    "fixed_neutral_tone_curve_status",
+                    "identity fallback for a legacy profile without a fitted curve",
+                )
+            ).strip(),
         )
         if not cameras[camera_id].fixed_training_gain_status:
             raise CameraAppearanceError(
                 f"{camera_id} fixed_training_gain_status is required"
+            )
+        if not cameras[camera_id].fixed_neutral_tone_curve_status:
+            raise CameraAppearanceError(
+                f"{camera_id} fixed_neutral_tone_curve_status is required"
             )
     try:
         source_path = source.relative_to(REPO_ROOT).as_posix()
@@ -621,6 +732,76 @@ def _bezier(control: Sequence[Sequence[float]], samples: int = 72):
     return np.rint(curve).astype(np.int32).reshape((-1, 1, 2))
 
 
+def _draw_tapered_polyline(
+    canvas, curve, color, start_width: int, end_width: int, *, line_type: int
+) -> None:
+    """Draw a cubic curve with perspective-like width variation."""
+
+    import cv2
+    import numpy as np
+
+    points = np.asarray(curve, dtype=np.int32).reshape((-1, 2))
+    if len(points) < 2:
+        return
+    for index, (start, end) in enumerate(zip(points[:-1], points[1:])):
+        fraction = index / max(len(points) - 2, 1)
+        width = max(
+            1,
+            int(round(start_width + fraction * (end_width - start_width))),
+        )
+        cv2.line(
+            canvas,
+            tuple(int(value) for value in start),
+            tuple(int(value) for value in end),
+            color,
+            width,
+            line_type,
+        )
+
+
+def _stroke_layer(
+    shape,
+    curve,
+    color,
+    start_width: int,
+    end_width: int,
+    *,
+    blur_sigma: float,
+):
+    import cv2
+    import numpy as np
+
+    layer = np.empty((*shape, 3), dtype=np.uint8)
+    layer[...] = np.asarray(color, dtype=np.uint8)
+    alpha = np.zeros(shape, dtype=np.uint8)
+    _draw_tapered_polyline(
+        alpha,
+        curve,
+        255,
+        start_width,
+        end_width,
+        line_type=cv2.LINE_AA,
+    )
+    if blur_sigma >= 0.05:
+        radius = max(1, int(math.ceil(3.0 * blur_sigma)))
+        kernel = radius * 2 + 1
+        alpha = cv2.GaussianBlur(alpha, (kernel, kernel), blur_sigma)
+    return layer, alpha
+
+
+def _alpha_composite(base, layer, alpha, opacity: float):
+    import numpy as np
+
+    amount = (
+        np.asarray(alpha, dtype=np.float32) * (float(opacity) / 255.0)
+    )[..., None]
+    floating = (
+        np.asarray(base, dtype=np.float32) * (1.0 - amount)
+        + np.asarray(layer, dtype=np.float32) * amount
+    )
+    return np.clip(np.rint(floating), 0.0, 255.0).astype(np.uint8)
+
+
 def _add_wrist_hoses(image_rgb, profile: HoseOcclusionProfile, rng):
     import cv2
     import numpy as np
@@ -630,9 +811,15 @@ def _add_wrist_hoses(image_rgb, profile: HoseOcclusionProfile, rng):
     mask = np.zeros((height, width), dtype=np.uint8)
     count = int(rng.integers(profile.curve_count[0], profile.curve_count[1] + 1))
     widths = []
+    tapers = []
     for index in range(count):
         line_width = int(rng.integers(profile.width_px[0], profile.width_px[1] + 1))
         widths.append(line_width)
+        start_ratio = float(rng.uniform(*profile.taper_ratio))
+        end_ratio = float(rng.uniform(*profile.taper_ratio))
+        tapers.append([start_ratio, end_ratio])
+        start_width = max(1, int(round(line_width * start_ratio)))
+        end_width = max(1, int(round(line_width * end_ratio)))
         # Real wrist footage shows both near-vertical and diagonal blue loops.
         # Keep endpoints outside the image so the augmentation resembles an
         # entering cable rather than a painted floating segment.
@@ -652,32 +839,74 @@ def _add_wrist_hoses(image_rgb, profile: HoseOcclusionProfile, rng):
             )
         )
         shadow_curve = curve + np.asarray([[[shadow_offset, shadow_offset]]])
-        cv2.polylines(
-            image,
-            [shadow_curve],
-            False,
+        shadow_extra = max(2, shadow_offset)
+        shadow_layer, shadow_alpha = _stroke_layer(
+            (height, width),
+            shadow_curve,
             profile.shadow_rgb,
-            line_width + max(2, shadow_offset),
-            cv2.LINE_AA,
+            start_width + shadow_extra,
+            end_width + shadow_extra,
+            blur_sigma=profile.defocus_sigma_px * 1.65,
         )
-        cv2.polylines(
+        image = _alpha_composite(
+            image, shadow_layer, shadow_alpha, profile.shadow_alpha
+        )
+        _draw_tapered_polyline(
             mask,
-            [shadow_curve],
-            False,
+            shadow_curve,
             255,
-            line_width + max(2, shadow_offset),
-            cv2.LINE_8,
+            start_width + shadow_extra,
+            end_width + shadow_extra,
+            line_type=cv2.LINE_8,
         )
-        cv2.polylines(
-            image,
-            [curve],
-            False,
+
+        rim_extra = max(2, int(round(line_width * 0.16)))
+        rim_layer, rim_alpha = _stroke_layer(
+            (height, width),
+            curve,
+            profile.rim_rgb,
+            start_width + rim_extra,
+            end_width + rim_extra,
+            blur_sigma=profile.defocus_sigma_px * 0.65,
+        )
+        image = _alpha_composite(image, rim_layer, rim_alpha, 0.94)
+        body_layer, body_alpha = _stroke_layer(
+            (height, width),
+            curve,
             profile.blue_rgb,
-            line_width,
-            cv2.LINE_AA,
+            start_width,
+            end_width,
+            blur_sigma=profile.defocus_sigma_px * 0.35,
         )
-        cv2.polylines(mask, [curve], False, 255, line_width, cv2.LINE_8)
-    return image, mask, widths
+        image = _alpha_composite(image, body_layer, body_alpha, 0.97)
+        _draw_tapered_polyline(
+            mask,
+            curve,
+            255,
+            start_width + rim_extra,
+            end_width + rim_extra,
+            line_type=cv2.LINE_8,
+        )
+
+        highlight_offset = max(1, int(round(line_width * 0.12)))
+        highlight_curve = curve - np.asarray(
+            [[[highlight_offset, highlight_offset]]]
+        )
+        highlight_layer, highlight_mask = _stroke_layer(
+            (height, width),
+            highlight_curve,
+            profile.highlight_rgb,
+            max(1, int(round(start_width * 0.16))),
+            max(1, int(round(end_width * 0.16))),
+            blur_sigma=profile.defocus_sigma_px * 0.45,
+        )
+        image = _alpha_composite(
+            image,
+            highlight_layer,
+            highlight_mask,
+            profile.highlight_alpha,
+        )
+    return image, mask, widths, tapers
 
 
 def _match_neutral_median(image_rgb, target_rgb_8bit, camera_id: str):
@@ -757,6 +986,55 @@ def _apply_fixed_profile_gain(image_rgb, profile: CameraAppearanceProfile):
     }
 
 
+def _apply_fixed_luma_tone_curve(image_rgb, profile: CameraAppearanceProfile):
+    """Apply one aggregate camera contrast curve without per-frame fitting.
+
+    Source knots were measured once from the aggregate synthetic reference
+    replay and target knots from curated real archive frames.  A shared luma
+    ratio preserves channel relationships instead of independently warping
+    object colours.
+    """
+
+    import numpy as np
+
+    image = np.asarray(image_rgb)
+    source = np.asarray(
+        (0, *profile.fixed_neutral_luma_source_p05_median_p95_8bit, 255),
+        dtype=np.float32,
+    )
+    target = np.asarray(
+        (0, *profile.fixed_neutral_luma_target_p05_median_p95_8bit, 255),
+        dtype=np.float32,
+    )
+    floating = image.astype(np.float32)
+    luma = (
+        54.0 * floating[..., 0]
+        + 183.0 * floating[..., 1]
+        + 19.0 * floating[..., 2]
+    ) / 256.0
+    mapped = np.interp(luma, source, target).astype(np.float32)
+    ratio = np.ones_like(luma, dtype=np.float32)
+    valid = luma >= 1.0
+    ratio[valid] = mapped[valid] / luma[valid]
+    result = np.clip(
+        np.rint(floating * ratio[..., None]), 0.0, 255.0
+    ).astype(np.uint8)
+    return result, {
+        "applied": True,
+        "mode": "fixed_three_knot_luma",
+        "source_neutral_luma_p05_median_p95_8bit": source[1:4].tolist(),
+        "target_neutral_luma_p05_median_p95_8bit": target[1:4].tolist(),
+        "endpoints_8bit": [[0, 0], [255, 255]],
+        "per_frame_statistics_used": False,
+        "channel_rule": "one Rec.709-like luma ratio applied to all RGB channels",
+        "profile_status": profile.fixed_neutral_tone_curve_status,
+        "limitation": (
+            "Fixed decoded-display contrast fit only; not a measured native "
+            "camera response curve."
+        ),
+    }
+
+
 def create_deployment_preview(
     image_rgb,
     profiles: CameraAppearanceProfiles,
@@ -768,6 +1046,7 @@ def create_deployment_preview(
     match_curated_neutral_median: bool = True,
     photometric_mode: str | None = None,
     compression_domain: str = "archive_yuv420",
+    apply_fixed_tone_curve: bool = True,
 ) -> DeploymentPreviewResult:
     """Create a deterministic deployment-like view without changing raw RGB.
 
@@ -782,7 +1061,8 @@ def create_deployment_preview(
     ``match_curated_neutral_median`` switch.  Training collection should use
     ``fixed_profile`` so sample-specific exposure/white-balance variation is
     not normalized away.  ``archive_yuv420`` preserves the legacy I420 round
-    trip; ``uncompressed_preview`` retains resized display RGB.
+    trip; ``uncompressed_preview`` retains resized display RGB.  The fixed
+    tone curve uses aggregate profile knots and never refits the current frame.
     """
 
     import cv2
@@ -831,6 +1111,17 @@ def create_deployment_preview(
             "mode": "none",
             "reason": "disabled by caller",
         }
+    if not isinstance(apply_fixed_tone_curve, bool):
+        raise CameraAppearanceError("apply_fixed_tone_curve must be a boolean")
+    if apply_fixed_tone_curve:
+        preview, tone_curve = _apply_fixed_luma_tone_curve(preview, profile)
+    else:
+        tone_curve = {
+            "applied": False,
+            "mode": "disabled",
+            "reason": "disabled by caller",
+            "per_frame_statistics_used": False,
+        }
     mask = np.zeros((height, width), dtype=np.uint8)
     digest = hashlib.sha256(
         (
@@ -843,6 +1134,7 @@ def create_deployment_preview(
     rng = np.random.default_rng(preview_seed)
     hose_applied = False
     hose_widths: list[int] = []
+    hose_tapers: list[list[float]] = []
     hose = profile.hose_occlusion
     if (
         add_wrist_occlusion
@@ -850,7 +1142,9 @@ def create_deployment_preview(
         and hose.enabled
         and float(rng.random()) < hose.application_probability
     ):
-        preview, mask, hose_widths = _add_wrist_hoses(preview, hose, rng)
+        preview, mask, hose_widths, hose_tapers = _add_wrist_hoses(
+            preview, hose, rng
+        )
         hose_applied = True
 
     ignore_mask = mask.copy()
@@ -905,6 +1199,7 @@ def create_deployment_preview(
             "curated_neutral_median_match": photometric,
             "photometric_alignment": photometric,
             "photometric_alignment_mode": selected_photometric_mode,
+            "fixed_neutral_tone_curve": tone_curve,
             "av1_bitstream_reproduced": False,
             "compression_domain": {
                 "mode": selected_compression_domain,
@@ -919,11 +1214,29 @@ def create_deployment_preview(
             "synthetic_wrist_hose": {
                 "applied": hose_applied,
                 "widths_px": hose_widths,
+                "taper_ratios_start_end": hose_tapers,
+                "appearance_model": (
+                    "layered alpha-blended defocused cable"
+                    if hose_applied
+                    else "not applied"
+                ),
+                "shadow_alpha": hose.shadow_alpha if hose_applied else 0.0,
+                "highlight_alpha": (
+                    hose.highlight_alpha if hose_applied else 0.0
+                ),
+                "defocus_sigma_px": (
+                    hose.defocus_sigma_px if hose_applied else 0.0
+                ),
                 "mask_nonzero_fraction": coverage,
                 "geometry_mask_nonzero_fraction": coverage,
                 "ignore_mask_nonzero_fraction": ignore_coverage,
                 "ignore_mask_dilation_px": (
                     hose.ignore_mask_dilation_px if hose_applied else 0
+                ),
+                "minimum_ignore_mask_dilation_px": (
+                    _minimum_hose_ignore_dilation_px(hose.defocus_sigma_px)
+                    if hose_applied
+                    else 0
                 ),
                 "ignore_mask_contains_geometry": bool(
                     np.all((mask == 0) | (ignore_mask > 0))

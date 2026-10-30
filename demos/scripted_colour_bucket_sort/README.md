@@ -162,10 +162,12 @@ flat; side/wrist use subdirectories). Every camera gets its own checked-in
 radial calibration, deterministic noise seed, exposure/white-balance, gamma,
 vignette, blur, and JPEG robustness transform. Separate 640x360 archive-like
 previews live under `deployment_frames/<camera>/`. Those previews use a fixed,
-recorded camera gain so they do not normalize away randomized exposure, then
-apply an I420 chroma round trip. They approximate the decoded archive domain;
-they do not reproduce the AV1 bitstream or constitute a photometric
-calibration. Raw renders are never overwritten.
+recorded camera gain so they do not normalize away randomized exposure, then a
+fixed, logged three-knot luma curve fitted from aggregate reference/real
+neutral percentiles and an I420 chroma round trip. No curve is estimated from
+the current frame. They approximate the decoded archive domain; they do not
+reproduce the AV1 bitstream or constitute a native photometric calibration.
+Raw renders are never overwritten.
 
 Training mode also adds three seeded neutral visual distractors by default,
 outside the active pickup region. Override the count with
@@ -180,16 +182,19 @@ renders use the observed physical container appearances: orange for the red
 destination, yellow for yellow, and light blue for blue. Cube and destination
 materials vary independently in hue, saturation, brightness, and roughness;
 light intensity, source size, and a conservative RGB tint are also sampled and
-read back from USD. The cube base colours remain the starter asset colours;
-their small jitter is useful coverage but is not a measured fit to masked real
-cube pixels.
+read back from USD. The cube and destination base colours use the provisional,
+hashed paired-patch fit in `config/real_camera_colour_patches.json`;
+their small jitter is useful coverage, but compressed display RGB is not a
+native sensor or physical material calibration.
 
 The blue hose sometimes blocks the physical wrist camera. Treat that as an
 occlusion robustness problem, not normal appearance. Add
 `--wrist-hose-stress` only with `--training-data --training-cameras
-table,side,wrist`. It affects only derived wrist previews and stores a
-conservative pre-I420 cable-and-shadow geometry mask under
-`occluder_masks/wrist/`; a dilated chroma/antialias spill mask is saved under
+table,side,wrist`. It affects only derived wrist previews and renders layered,
+alpha-blended, tapered, slightly defocused cable strands. It stores a
+pre-I420 cable-and-shadow geometry mask under `occluder_masks/wrist/`; an
+ignore mask dilated by at least the finite shadow-blur support plus one I420
+chroma-spill pixel is saved under
 `ignore_masks/wrist/`. It never alters table/side images or native raw frames.
 Exclude the ignore mask from supervised pixel loss, or keep these as unlabeled
 robustness views. The mask alone is not an object-visibility measurement.

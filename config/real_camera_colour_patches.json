@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "purpose": "Audited first-pass cube and destination appearance fit from paired 640x360 physical-table and seed-7 Isaac deployment-preview frames. Logical red/yellow/blue labels do not change.",
+  "measurement": {
+    "image_domain": "decoded/display RGB after archive or deployment-preview processing",
+    "roi_format": "[x_min, y_min, x_max_exclusive, y_max_exclusive]",
+    "core_pixel_rule": "OpenCV HSV saturation >= 80 inside a manually reviewed object ROI",
+    "per_frame_statistic": "per-channel median over retained core pixels",
+    "target_aggregation": "rounded median of the two physical-frame medians",
+    "first_pass_diffuse_fit": "previous authored diffuse RGB multiplied channel-wise by physical target display RGB divided by the matched seed-7 simulated display RGB, then bounded to [0,1]",
+    "warning": "Display RGB is not linear material albedo. These fitted diffuse values are only a first rendering iteration and require Isaac readback plus a new paired-patch comparison before being described as calibrated."
+  },
+  "sources": {
+    "physical_fit_frame_0": {
+      "path_from_repository_root": "../HardwareResults/HardwareResultVideos/table_frame0.png",
+      "sha256": "a8ebeecc9569d27d03faba86bb6071ec168ac8e11148d48bf76b115d0e556949",
+      "resolution": [640, 360],
+      "role": "physical appearance fit",
+      "patches": {
+        "cube_red": {"roi_xyxy": [257, 258, 263, 264], "core_pixel_count": 26, "rgb_median_8bit": [91.5, 13.0, 38.0]},
+        "cube_yellow": {"roi_xyxy": [328, 268, 336, 275], "core_pixel_count": 44, "rgb_median_8bit": [150.0, 153.5, 42.0]},
+        "cube_blue": {"roi_xyxy": [400, 274, 406, 280], "core_pixel_count": 26, "rgb_median_8bit": [89.0, 106.0, 143.0]},
+        "destination_orange": {"roi_xyxy": [250, 191, 274, 220], "core_pixel_count": 586, "rgb_median_8bit": [129.0, 52.0, 19.0]},
+        "destination_yellow": {"roi_xyxy": [316, 188, 336, 214], "core_pixel_count": 506, "rgb_median_8bit": [125.0, 106.0, 21.0]},
+        "destination_light_blue": {"roi_xyxy": [382, 191, 404, 217], "core_pixel_count": 419, "rgb_median_8bit": [78.0, 110.0, 126.0]}
+      }
+    },
+    "physical_fit_frame_400": {
+      "path_from_repository_root": "../HardwareResults/HardwareResultVideos/table_frame400.png",
+      "sha256": "2de31e3d323d2c792b3f01a617811e29477b3844ec669041d6eee07f6730dc14",
+      "resolution": [640, 360],
+      "role": "physical fit stability check",
+      "patches": {
+        "cube_red": {"roi_xyxy": [258, 258, 262, 265], "core_pixel_count": 28, "rgb_median_8bit": [103.0, 14.0, 39.0]},
+        "cube_yellow": {"roi_xyxy": [328, 268, 336, 276], "core_pixel_count": 46, "rgb_median_8bit": [150.5, 151.0, 45.5]},
+        "cube_blue": {"roi_xyxy": [400, 274, 406, 280], "core_pixel_count": 23, "rgb_median_8bit": [88.0, 106.0, 144.0]},
+        "destination_orange": {"roi_xyxy": [249, 191, 274, 220], "core_pixel_count": 587, "rgb_median_8bit": [128.0, 54.0, 20.0]},
+        "destination_yellow": {"roi_xyxy": [316, 188, 336, 214], "core_pixel_count": 506, "rgb_median_8bit": [127.0, 105.0, 21.0]},
+        "destination_light_blue": {"roi_xyxy": [382, 192, 404, 217], "core_pixel_count": 395, "rgb_median_8bit": [74.0, 109.0, 126.0]}
+      }
+    },
+    "simulated_baseline_seed_7": {
+      "path_from_repository_root": "../HardwareResults/SimRealism/realism_multicam_seed7_2106d79-review/deployment_frames/table/f00000.png",
+      "sha256": "cb6915b69262322c7bd686860745543649a4d2d0c297c0d0e0f564eb9c9030b2",
+      "resolution": [640, 360],
+      "role": "matched Isaac baseline",
+      "repository_commit": "2106d79b42d71f512a1d0201433f1cf1aae64ef4",
+      "episode_seed": 7,
+      "patches": {
+        "cube_red": {"roi_xyxy": [252, 272, 258, 278], "core_pixel_count": 27, "rgb_median_8bit": [104.0, 39.0, 35.0]},
+        "cube_yellow": {"roi_xyxy": [330, 274, 336, 280], "core_pixel_count": 28, "rgb_median_8bit": [117.0, 105.5, 45.5]},
+        "cube_blue": {"roi_xyxy": [400, 270, 406, 276], "core_pixel_count": 23, "rgb_median_8bit": [30.0, 50.0, 101.0]},
+        "destination_orange": {"roi_xyxy": [248, 182, 269, 208], "core_pixel_count": 514, "rgb_median_8bit": [91.0, 56.0, 36.0]},
+        "destination_yellow": {"roi_xyxy": [318, 184, 338, 210], "core_pixel_count": 482, "rgb_median_8bit": [104.0, 94.0, 47.0]},
+        "destination_light_blue": {"roi_xyxy": [386, 189, 407, 213], "core_pixel_count": 346, "rgb_median_8bit": [60.0, 78.0, 93.0]}
+      }
+    }
+  },
+  "targets": {
+    "cubes": {
+      "red": {"appearance_name": "red", "physical_display_rgb_target_8bit": [97, 14, 39], "baseline_sim_display_rgb_8bit": [104, 39, 35], "previous_nominal_diffuse_rgb": [0.640, 0.055, 0.045], "fitted_nominal_diffuse_rgb": [0.597, 0.020, 0.050]},
+      "yellow": {"appearance_name": "yellow", "physical_display_rgb_target_8bit": [150, 152, 44], "baseline_sim_display_rgb_8bit": [117, 105.5, 45.5], "previous_nominal_diffuse_rgb": [0.780, 0.620, 0.040], "fitted_nominal_diffuse_rgb": [1.000, 0.893, 0.039]},
+      "blue": {"appearance_name": "blue", "physical_display_rgb_target_8bit": [89, 106, 144], "baseline_sim_display_rgb_8bit": [30, 50, 101], "previous_nominal_diffuse_rgb": [0.045, 0.165, 0.620], "fitted_nominal_diffuse_rgb": [0.134, 0.350, 0.884]}
+    },
+    "destinations": {
+      "red": {"appearance_name": "orange", "physical_display_rgb_target_8bit": [129, 53, 20], "baseline_sim_display_rgb_8bit": [91, 56, 36], "previous_nominal_diffuse_rgb": [0.640, 0.288, 0.154], "fitted_nominal_diffuse_rgb": [0.907, 0.273, 0.086]},
+      "yellow": {"appearance_name": "yellow", "physical_display_rgb_target_8bit": [126, 106, 21], "baseline_sim_display_rgb_8bit": [104, 94, 47], "previous_nominal_diffuse_rgb": [0.780, 0.648, 0.215], "fitted_nominal_diffuse_rgb": [0.945, 0.731, 0.096]},
+      "blue": {"appearance_name": "light_blue", "physical_display_rgb_target_8bit": [76, 110, 126], "baseline_sim_display_rgb_8bit": [60, 78, 93], "previous_nominal_diffuse_rgb": [0.326, 0.515, 0.680], "fitted_nominal_diffuse_rgb": [0.413, 0.726, 0.921]}
+    }
+  },
+  "limitations": [
+    "The physical evidence is compressed 640x360 display RGB, not native lossless sensor data.",
+    "The simulator comparison is one seed and one frame; renderer lighting, exposure, and tone processing are confounded with material appearance.",
+    "Small 10 mm cubes contain only a few retained pixels, so codec resampling and highlights strongly affect their medians.",
+    "The fitted diffuse values require a new Brev render, the same patch measurement, and held-out physical comparison before acceptance.",
+    "This manifest does not resolve the separate 10 mm versus 16 mm physical cube-size discrepancy."
+  ]
+}
