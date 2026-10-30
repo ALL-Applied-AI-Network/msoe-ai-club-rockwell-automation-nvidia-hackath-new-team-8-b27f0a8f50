@@ -1,6 +1,10 @@
-# DRAFT ONLY. Do not run --submit until every TODO is replaced and the
-# organizers confirm that three coloured 10 mm cubes, three matching bins, and
-# the generic cube/bin labels in placement.yaml are accepted for this cell.
+# DRAFT ONLY. Do not run --submit until every TODO is replaced and this file
+# matches the exact organizer-approved physical scene. The active placement
+# example below is the older 10 mm cube + three-bin request. It does not describe
+# the demonstrated 16 mm-profile/no-bucket virtual-table run. A future screw
+# request must be separate and may not be submitted until screw perception,
+# task mapping, grasping, execution, and verification are hardware-ready.
+# Confirm every object label with the organizers.
 # Then submit from this directory with: uv run run.py --submit
 
 team: TODO_TEAM_NAME
@@ -19,7 +23,7 @@ model_type: Hybrid
 # --- Task ---
 task_id: colour-sort-TODO_TEAM_LETTER
                                   # TODO: replace suffix with assigned team letter
-task: Sort the red, yellow, and blue 10 mm cubes into their matching bins.
+task: TODO_REPLACE_WITH_THE_APPROVED_TASK_DESCRIPTION
                                   # Describe your task in one short sentence
 
 # --- Test Setup ---

@@ -1,8 +1,12 @@
 """Deterministic HSV cube detection from a native RGB camera observation.
 
 This initial detector is intentionally narrow: known red, yellow, and blue
-10 mm cubes on the calibrated table.  It consumes image pixels and an injected
-camera projection only—never simulator object poses or evaluation ground truth.
+cubes on the calibrated table. The shared simulator configuration uses 10 mm
+cubes; the physical adapter must explicitly inject its separately chosen 10 mm
+or 16 mm observation profile. This detector does not infer size, perceive the
+supplied screws, or make the shared planner generally dimension-aware. It
+consumes image pixels and an injected camera projection only—never simulator
+object poses or evaluation ground truth.
 """
 
 from __future__ import annotations
@@ -77,12 +81,13 @@ def detect_coloured_cubes(
     they lay on the table.
 
     ``expected_cube_edge_m`` is a hardware-observation profile, not an object
-    size estimate.  The shared simulator path deliberately omits it and keeps
-    using the checked-in 10 mm task configuration.  The physical adapter may
-    explicitly select the separately supplied 16 mm cube profile after the
-    operator confirms which cell object was placed.  Supporting both profiles
-    here prevents a camera-size mismatch from being "fixed" by globally
-    changing Isaac geometry or by weakening the known-size filter.
+    size estimate. The shared simulator path deliberately omits it and keeps
+    using the checked-in 10 mm task configuration. The physical adapter must
+    explicitly select 10 mm or 16 mm after the placed cell object is identified
+    or measured. Supporting both profiles here prevents a camera-size mismatch
+    from being "fixed" by globally changing Isaac geometry or by weakening the
+    known-size filter; it does not make downstream pick heights and clearances
+    generally dimension-aware.
     """
 
     image = np.asarray(rgb)

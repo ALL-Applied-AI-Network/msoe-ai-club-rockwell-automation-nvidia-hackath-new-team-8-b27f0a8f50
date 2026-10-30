@@ -2,11 +2,15 @@
 
 This document describes how to move the cube-sorting behavior from the supplied
 Isaac Sim twin to the event's FANUC ER-4iA cell. It is a plan and an interface
-contract, **not evidence that this repository has controlled the physical
-robot**. The colour-bucket demo's preserved default mode uses configured
-simulator poses; its opt-in camera modes use rendered RGB for decisions but
-still use simulator truth only for evaluation. Do not send any Isaac trajectory
-directly to the robot.
+contract. The repository has now controlled the physical robot: recorded
+rollout 5 camera-verified all three cube placements in `virtual-table` mode.
+That result is integration evidence, not proof of force/contact sensing,
+complete swept-path clearance, arbitrary objects/layouts, or screw support.
+The colour-bucket demo's preserved default mode uses configured simulator
+poses; its opt-in camera modes use rendered RGB for decisions but still use
+simulator truth only for evaluation. Do not send any Isaac trajectory directly
+to the robot. The maintained beginner procedure is
+[`PHYSICAL_HARDWARE_TEST_SETUP.md`](PHYSICAL_HARDWARE_TEST_SETUP.md).
 
 The physical interface described here is pinned to the official SIDC Lab client
 at commit
@@ -15,21 +19,23 @@ Re-audit the upstream package before updating that revision.
 
 ## Non-negotiable assumptions
 
-> **10 mm reminder — print this at the start of every simulation and hardware
-> run:** this project currently assumes a **10 mm cube**, a work-surface height
-> of **−335.1 mm in UF0**, and a provisional pick target of **−332.6 mm** under
-> the official repository/mock's **TCP means fingertip** convention. Separately,
-> an organizer confirmed on October 26, 2026 that the standard fingers touch the
-> table near UF0 Z = −335 mm and that the former −345 mm value was for another
-> group's shorter fingers. These facts are consistent; they do not prove the
-> installed fingers or active UTOOL1/UF0, which still require a supervised high,
-> non-contact verification before physical descent.
+> **Object-profile reminder — print this at every run:** the preserved Isaac
+> cube task uses **10 mm** geometry. Hardware perception requires an explicit
+> **10 mm or 16 mm** cube profile selected from a measured/operator-confirmed
+> physical cube. The work-surface height remains **−335.1 mm in UF0** and the
+> provisional fingertip pick target **−332.6 mm** under the pinned client's
+> **TCP means fingertip** convention. An organizer confirmed on October 26,
+> 2026 that the standard fingers touch the table near UF0 Z = −335 mm and the
+> former −345 mm value was for another group's shorter fingers. These facts do
+> not prove the installed fingers or active UTOOL1/UF0, which still require a
+> supervised high, non-contact verification before physical descent.
 
 Keep these values in one configuration object rather than copying numbers into
 perception, planning, simulation, and hardware code:
 
 ```text
-CUBE_SIZE_MM = 10.0
+SIM_CUBE_SIZE_MM = 10.0
+HARDWARE_VISION_CUBE_SIZE_MM = 10.0 or 16.0 (explicit per run)
 SURFACE_Z_BASE_M = -0.0051
 UF0_Z_OFFSET_MM = -330.0
 SURFACE_Z_UF0_MM = -335.1
@@ -37,16 +43,13 @@ PICK_TIP_CLEARANCE_MM = 2.5
 PICK_TIP_Z_UF0_MM = -332.6
 ```
 
-The calculation is `−335.1 + 2.5 = −332.6 mm`. Under the chosen convention,
-that target puts the fingertip 2.5 mm above the work surface and 7.5 mm below
-the top of a 10 mm cube. Whether the custom hook actually grasps correctly at
-that height is unverified.
-
-Why 10 mm rather than 16 mm: the cell description says the custom SMC fingers'
-straight faces are 12 mm apart when open. A 10 mm cube nominally leaves only
-1 mm clearance on each side; a 16 mm cube does not fit between those straight
-faces. Even the 10 mm choice is tight enough that camera, calibration, and
-placement error must be measured before contact.
+The calculation is `−335.1 + 2.5 = −332.6 mm`. The exact contact relationship
+depends on the selected cube and the custom hook geometry. The configured hook
+opening is 15.99 mm, so a nominal 16 mm cube is not nominally smaller than the
+gap. Rounded cube edges or the physical hook may still permit the demonstrated
+grasp, but video cannot establish fit. A 16 mm hover is allowed; 16 mm descent
+requires an explicit mechanical fit confirmation. A 10 mm cube also has small
+clearances and still requires measured camera/calibration error before contact.
 
 ### Resolved FAQ discrepancy and remaining physical check
 
@@ -110,7 +113,7 @@ Rows are **absolute targets**, not deltas.
 
 | Field | Meaning |
 |---|---|
-| `obs["images"]` | Dictionary of requested `table`, `side`, and/or `wrist` images. Arrays are `(H, W, 3)` `uint8` **RGB**. The default request is the entire frame resized, not cropped, to 640×360. |
+| `obs["images"]` | Dictionary of requested `table`, `side`, and/or `wrist` images. Arrays are `(H, W, 3)` `uint8` **RGB**. The client supports requested sizes; the current policy requests uncropped 1920×1080 table RGB to preserve calibration pixels. Downloaded result videos may be resized/compressed and are not calibration evidence. |
 | `obs["joints"]` | `[J1, J2, J3, J4, J5, J6, gripper]`; degrees in the v0.5 twin convention, with gripper 0 open and 1 closed. |
 | `obs["tcp_pose"]` | `[x, y, z, w, p, r]`; position in mm and FANUC orientation in degrees. This project provisionally interprets it as the fingertip in UF0. |
 | `obs["trial"]` | Current rollout information, including `instruction`. The policy may use or ignore the wording. |
@@ -170,6 +173,14 @@ All values must be finite. The gripper value is clipped to `[0, 1]`. The
 provisional −332.6 mm pick target is only 1.4 mm above the mock's lower z
 limit—another reason to keep it provisional and centrally visible.
 
+The live hackathon site is authoritative for service motion limits. As of
+October 30, 2026 it lists 150 mm/s, 15 mm per row, 60 mm queued ahead, and 10°
+per row. The archived snapshot in `scilabDocumentation.txt` contains older
+100 mm/s, 12 mm, 40 mm, and 8° values. This project deliberately remains more
+conservative at a 5 mm Cartesian row step and nominal 50 mm/s. Recheck the live
+site and current mock before each request rather than increasing project limits
+to whatever maximum is advertised.
+
 Passing the mock is necessary but not sufficient. The mock does not implement
 kinematics, collision checking, object motion, contact, or grasp success. The
 live event page also says targets should remain within about 0.55 m of the base
@@ -190,7 +201,10 @@ Shared between backends:
 - candidate generation and selection policy;
 - the phase state machine and recovery rules;
 - action rows, preflight limits, and success/failure logging; and
-- the same 10 mm cube and provisional tool-point configuration.
+- explicit object-size and provisional tool-point configuration. Isaac's
+  preserved cube task remains 10 mm while hardware selects a measured 10/16 mm
+  profile; parity means the active size is carried explicitly, not silently
+  assumed equal.
 
 Backend-specific:
 
@@ -239,9 +253,10 @@ gate to make a demonstration appear successful.
 ### Gate 0 — freeze the contract
 
 - Pin the official client at upstream SHA `ff7534e` and record the project SHA.
-- Centralize the five numeric assumptions shown at the top of this document.
-- Print those assumptions, especially the 10 mm cube choice, resolved FAQ
-  history, and still-unverified live frame state, at every run start.
+- Centralize the numeric assumptions shown at the top of this document.
+- Print the 10 mm Isaac assumption, explicit 10/16 mm hardware profile,
+  resolved FAQ history, and still-unverified installed frame/fit state at every
+  run start.
 - Confirm the Git working tree is clean and no credentials or generated runs
   are tracked.
 
@@ -262,7 +277,7 @@ repository:
 
 ```bash
 uv sync
-ROCKWELL_ENABLE_PHYSICAL_MOTION=1 uv run run.py --mock
+uv run supervised_run.py hover --cube-mm 16 --mock --trials 1 --trial-s 2
 ```
 
 Success is the literal `✓ Ready for the real robot` verdict with zero rejected
@@ -312,32 +327,35 @@ Stop if calibration error consumes the available grasp clearance.
   installed fingers and active frames before enabling the provisional −332.6
   mm target.
 
-This gate is a future supervised step. `ROCKWELL_ENABLE_PHYSICAL_MOTION=1`
-currently enables the complete planned pre-descent route, not a single bounded
-hover, and the project does not yet have full swept-volume collision checking.
-Do not set it on the cell until Gate 3's clearance work is implemented and
-reviewed.
+This gate has been exercised on the physical cell, but it remains mandatory for
+every new object size, integration profile, layout, or grasp strategy. The
+project still lacks proof of complete full-arm/finger/hose/held-object swept
+clearance; a prior successful route is not approval for a changed route.
 
 Any disagreement between expected and observed frames returns the project to
 Gate 1. Do not compensate by trial-and-error at table height.
 
-### Gate 6 — one cube, one bin
+### Gate 6 — one cube, one approved destination
 
-- Use one 10 mm cube at a conservative, known position and one known bin.
+- Use one measured 10 or 16 mm cube at a conservative known position. Prefer a
+  clear `virtual-table` zone for the first relocation; use a bin only when the
+  approved submission and actual scene contain it.
 - Detect it from a real image, execute one pick/place, and independently verify
   lift and final placement.
 - Save a trustworthy log containing all observations used for decisions,
   actions, timings, result, and any operator intervention.
 
-This is the first complete physical milestone. Only after it succeeds should
-the team add several cubes, several bins, changing layouts, or learning.
+This remains the first complete milestone for every materially changed policy.
+Only after it succeeds should the team add several cubes, bins, changing
+layouts, screws, or a learned scorer.
 
 ### Gate 7 — multi-object static sort
 
 - Detect all cubes and bins needed as obstacles, not only the chosen target.
 - Reject blocked, unreachable, stale, or ambiguous candidates.
-- Compare the geometric baseline, highest predicted success, and success/time
-  selector on matched layouts with identical recovery rules.
+- Compare the geometric baseline with the highest-predicted-complete-success
+  selector on matched layouts with identical recovery rules. The current plan
+  does not optimize or balance execution time.
 
 ### Gate 8 — dynamic arrivals
 
@@ -356,8 +374,9 @@ contains camera transforms and NumPy projection helpers. The starter twin's
 cameras are intended to match the real views, but calibration residuals are not
 the same as end-to-end grasp accuracy.
 
-- A visible cube centroid lies on the cube's top face. For a 10 mm cube, map a
-  top-face pixel at `surface_z + 0.010 m`, not at the table plane.
+- A visible cube centroid lies on the cube's top face. Map a top-face pixel at
+  `surface_z + selected_cube_edge_m`, not at the table plane. That is +0.010 m
+  for the 10 mm profile and +0.016 m for the 16 mm profile.
 - The raw detector retains cube-like components across the calibrated image.
   The policy classifies bin observations first, then accepts pick targets only
   in the provisional robot-base pickup region `x=0.30..0.55 m`,
@@ -368,9 +387,9 @@ the same as end-to-end grasp accuracy.
   region; projecting robot/hoses onto the cube-top plane makes this a heuristic,
   not a fixture self-mask.
 - The shared known-size gate requires both inferred silhouette dimensions to
-  reach 75% of the declared cube edge, while the dimension selected as the
-  footprint edge must remain at or below 140% (7.5--14 mm under the active
-  10 mm assumption). Allowing the other dimension to be longer retains
+  reach 75% of the explicitly declared cube edge, while the dimension selected
+  as the footprint edge must remain at or below 140% (7.5--14 mm for 10 mm;
+  12--22.4 mm for 16 mm). Allowing the other dimension to be longer retains
   oblique views containing a side face. This rejected a compact 5.4 by 8.9 mm
   yellow robot/tool component in the exact Isaac pre-descent image without
   weakening completed-colour checks.
@@ -399,10 +418,12 @@ the same as end-to-end grasp accuracy.
 
 ## Latency, verification, and logging
 
-The live event page reports that the real arm follows targets about 0.8 seconds
-behind the twin. Each returned row normally represents 0.1 seconds. A long
-100-row chunk can therefore create roughly ten seconds without a new planning
-observation. Network latency from Brev adds to perception and replanning time.
+The live event page says the real arm follows commanded targets “a little
+behind,” but does not quantify that lag. Measure it from the actual run rather
+than assuming a fixed value. Each returned row normally represents 0.1 seconds;
+a long 100-row chunk can therefore create roughly ten seconds without a new
+planning observation. Network latency from Brev adds to perception and
+replanning time.
 
 For the lightweight geometric baseline, prefer running the event client on a
 reliable local Linux/macOS machine during the physical slot. If Brev is used,
@@ -419,7 +440,7 @@ At minimum, log:
 
 ```text
 project commit and upstream client commit
-policy/config/calibration versions and 10 mm assumption banner
+policy/config/calibration versions and explicit sim/hardware object-size banner
 rollout, phase, target track ID, scene version, observation timestamp/age
 camera-derived objects, pose quality, uncertainty/unknown regions
 candidate action, preflight rejection reason, commanded rows
@@ -438,8 +459,8 @@ The official
 defines this sequence:
 
 1. Install `git` and `uv`, then synchronize the pinned client with `uv sync`.
-2. Implement the wrapper in `policy.py` and pass Gate 2 with
-   `ROCKWELL_ENABLE_PHYSICAL_MOTION=1 uv run run.py --mock` (mock only).
+2. Implement the wrapper in `policy.py` and pass Gate 2 with the supervised
+   localhost-only mock command shown above.
 3. Fill `submission/submission.yaml`. Give the policy/task clear names, select
    the closest model type, and describe the sorting task honestly.
 4. Fill `submission/placement.yaml` for any non-default scene. If objects and
@@ -451,12 +472,11 @@ defines this sequence:
 6. Use the printed request ID to book a 30-minute Central Time slot on the
    [event calendar](https://hackathon.sidclab.org/#calendar). The request must
    be approved.
-7. During the approved slot, plain `uv run run.py` invokes only the stationary
-   hold-command diagnostic. Do not enable planned motion until the remaining
-   clearance work and Gates 4–5 are complete. An eventual approved sorting run
-   requires both `ROCKWELL_ENABLE_PHYSICAL_MOTION=1` and
-   `ROCKWELL_ENABLE_PHYSICAL_DESCENT=1`; the operator homes the robot, prepares
-   each rollout, starts/stops it, and records faults/interventions.
+7. During the approved slot, use `uv run supervised_run.py hold`, then the
+   explicit `hover --cube-mm {10|16}`, and only after review the documented
+   `sort` command. The operator homes the robot, prepares each rollout,
+   starts/stops it, and records faults/interventions. Plain `uv run run.py`
+   invokes only the stationary hold-command diagnostic.
 8. Use `uv run run.py --status` for status/results and
    `uv run run.py --download` for the recorded LeRobotDataset.
 
@@ -479,8 +499,8 @@ Do not call the hardware integration complete until these are answered:
 - [ ] Where is the custom aluminium hook-finger CAD, including notch dimensions
       and its relation to the reported TCP? The resource page currently exposes
       the standard SMC body model, which is insufficient for final clearance.
-- [ ] Are red, yellow, and blue 10 mm cubes and three corresponding physical
-      bins available? In what quantities?
+- [ ] Which measured 10 or 16 mm red/yellow/blue cubes are available, and are
+      physical bins required or is the approved task `virtual-table`?
 - [ ] What exact object names does the submission service accept for coloured
       cubes/bins? Official examples show only generic `cube` and `bin`.
 - [ ] Can the operator set up three bins and multiple coloured cubes, and can
@@ -493,6 +513,17 @@ Do not call the hardware integration complete until these are answered:
       operator-agreed stop/hold procedure?
 - [ ] May separately captured depth and rollout data be used for training, or
       only for evaluation/debugging under the event's data rules?
+
+### Future screw hardware gate
+
+The official default scene and the scripted Isaac demo both mention screws,
+but the current physical policy is cube-specific. Before a screw submission,
+complete camera-derived screw pose, task/destination mapping, multiple grasp
+candidates, deterministic finger/approach/held-part/swept-clearance checks,
+success-only scoring, required orientation execution, and lift/release
+verification. Prove these using recorded real-image replay and camera-derived
+Isaac trials, then request a separate one-screw supervised test. Do not relabel
+a screw as a cube to bypass the adapter.
 
 ## Primary references
 

@@ -4,6 +4,16 @@ These instructions apply to every file below `team_plugins/grasping/`. They are
 onboarding for human teammates and binding guidance for coding agents.
 The repository-root `AGENTS.md` also applies.
 
+Read `SETUP.md` before the first change. The normal working branch is
+`grasping`; verify it before editing. Keep changes in this directory unless the
+integration lead explicitly accepts a shared-interface change. When the
+teammate is uncertain about terminology, model choice, an error, or a next
+experiment, explain the options and remind them they can ask the AI.
+
+At the first grasping onboarding response, clearly summarize the assignment,
+first candidate/decision-fixture deliverable, owned branch/folder, prohibited
+shared edits, and first replay/contract test. Do not only point at this file.
+
 ## Mission and boundary
 
 The grasping team turns a camera-derived, scene-bound target into auditable
@@ -17,7 +27,7 @@ The team owns:
 - deterministic jaw-fit, approach, lift, transport, placement, and collision
   preflight appropriate to the available geometry;
 - the shared feature extractor used during data collection and inference;
-- grasp-success and optional bounded-episode-time prediction;
+- complete-grasp success-probability prediction;
 - candidate selection and complete decision provenance;
 - grasp-only offline evaluation.
 
@@ -30,6 +40,18 @@ For this project, a grasp succeeds only when the gripper acquires the intended
 object and retains it through the complete relocation until the commanded
 release. Merely closing the jaws, lifting briefly, or touching the object is
 not success.
+
+The active objective is simple: after deterministic feasibility rejection,
+select the candidate with the highest predicted complete-grasp success
+probability. Do not train a time predictor or balance success against execution
+time. Measured execution/recovery time may still be logged as diagnostic data,
+but it does not affect candidate ranking.
+
+The required object scope is cubes plus the supplied ISO 10642 M6×30 screw.
+The screw simulation demonstrates a configured shaft grasp, but camera-derived
+screw targeting and physical retention are not yet proven. Treat those as work
+to validate, not assumptions. Consume the shared typed `SceneObservation` (or
+its validated JSON serialization), never an informal object string.
 
 ## Activation profile
 
@@ -69,8 +91,8 @@ Work from the repository root and preserve a geometric baseline throughout:
    against the unchanged geometric baseline, then unset the profile and run
    the full regression suite.
 6. Hand off the factory, profile, feature schema, model/checkpoint hash,
-   candidate/rejection examples, calibration/ranking results, timing semantics,
-   known failures, and supported object/gripper combinations.
+   candidate/rejection examples, probability-calibration/ranking results,
+   measured latency, known failures, and supported object/gripper combinations.
 
 In WSL Ubuntu or Brev, the shared validation loop is:
 
@@ -242,21 +264,18 @@ scorer_id
 model_version
 ```
 
+The time fields remain in the shared schema for backward compatibility and
+logging. Current project scorers should normally leave predicted time fields
+`None`; the active selector uses only `success_probability`.
+
 Probability must be calibrated against complete-grasp outcomes, not merely
 classification accuracy. Start with empirical rates, logistic regression, or
 a small random forest before using a more complex model.
 
-The success/time selector uses:
-
-```text
-expected_total_episode_time_s / success_probability
-```
-
-for nonzero-probability candidates. `expected_total_episode_time_s` must use
-the same bounded episode and recovery policy for every candidate. This is a
-local throughput heuristic, not globally optimal scheduling. If pilot data
-shows one feasible strategy is always faster and more reliable, keep that
-simple strategy and report the result rather than manufacturing a need for AI.
+Use `HighestSuccessSelector`. A zero or undefined probability is ineligible;
+ties must be deterministic and auditable. The dormant `SuccessTimeSelector`
+is not part of this project's evaluation and must not be selected by a team
+profile.
 
 ## Dataset and outcome rules
 
@@ -306,10 +325,10 @@ accuracy.
    auditable finite metrics.
 4. **Feature parity:** collection and inference produce identical feature keys,
    definitions, ordering-independent values, schema ID, and units.
-5. **Scoring:** reject NaN/out-of-range probabilities and inconsistent time
-   semantics; test deterministic tie-breaking.
-6. **Selection policies:** compare geometric baseline, highest predicted
-   success, and success/time using identical feasible sets and recovery rules.
+5. **Scoring:** reject NaN/out-of-range probabilities and test deterministic
+   tie-breaking.
+6. **Selection policy:** compare the geometric baseline with highest predicted
+   success using identical feasible sets and recovery rules.
 7. **Simulation:** use camera-derived scenes for decisions; vary layout,
    occlusion, friction/compliance, pose error, and relevant grasp geometry.
 8. **Retention:** verify the object remains held through lift and transport and
@@ -327,8 +346,7 @@ Report rejected candidates and failures, not only successful selected grasps.
   never silently switch to constant-success or the legacy grasp.
 - No feasible candidates means stop/reobserve/replan or report unresolved; it
   does not justify scoring a rejected candidate.
-- A zero/undefined probability is ineligible. Missing time estimates cannot be
-  used by the success/time selector.
+- A zero/undefined probability is ineligible.
 - Stale observations, moved targets, new/unknown obstacles, and changed grasp
   clearance require candidate regeneration and revalidation.
 - Never use simulator truth to repair camera-derived target or obstacle poses.
@@ -374,8 +392,8 @@ validation gates or tests to make a model output pass.
 - [ ] Candidate, feasibility, feature, scorer, and selector IDs are versioned.
 - [ ] Feature schema and complete-grasp label definition are frozen.
 - [ ] Deterministic checks run before learned scoring.
-- [ ] Baseline/highest-success/success-time comparisons use matched conditions
-      and identical recovery rules.
+- [ ] Baseline/highest-success comparisons use matched conditions and identical
+      recovery rules.
 - [ ] Probability calibration, ranking, complete-placement success, total time,
       contacts, drops, interventions, and unresolved outcomes are reported.
 - [ ] Simulation decisions use camera-derived observations.

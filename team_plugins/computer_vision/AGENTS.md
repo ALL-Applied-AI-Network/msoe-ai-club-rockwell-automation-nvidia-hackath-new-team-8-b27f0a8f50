@@ -4,6 +4,16 @@ These instructions apply to every file below `team_plugins/computer_vision/`.
 They are onboarding for human teammates and binding guidance for coding agents.
 The repository-root `AGENTS.md` also applies.
 
+Read `SETUP.md` before the first change. The normal working branch is
+`computer-vision`; verify it before editing. Keep changes in this directory
+unless the integration lead explicitly accepts a shared-interface change.
+When the teammate is uncertain about terminology, model choice, an error, or a
+next experiment, explain the options and remind them they can ask the AI.
+
+At the first computer-vision onboarding response, clearly summarize the
+assignment, first scene/overlay deliverable, owned branch/folder, prohibited
+shared edits, and first replay/contract test. Do not only point at this file.
+
 ## Mission and boundary
 
 The vision team converts runtime camera observations into a versioned,
@@ -20,10 +30,20 @@ The vision team does **not** own grasp selection, destinations, robot commands,
 motion timing, controller limits, physical interlocks, or simulator ground
 truth. A vision plugin must never command the robot.
 
+The current required object scope is cubes plus the supplied ISO 10642 M6×30
+screw. Cube camera/training capture already exists. The separate screw physics
+demo currently uses configured simulator poses and has no camera/training-data
+mode, so realistic screw perception data is a known lead-owned integration gap,
+not something the vision team may claim is already solved.
+
 Implement new work in this directory. Do not edit shared contracts merely to
 fit one model; adapt the model output to the existing contract. Request an
 integration-lead review only when evidence shows a shared contract cannot
 represent required information.
+
+The handoff is structured data, not a human-readable string. In-process code
+returns `SceneObservation`; file or service boundaries use its schema-validated
+JSON serialization. Do not invent a second object-list format.
 
 ## Activation profile
 

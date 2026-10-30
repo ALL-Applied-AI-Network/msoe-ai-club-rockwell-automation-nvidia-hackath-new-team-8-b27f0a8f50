@@ -17,6 +17,22 @@ The checked-in defaults preserve the current externally visible behavior:
 These extension points do **not** claim that arbitrary-object perception,
 collision-free planning, or learned grasp selection already works.
 
+The active learned objective is deliberately narrow: after deterministic
+feasibility checks reject known-bad grasps, select the remaining candidate with
+the highest predicted probability of **complete relocation success**. Complete
+success means acquiring the object, retaining it throughout transport, and
+releasing it only at the commanded destination. Execution and recovery time are
+still measured as evaluation/debugging telemetry, but they do not enter the
+current selector or training target. The dormant time-prediction fields and
+`SuccessTimeSelector` remain only for backward compatibility; team profiles
+must use `HighestSuccessSelector`.
+
+The requested object scope is cubes plus the supplied ISO 10642 M6 x 30 screw.
+The working hardware/task adapter is still cube-specific. The separate screw
+demo proves only a configured-pose Isaac physics sequence, so screw perception,
+camera-derived targeting, grasp ranking, and physical retention remain explicit
+integration work rather than an existing capability.
+
 Object-local axes and symmetry are part of the interface, not a model detail.
 The current cube convention and the required template for new classes are in
 [`OBJECT_CATALOG.md`](OBJECT_CATALOG.md).
@@ -42,7 +58,7 @@ GraspPlanningPipeline.plan_for_target(...)         grasping team
         +--> deterministic feasibility checks
         +--> feature extraction
         +--> learned scoring of feasible candidates only
-        +--> selection
+        +--> highest-complete-success selection
         |
         v
 PickPlacePlan and semantic phases                   existing integration
@@ -444,6 +460,37 @@ parsing and camera declarations are tested, but depth-only operation through
 the official physical client is still unverified and must not be treated as a
 hardware-ready capability until an official-observation replay proves it.
 
+### Synthetic camera-data workflow and its boundary
+
+For cube development, use the colour demo's opt-in training mode rather than
+the configured-pose presentation mode:
+
+```bash
+"$ISAAC/python.sh" \
+  /workspace/rockwell-hackathon/demos/scripted_colour_bucket_sort/colour_bucket_demo.py \
+  --run "$ROCKWELL_RUNS_ROOT/training_bucket_sort_multicam_seed_7" \
+  --training-data --training-cameras table,side,wrist \
+  --seed 7 --dataset-stride 15
+```
+
+This mode writes lossless raw renders, sensor-augmented frames, deployment-like
+previews, and synchronized labels. It applies seeded material, illumination,
+sensor, and clutter variation fitted toward the limited recorded evidence. It
+is **provisional domain randomization**, not proof of photorealism, calibrated
+real-sensor colour, or sim-to-real accuracy. The table camera remains the only
+view currently validated for motion coordinates; side and wrist output is
+auxiliary until its calibration and detector are validated. The optional wrist
+hose stress profile is an occlusion robustness test, not a normal ground-truth
+view.
+
+The separate cube-and-screw demo currently has configured screw poses and no
+camera or `--training-data` path. Therefore these flags produce cube data only.
+A screw-aware synthetic collector is a missing integration milestone: it must
+render the exact catalog CAD, emit camera-derived input plus evaluator-only
+pose/mask labels, and be checked against held-out real screw images before its
+data can support a screw-perception claim. Do not relabel the cube detector's
+output or use simulator poses at runtime to hide that gap.
+
 Official RGB payloads are `H x W x 3`, `uint8`, **RGB** channel order. OpenCV
 usually decodes BGR; the official client already converts once. A provider
 must not swap the channels again. Validate the same convention for every Isaac
@@ -593,26 +640,26 @@ existing `PickPlacePlan`, which preserves the executor boundary.
    `PickPlacePlan` and retains all accepted/rejected evidence;
    `plan_for_target()` is the shortcut returning only that plan.
 
-The default highest-success selector treats a predicted probability of zero as
-ineligible; if every candidate scores zero, planning fails instead of sending
-an action that the model says cannot succeed.
+The active `HighestSuccessSelector` chooses the feasible candidate with the
+largest complete-relocation success probability. A predicted probability of
+zero is ineligible; if every candidate scores zero, planning fails instead of
+sending an action that the model says cannot succeed. Tie-breaking must remain
+deterministic and auditable.
 
-For the success/time experiment, `GraspScore.expected_total_episode_time_s`
-means the **unconditional expected duration of the bounded episode**, including
-the same fixed retry/recovery policy used by every compared action. It is not
-`E[recovery | failure]`. `SuccessTimeSelector` minimizes the explicit local
-heuristic
-`expected_total_episode_time_s / success_probability`; it fails if any
-eligible candidate lacks the total-time prediction. This is a throughput
-heuristic, not a whole-scene scheduling optimum. The selector ID and objective
-are stored in every selected plan so highest-success and success/time runs
-remain distinguishable even when their predictions are identical.
+`GraspScore.expected_total_episode_time_s`, `expected_execution_time_s`, and
+`expected_recovery_time_s`, plus `SuccessTimeSelector`, remain in the shared API
+so old fixtures and experiments still deserialize. They are dormant
+compatibility surface, not the active objective. New team scorers should leave
+those predictions `None`, use `HighestSuccessSelector`, and keep measured
+elapsed/recovery time only as post-action telemetry.
 
 A learned score must never override deterministic rejection. If all candidates
 are rejected, no plan is returned. If model inference raises or returns an
-invalid probability/time, the pipeline raises `GraspPlanningError`; an
-explicit, tested fallback may be added later, but accidental exception-based
-fallback is not allowed.
+invalid probability, the pipeline raises `GraspPlanningError`; an explicit,
+tested fallback may be added later, but accidental exception-based fallback is
+not allowed. Compatibility time fields, when an old scorer supplies them, must
+still satisfy their existing validation even though they do not affect the
+active selector.
 
 Perception and scoring run synchronously in the current policy. The hardware
 adapter rechecks observation age after those components finish; if their
@@ -690,11 +737,12 @@ an active physical rollout.
 
 Hardware logs join candidate evidence to outcomes using the attempt ID and
 `grasp_decision_key`. Accepted candidate logs include poses, deterministic
-feasibility metrics, features, model/version, selector, probability, and total
-time prediction. `plan_complete` or `policy_blocked` records the measured
-backend-reference episode elapsed time; all events also carry a wall-clock
-timestamp. Preserve these fields when building the training table, and do not
-label camera-verified placement as independent force/grasp confirmation.
+feasibility metrics, features, model/version, selector, and probability. Legacy
+time-prediction fields may also appear but are not selection inputs.
+`plan_complete` or `policy_blocked` records measured backend-reference episode
+elapsed time; all events also carry a wall-clock timestamp. Preserve measured
+timing as diagnostic/evaluation telemetry when building the training table, and
+do not label camera-verified placement as independent force/grasp confirmation.
 
 ## Default behavior and compatibility
 
@@ -737,9 +785,9 @@ Use small fake providers and scorers before testing a large model:
     phase order, and bounded action rows as the pre-refactor baseline.
 11. Confirm official mm/degrees feedback becomes the expected SI `RobotState`,
     and that the same state reaches Isaac and hardware grasp features.
-12. Confirm success/time selection uses `expected_total_episode_time_s / p`,
-    logs the selector ID, and joins the executed candidate to its final timing
-    and outcome.
+12. Confirm `HighestSuccessSelector` chooses the largest valid complete-success
+    probability with deterministic ties, logs its selector ID, and joins the
+    executed candidate to its final outcome and measured timing telemetry.
 13. Delay a fake provider and scorer beyond the observation-age limit; confirm
     the plan is cancelled/reobserved and no forward-motion row is returned.
 

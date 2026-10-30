@@ -10,7 +10,8 @@ physical robots.
 You develop your policy your own way, for example in Isaac Sim with our starter and your own data. We then evaluate
 it on our real robot, a FANUC ER-4iA: our server sends your machine an observation (`obs`), your policy returns the
 next action, `act(obs)`, and this repeats until the rollout ends. Your policy runs on your machine; the cell plays
-the actions you return and enforces every safety limit.
+the actions you return and enforces the service's documented motion and target limits. Those limits do not prove
+task-level collision clearance, correct perception, grasp safety, or emergency-stop behavior.
 
 | Path | What it is |
 |---|---|
@@ -21,6 +22,23 @@ the actions you return and enforces every safety limit.
 | `submission/placement.yaml` | Where the objects go in each rollout, and its prompt (only if they change). `table_plan.png` shows the table and the axes. |
 | `calibration/` | Optional: the real cameras' calibration (the starter's sim cameras already use it), for code that maps pixels or depth to robot coordinates. |
 | `cell_client.py` | The client library. Do not edit it. |
+
+## Project-specific status
+
+This vendored client is wrapped by the repository's `supervised_run.py`. Read
+[`../../docs/PHYSICAL_HARDWARE_TEST_SETUP.md`](../../docs/PHYSICAL_HARDWARE_TEST_SETUP.md)
+before submitting or running a physical slot.
+
+Recorded rollout 5 camera-verified the current cube policy's three
+`virtual-table` placements. The current executable hardware policy still
+expects one red, yellow, and blue cube and does not execute screws. The separate
+Isaac screw demo uses configured screw poses and is not proof of physical screw
+perception or grasping.
+
+The checked-in submission YAML remains a draft: its team/contact/task suffix
+are TODOs and it describes 10 mm cubes plus physical bins. Update it to match
+the approved measured-object and destination setup; do not submit it unchanged
+for a 16 mm/no-bucket run.
 
 A **run** is one approved submission: **10 rollouts** by default. A **rollout** is one attempt at your task, scored
 success or failure; faults and interventions are noted.
@@ -67,8 +85,13 @@ the arm does not stop between them. It helps when one call returns more than twi
 ## 3. Check formats and connection
 
 ```bash
-uv run run.py --mock
+uv run supervised_run.py hover --cube-mm 16 --mock --trials 1 --trial-s 2
 ```
+
+Replace `16` with `10` only for a measured/operator-confirmed 10 mm cube. The
+wrapper uses `hover` because the official mock starts without a measured TCP;
+`hold --mock` cannot bootstrap. This mock command is localhost-only and never
+contacts the robot.
 
 Runs your policy against a stand-in for the cell on your machine, with no robot. It ends with
 **✓ Ready for the real robot**, or **✗ Not ready** with what to fix (an action the robot would reject, or an error
@@ -100,14 +123,16 @@ uv run run.py --status
 
 ## 5. Run during your slot
 
-Once we approve your request, your client picks up its token by itself and waits for the operator. Start it and
-leave it running:
+Once we approve your request, your client picks up its token by itself and waits for the operator. This plain
+command starts this repository's **hold-only diagnostic**, not sorting:
 
 ```bash
 uv run run.py
 ```
 
-This repository adds `supervised_run.py` around the official client to prevent
+Use the maintained physical runbook linked above for the explicit
+`supervised_run.py hold`, `hover`, and `sort` sequence. This repository adds
+`supervised_run.py` around the official client to prevent
 stale shell exports from accidentally arming motion. Its default is hold-only;
 hardware motion modes require an explicit cube size. For
 the current no-bucket test, `virtual-table` is the default destination and uses
@@ -137,6 +162,12 @@ It goes to LeRobot's default dataset folder. Run it again after more rollouts to
 Every rollout is recorded: the three cameras and the robot state, 10 times a second. The videos appear under My
 results next to your scores, and on the leaderboard once it opens at the end of the event. Tell us when you book if
 your runs should stay off it.
+
+The live event site is authoritative for service limits. As of October 30,
+2026 it lists 150 mm/s, 15 mm per row, 60 mm queued ahead, and 10 degrees per
+row. An archived site snapshot in `scilabDocumentation.txt` contains older
+100/12/40/8 values. This project intentionally stays more conservative at a
+5 mm Cartesian row step and nominal 50 mm/s.
 
 ---
 

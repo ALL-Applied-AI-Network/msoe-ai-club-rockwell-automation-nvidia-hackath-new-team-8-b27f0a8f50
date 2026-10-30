@@ -171,11 +171,11 @@ For a localhost-only official protocol check, use:
 uv run supervised_run.py hover --cube-mm 16 --mock --trials 1 --trial-s 2
 ```
 
-The current approved request still describes 10 mm cubes and physical bins.
-Its remaining trials do not match the no-bucket/16 mm setup unless the operator
-and organizers explicitly agree to that changed setup. A fresh formal
-submission also cannot be made from the checked-in YAML until its team/contact
-TODOs and placement description are corrected.
+The request audited during that first session described 10 mm cubes and
+physical bins. Do not assume an old request or its remaining trials authorize a
+later no-bucket/16 mm setup; check the active request with the operator and
+organizers. A fresh formal submission still cannot be made from the checked-in
+YAML until its team/contact TODOs and placement description are corrected.
 
 ## Offline camera audit
 

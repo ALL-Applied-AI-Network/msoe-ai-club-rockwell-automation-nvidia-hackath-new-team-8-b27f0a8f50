@@ -35,6 +35,64 @@ along the catalog's local X, Y, and Z axes, in that order.
   `blue`; class and destination are separate fields.
 - Current executor support: vertical top-down grasp plus yaw only.
 
+## `screw_iso10642_m6x30` (provisional integration class)
+
+This entry freezes the exact supplied simulation asset and the intended handoff
+name. It does **not** make the class hardware-ready. A vision provider must not
+emit this `class_id` for robot execution until the object adapter and
+feasibility checks described below exist.
+
+### Verified CAD and simulation facts
+
+- Human-readable part: ISO 10642 M6 x 30 countersunk screw, with a 90-degree
+  head and nominal 4 mm hex socket. The supplied geometry does not model
+  threads.
+- Reference STEP: `reference-assets/models/ISO10642-M6x30-countersunk-screw.step`,
+  SHA-256 `8a9fb00b8983813814f11c160725aa0e77941434ac7b43b47696a70f6b47a264`.
+- Executed simulation mesh:
+  `reference-assets/models/ISO10642-M6x30-countersunk-screw.stl`, SHA-256
+  `6a842f1de0923083b0eb2a3a209eacae87cc83d4b62e15b768a0a8cd277cec2a`,
+  1,910 triangles. Its millimetre bounds are
+  `(-6, -5.998135, -30)` to `(6, 5.998135, 0)`.
+- Catalog origin: center of the head face at CAD local `(0, 0, 0)`. The tip and
+  shaft extend along local `-Z`; local `+X` and `+Y` span the head face and form
+  the right-handed source frame. `dimensions_m` describes the local X/Y/Z
+  bounding-box lengths: `(0.012, 0.01199627, 0.030)`.
+- Current scripted-pose restriction: the screw lies on the table using
+  `Rz(yaw) * Ry(-90 degrees)`, so local `-Z` is the horizontal screw axis and
+  local `+X` points upward. This is one simulated pose family, not a general
+  physical-pose assumption.
+- Current simulated grasp family: a vertical pinch of the nominal 6 mm shaft at
+  local `(0, 0, -0.016)` m. The configured simulator mass is 7.5 g; it is
+  CAD-volume based, not a measurement of an event screw.
+- Intended task label: `sort_label="red"`; both scripted screws go to the red
+  destination. The mixed demo verifies all transformed mesh vertices inside
+  the 35 mm bin pocket. It uses configured object poses, not camera perception.
+- Axial symmetry is not yet frozen for training labels. The countersunk head is
+  mostly rotationally symmetric but the hex socket may retain 60-degree detail;
+  the team must choose and test a canonical convention before producing pose
+  labels rather than silently treating axial roll as either unique or
+  continuous.
+
+### Unverified physical facts and required integration
+
+- The current HSV/silhouette provider cannot detect this screw, and the screw
+  demo has no camera or training-data mode. Required evidence includes a
+  calibrated camera-derived pose, visibility/occlusion quality, held-out real
+  replay, and a documented failure threshold.
+- The real screw's exact finish, mass, dimensions/tolerances, available poses,
+  and match to this CAD have not been measured. CAD truth may label simulation
+  but may not repair a real camera result.
+- The custom fingers' shaft contact, closure, friction, retention through the
+  complete transport, release, and collision clearance have not been validated
+  on hardware. The one scripted pinch is a candidate, not proof of feasibility.
+- The generic object target/destination adapter and screw-capable executor do
+  not yet exist. Do not add this class to `CUBE_TASK_CLASS_IDS`; keep it visible
+  as unsupported until those pieces and their tests are implemented.
+- The physical red destination (bin versus an approved virtual-table footprint)
+  must be frozen for the screw trial. A simulation red-bin placement does not
+  choose the physical setup automatically.
+
 ## New-class template
 
 Before adding a screw, vial, nail, or another part, record:

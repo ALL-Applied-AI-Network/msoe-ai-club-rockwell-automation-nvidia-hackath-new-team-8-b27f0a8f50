@@ -2,7 +2,7 @@
   "schema_version": 1,
   "assumptions": {
     "cube_edge_m": 0.01,
-    "cube_size_note": "ACTIVE ASSUMPTION: use 10 mm cubes for simulation and hardware until the physical parts are measured; do not silently switch to the supplied 16 mm asset.",
+    "cube_size_note": "SIMULATION BASELINE: use 10 mm cubes and the matching configured task heights. PHYSICAL HARDWARE: explicitly select the 10 mm or 16 mm observation profile only after identifying or measuring the placed cube; a 16 mm hardware profile does not change Isaac geometry or make the shared planner generally dimension-aware.",
     "tcp_beyond_fingertips_mm": 0.0,
     "tcp_conflict_note": "The pinned client/mock labels its UTOOL1 action point as the fingertip, which is why this configuration uses a 0 mm extra offset. Separately, an organizer clarified on 2026-10-26 that the standard fingers contact the table near UF0 z=-335 mm and that the earlier -345 mm FAQ value was for another group's shorter fingers and was reverted. These facts are consistent but do not prove the live controller setup; confirm the installed standard fingers and active UTOOL1/UF0 before physical descent."
   },

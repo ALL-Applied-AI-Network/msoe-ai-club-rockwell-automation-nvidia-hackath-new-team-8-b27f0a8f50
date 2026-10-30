@@ -13,11 +13,23 @@ browser viewer and does not require the user to operate an interactive window.
 The supplied twin documents an optional interactive scene command, but that is
 not part of this setup workflow.
 
-Coding agents must also read `AGENTS.md`, `digital-twin-setup/AGENTS.md`,
-`digital-twin-setup/SETUP.md`, and
-`digital-twin-setup/docs/MODEL_NOTES.md` before acting. Read
-`reference-assets/README.md` before using the separately supplied CAD or
-tabletop image.
+Coding agents must first apply the one-time role gate in `AGENTS.md`. If the
+user has not already named a role, ask whether they are working as **computer
+vision**, **grasping**, or **lead developer**, then read the matching guide:
+
+- `team_plugins/computer_vision/SETUP.md` and its `AGENTS.md` on branch
+  `computer-vision`;
+- `team_plugins/grasping/SETUP.md` and its `AGENTS.md` on branch `grasping`; or
+- `team_plugins/lead/SETUP.md` and its `AGENTS.md` on the integration branch
+  `main`.
+
+The repository uses `main`, not `master`. The role guides define normal edit
+boundaries and how team branches regularly merge `origin/main`; selecting a
+role does not grant permission to edit another team's files or operate physical
+hardware. Agents must also read `digital-twin-setup/AGENTS.md`,
+`digital-twin-setup/SETUP.md`, and `digital-twin-setup/docs/MODEL_NOTES.md`
+before acting on the twin. Read `reference-assets/README.md` before using the
+separately supplied CAD or tabletop image.
 
 ## 1. Clone into the `vscode` container
 

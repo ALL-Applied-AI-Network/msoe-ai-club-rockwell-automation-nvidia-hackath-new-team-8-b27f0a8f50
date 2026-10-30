@@ -18,11 +18,16 @@
 #       bin: [480, -150]
 #   ...                                            # up to rollout 10
 
-# IMPORTANT: confirm with the organizers that `cube` and `bin` are the accepted
-# object labels for this non-default scene before running --submit. Both lists
-# are ordered red, yellow, blue. The positions are the single shared layout in
-# config/colour_bucket_sort.json, converted from metres to UF0 millimetres.
-# The policy currently assumes 10 mm cubes.
+# DRAFT OLDER SCENE: do not submit this unchanged. Confirm with the organizers
+# that `cube` and `bin` are accepted labels. Both lists are ordered red, yellow,
+# blue. These positions are the shared layout in config/colour_bucket_sort.json,
+# converted from metres to UF0 millimetres, and describe 10 mm cubes plus three
+# physical bins. For a no-bucket virtual-table run, remove the bin objects only
+# after organizer approval and make submission.yaml/task/prompt state the
+# measured 10/16 mm cube profile and fixed virtual destinations. A future screw
+# run needs a separate approved placement and a completed screw execution path;
+# leaving this file empty selects the official default screw scene but does not
+# make the current cube policy screw-capable.
 rollouts:
   - objects:
       cube:

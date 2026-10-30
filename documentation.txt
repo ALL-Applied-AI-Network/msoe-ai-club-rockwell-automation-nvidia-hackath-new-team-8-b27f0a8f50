@@ -1,0 +1,481 @@
+# Rockwell/NVIDIA grasping-and-sorting project handoff
+
+This is the beginner-friendly entry point for teammates and their coding
+agents. It explains how the team is split, how work is exchanged, what the
+current system actually supports, and what evidence is required before a claim
+is considered complete.
+
+If a term, command, error, or design choice is unclear, ask the AI to explain
+it. Good questions include “What input does this step need?”, “What output
+proves it worked?”, “What is the smallest test?”, and “Could this break another
+team's work?” The AI should explain unfamiliar steps and suggest practical
+improvements, not assume everyone already knows robotics terminology.
+
+For physical hardware specifically, also read `scilabDocumentation.txt` and
+`docs/PHYSICAL_HARDWARE_TEST_SETUP.md`. Nothing in this general document alone
+authorizes robot motion.
+
+===============================================================================
+1. PROJECT OBJECTIVE
+===============================================================================
+
+The project is a camera-guided sorting system for the FANUC ER-4iA with the
+SMC MHZL2-16D2 parallel gripper and custom aluminum fingers. The required
+object scope is:
+
+- known cubes; and
+- the supplied ISO 10642 M6×30 countersunk screw.
+
+The intended pipeline is:
+
+  cameras
+    -> object detection and pose estimation
+    -> validated structured scene
+    -> target/task selection
+    -> multiple deterministic grasp candidates
+    -> deterministic feasibility rejection
+    -> predicted complete-grasp success probability
+    -> highest-success candidate
+    -> motion execution
+    -> outcome verification and logging
+
+A grasp is successful only when the gripper acquires the intended object,
+retains it through the entire lift and transport, places it correctly, and
+releases it only when commanded. Contact, jaw closure, or a short lift alone is
+not success.
+
+The active AI selection objective is the highest predicted complete-grasp
+success probability among candidates that already pass deterministic checks.
+The project is no longer predicting or balancing execution time. Actual
+perception/planning/execution/recovery time should still be logged for
+diagnostics, throughput reporting, and judging, but it must not affect the
+current grasp ranking.
+
+Do not train every component. Calibration, coordinate conversion, object
+catalogs, candidate generation, known fit/reach/collision rules, state-machine
+transitions, motion bounds, and validation belong in geometry and ordinary
+software. Learning is useful for residual uncertainty: ranking feasible grasps
+whose real success differs for reasons the deterministic model does not fully
+capture.
+
+===============================================================================
+2. ROLE SELECTION AND OWNERSHIP
+===============================================================================
+
+At first setup, the AI asks once whether the user is computer vision,
+grasping, or lead developer. If the role was already stated, it should not ask
+again.
+
+Computer-vision role
+--------------------
+
+- Branch: `computer-vision`
+- Normal work folder: `team_plugins/computer_vision/`
+- First read: `team_plugins/computer_vision/SETUP.md`, then `AGENTS.md`
+- Owns camera inference, classification/segmentation/keypoints, pose
+  estimation, calibrated coordinate conversion, tracking, confidence/quality,
+  overlays, and vision-only evaluation.
+- Does not choose grasps or command the robot.
+
+Grasping role
+-------------
+
+- Branch: `grasping`
+- Normal work folder: `team_plugins/grasping/`
+- First read: `team_plugins/grasping/SETUP.md`, then `AGENTS.md`
+- Owns grasp candidate generation, deterministic feasibility, feature
+  extraction, success-probability scoring, highest-success selection, and
+  grasp-only evaluation.
+- Does not calibrate cameras or send low-level robot commands.
+
+Lead developer role
+-------------------
+
+- Branch: `main` (there is no `master` integration branch)
+- First read: `team_plugins/lead/SETUP.md`, then `AGENTS.md`
+- Owns shared contracts, task/destination adapters, combined profiles, Isaac
+  and hardware adapters, branch integration, complete testing, physical run
+  documentation, and end-to-end evaluation.
+- Reviews team work instead of copying/reimplementing team-owned model code.
+
+Team agents should keep edits within their owned folder. If an outside change
+could affect another person's development, create a small failing fixture or
+clear interface request and ask the lead. Do not change shared validation,
+hardware policy, Isaac adapter, another team's files, or the pristine supplied
+twin merely to make a local demo pass.
+
+===============================================================================
+3. GIT BRANCH WORKFLOW
+===============================================================================
+
+The canonical integration branch is `main`. Computer vision and grasping work
+in separate remote branches so they can add files without repeatedly editing
+one shared module.
+
+Fresh computer-vision clone:
+
+  git fetch origin
+  git switch --track origin/computer-vision
+
+Fresh grasping clone:
+
+  git fetch origin
+  git switch --track origin/grasping
+
+At the beginning of a session, before an expensive Brev run, and before a
+handoff, update a clean team branch. For computer vision:
+
+  git switch computer-vision
+  git status --short
+  git fetch origin
+  git merge --ff-only origin/computer-vision
+  git merge --no-edit origin/main
+
+Use the same commands with `grasping` for the grasp branch. `git status
+--short` must be empty before merging. If it is not empty, or if Git reports a
+conflict, stop and ask the AI/lead. Never discard, reset, overwrite, or silently
+stash another person's work.
+
+After focused tests pass:
+
+  git push origin computer-vision
+
+or:
+
+  git push origin grasping
+
+Team members do not merge their own branches into `main`. The lead reviews the
+diff, evidence, profiles, fixtures, and tests; integrates through a reviewed
+merge or pull request; runs the combined tests; and tells both teams to merge
+the updated `origin/main` back into their branches.
+
+===============================================================================
+4. THE VISION-TO-GRASP INTERFACE
+===============================================================================
+
+Do not exchange a human-readable string such as:
+
+  "red cube at x=0.42, y=-0.11; screw rotated 20 degrees"
+
+That format loses types, units, coordinate frames, timestamps, uncertainty,
+and provenance. In the same Python process, vision returns the typed
+`sorting_core.perception.SceneObservation`. Across a file or service boundary,
+use `scene_observation_to_dict()` and its schema-validated JSON serialization,
+then parse it with `scene_observation_from_dict()` and validate it against the
+request.
+
+A detection contains:
+
+- `track_id`: identity within/across observations according to the provider's
+  documented tracking policy;
+- `class_id`: geometry/category such as cube or the catalog screw class;
+- `sort_label`: destination/category label, separate from geometry;
+- `capture_time_s`: the shared reference timestamp;
+- `Pose3D.position_base_m`: XYZ metres in robot base;
+- `Pose3D.orientation_xyzw`: unit quaternion in x,y,z,w order;
+- `dimensions_m`: dimensions along documented object-local axes;
+- `confidence`: detection/class evidence, not pose accuracy;
+- `pose_quality` and `visibility` when supported;
+- `source_camera_ids` and versioned attributes/evidence.
+
+The complete scene also records schema version, coordinate frame, provider
+name/version and calibration IDs. Read `docs/TEAM_INTEGRATION.md`,
+`docs/OBJECT_CATALOG.md`, and
+`docs/schemas/scene-observation.v1.schema.json` for the exact contract.
+
+Unknown, occluded, unsupported, or missing objects must not silently become
+clear free space. Simulator truth may evaluate perception but may never repair
+a runtime scene.
+
+===============================================================================
+5. COMPUTER-VISION WORK PLAN
+===============================================================================
+
+Assignment
+----------
+
+Detect all supported cubes and screws, estimate their pose and relevant
+quality/visibility, convert results into robot-base coordinates, and return a
+valid `SceneObservation`. Prefer adapting an existing maintained model or a
+hybrid model-plus-geometry solution before training from scratch.
+
+Suggested dependency order
+--------------------------
+
+1. Trace one existing cube frame from pixels to `SceneObservation` and overlay.
+2. Freeze cube and screw catalog conventions and symmetry-aware error metrics.
+3. Benchmark the simplest useful baseline on saved frames.
+4. Add a provider module and independent profile in the vision folder.
+5. Replay held-out real and synthetic frames before using Isaac live.
+6. Use realistic `--training-data` mode on held-out seeds.
+7. Hand the grasp team a small serialized scene fixture that requires no model.
+
+Practical ideas
+---------------
+
+- pretrained segmentation plus calibrated depth/table-plane geometry;
+- mask principal axis for a lying screw, compared with keypoints or CAD/PnP;
+- explicit rejection of ambiguous/occluded objects instead of invented poses;
+- a second camera only after measuring a table-camera visibility failure.
+
+Avoid starting with arbitrary piles, a new foundation model trained from
+scratch, or learned pixel-to-robot coordinates.
+
+Required evidence
+-----------------
+
+- importable provider/profile with immutable model identity;
+- valid and invalid serialized scenes plus overlays;
+- per-class recall/false positives and dropout;
+- symmetry-aware position/orientation error in robot base;
+- latency and resource requirements;
+- held-out synthetic and held-out physical-camera results;
+- clutter, touching objects, blur, exposure, hose, hands/background and missing
+  camera failure cases;
+- explicit unsupported conditions.
+
+Done means the provider loads without shared edits, validates every scene,
+produces understood replay behavior, meets agreed held-out thresholds, fails
+explicitly, and leaves the profile-unset baseline passing.
+
+===============================================================================
+6. GRASPING WORK PLAN
+===============================================================================
+
+Assignment
+----------
+
+Consume camera-derived scenes, generate several candidate grasps, reject known
+invalid candidates, estimate complete success probability for each remaining
+candidate, and select the highest probability with deterministic tie-breaking.
+
+Suggested dependency order
+--------------------------
+
+1. Reproduce the legacy cube decision from a saved scene.
+2. Generate a small explicit set of cube and screw grasp families.
+3. Implement known fit/reach/approach/lift/transport/placement/uncertainty
+   rejection before scoring.
+4. Freeze one pre-action feature schema and complete-success label.
+5. Start with empirical rates, logistic regression, or a small random forest.
+6. Use `HighestSuccessSelector`; leave predicted-time fields unused/`None`.
+7. Compare geometric baseline versus highest-success on matched layouts.
+8. Hand the lead reproducible accepted/rejected candidate fixtures.
+
+Practical ideas
+---------------
+
+- a few cube yaw alignments instead of hundreds of arbitrary samples;
+- several exposed-shaft positions for the 6 mm screw shaft;
+- physical features such as opening, clearances, pose quality and obstruction;
+- probability calibration and ranking error rather than classification
+  accuracy alone.
+
+If one grasp dominates every credible condition, keep the simple rule and
+report that result. Do not manufacture a reason to use AI.
+
+Required evidence
+-----------------
+
+- importable pipeline/profile;
+- versioned generator/checker/features/scorer/selector;
+- object and gripper geometry assumptions;
+- complete-success data label and collection procedure;
+- deterministic accepted/rejected fixtures;
+- probability calibration, action ranking and complete-retention results;
+- matched baseline versus highest-success comparison;
+- drops, slips, contacts, wrong placements, cancellations and unresolved cases.
+
+Done means deterministic rejection always precedes scoring, stale/wrong/
+infeasible/zero-probability candidates never execute, highest-success selection
+is reproducible, data/runtime features match, and the baseline still passes.
+
+===============================================================================
+7. CUBE AND SCREW FACTS AND LIMITATIONS
+===============================================================================
+
+Cubes
+-----
+
+- The main simulation baseline uses 10 mm cubes.
+- Hardware evidence suggested a possible 16 mm profile, but video pixels are
+  not a dimensional measurement. Never mix 10 mm and 16 mm assumptions.
+- Current compatibility execution is upright, vertical top-down XYZ plus yaw.
+
+Screw simulation reference
+--------------------------
+
+- File: `ISO10642-M6x30-countersunk-screw.stl`
+- Config: `config/cube_screw_bucket_sort.json`
+- SHA-256:
+  `6a842f1de0923083b0eb2a3a209eacae87cc83d4b62e15b768a0a8cd277cec2a`
+- Length: 30 mm
+- Head diameter: 12 mm
+- Shaft diameter: 6 mm
+- CAD-local shaft direction: from head along local `-Z`
+- Configured simulated grasp point: 16 mm from the head on the shaft
+- Configured destination: red
+
+The screw demo proves configured-pose Isaac physics only. It does not use
+camera perception or realistic training capture. It does not prove physical
+screw dimensions/material, gripper fit/friction, camera detection, collision-
+free motion, or retention. Do not add screws to `CUBE_TASK_CLASS_IDS`.
+
+The lead must complete the screw object catalog and camera/training path before
+the vision team claims realistic screw data or the grasp team claims an
+end-to-end camera-guided screw pick.
+
+===============================================================================
+8. REALISTIC ISAAC TRAINING-DATA MODE
+===============================================================================
+
+“Realistic mode” in this project means the opt-in `--training-data` mode in
+`demos/scripted_colour_bucket_sort/colour_bucket_demo.py`. It is an auditable,
+domain-randomized approximation, not a guarantee of photorealism.
+
+After `BREV_SETUP.md` succeeds and its generated `env.sh` is sourced:
+
+  "$ISAAC/python.sh" \
+    /workspace/rockwell-hackathon/demos/scripted_colour_bucket_sort/colour_bucket_demo.py \
+    --run "$ROCKWELL_RUNS_ROOT/training_seed_7" \
+    --training-data --training-cameras table,side,wrist \
+    --seed 7 --dataset-stride 15
+
+This produces native raw/sensor frames, synchronized labels, camera and
+geometry validation, randomized material/light/camera/scene/physics evidence,
+and deployment-like previews. Use a new output directory for every run. Runs,
+frames, videos, datasets and weights stay outside Git.
+
+Use `--wrist-hose-stress` for an explicit derived wrist-occlusion robustness
+set. Respect its ignore masks. Table is currently the only camera trusted for
+motion coordinates; side/wrist remain auxiliary until physical cross-camera
+accuracy and timing are measured.
+
+Do not train on overlay/presentation frames, leak related frame sequences
+across train/test, use evaluator truth as runtime input, or treat domain
+randomization as evidence of real-world accuracy. The current screw demo has
+no corresponding training-data mode; that is an explicit lead-owned gap.
+
+Read `docs/SYNTHETIC_DATA.md` and the cube demo README before generating data.
+
+===============================================================================
+9. PLUGIN ACTIVATION AND TEAM HANDOFF
+===============================================================================
+
+Each team adds an independent JSON profile with a `module.path:factory`
+reference. Select it before Python starts:
+
+  export ROCKWELL_INTEGRATION_PROFILE=team_plugins/computer_vision/my_profile.json
+
+or:
+
+  export ROCKWELL_INTEGRATION_PROFILE=team_plugins/grasping/my_profile.json
+
+Unset the variable to recover the checked-in baseline:
+
+  unset ROCKWELL_INTEGRATION_PROFILE
+
+The lead reviews both profiles and creates a new versioned combined profile
+under `team_plugins/profiles/`. Explicitly selected plugin failures fail closed;
+they do not silently fall back and continue robot motion.
+
+Every handoff records:
+
+- Git commit and branch;
+- profile ID/hash;
+- provider/scorer and feature/schema versions;
+- model artifact hash and reproducible retrieval;
+- object catalog and calibration versions;
+- test commands/results;
+- saved fixtures and metrics;
+- known failures, unsupported conditions and next action.
+
+===============================================================================
+10. TESTING LADDER
+===============================================================================
+
+Use dependency order. Do not jump directly from an import test to hardware.
+
+1. Unit and contract tests with small fake components.
+2. Serialized saved-scene replay.
+3. Saved real-camera replay without robot motion.
+4. Held-out realistic synthetic camera input.
+5. Combined profile offline replay.
+6. Isaac camera-derived decisions and physics outcomes.
+7. Official hardware-client mock/protocol validation.
+8. Supervised physical hold-only connection and camera collection.
+9. Supervised hover-only target validation.
+10. Carefully staged physical pick/place only after prerequisites pass.
+
+Shared host loop from repository root in WSL:
+
+  uv run --project hardware/fanuc_cell \
+    python -m unittest discover -s tests -v
+
+On a configured Brev runtime:
+
+  bash scripts/verify_brev.sh --full
+
+The official mock proves protocol/action shape only. Isaac physics does not
+prove physical collision avoidance, calibration, gripper fit, or retention.
+
+===============================================================================
+11. DATA, MODELS, LOGS AND SECRETS
+===============================================================================
+
+Never commit:
+
+- model weights or downloaded model repositories;
+- datasets, raw frames, generated runs, videos or caches;
+- virtual environments or machine-specific absolute paths;
+- API tokens, GitHub/Hugging Face credentials, `.request.json`, or private
+  results URLs.
+
+Commit small source/configuration, schemas, tests, tiny reviewed fixtures,
+artifact hashes and reproducible retrieval instructions. Split datasets by
+layout/arrival sequence or seed, not random adjacent frames. Preserve failures
+and interventions; do not curate them away.
+
+===============================================================================
+12. WHAT TO ASK THE AI
+===============================================================================
+
+Ask the AI when:
+
+- a term, unit, frame, quaternion, calibration or score is confusing;
+- Git is dirty, diverged or conflicted;
+- a model dependency conflicts with Isaac or the hardware environment;
+- an output fails schema/runtime validation;
+- a pose overlay looks wrong;
+- a grasp is infeasible or a failure label is ambiguous;
+- a requested change crosses the team's owned folder;
+- an experiment result does not distinguish likely causes;
+- you need a smaller or more practical next step.
+
+The AI should not merely say “train the model” or “control the robot.” It should
+identify prerequisites, inputs, outputs, tests, likely failures and the next
+safe experiment. Creative ideas are welcome when they are small enough to
+implement and measure within the hackathon.
+
+===============================================================================
+13. AUTHORITATIVE REPOSITORY REFERENCES
+===============================================================================
+
+- Root agent/setup rules: `AGENTS.md`, `BREV_SETUP.md`
+- Team workspace: `team_plugins/README.md`
+- Vision setup/contracts:
+  `team_plugins/computer_vision/SETUP.md` and `AGENTS.md`
+- Grasp setup/contracts: `team_plugins/grasping/SETUP.md` and `AGENTS.md`
+- Lead setup: `team_plugins/lead/SETUP.md` and `AGENTS.md`
+- Shared interfaces: `docs/TEAM_INTEGRATION.md`
+- Object axes/symmetry: `docs/OBJECT_CATALOG.md`
+- Synthetic data: `docs/SYNTHETIC_DATA.md`
+- Scene JSON schema: `docs/schemas/scene-observation.v1.schema.json`
+- Cube realistic-data command:
+  `demos/scripted_colour_bucket_sort/README.md`
+- Screw physics demo: `demos/scripted_cube_screw_bucket_sort/README.md`
+- Physical testing: `scilabDocumentation.txt` and
+  `docs/PHYSICAL_HARDWARE_TEST_SETUP.md`
+
+When prose conflicts with tested code, stop and ask the lead to reconcile it;
+do not silently choose the version that is easiest to demo.

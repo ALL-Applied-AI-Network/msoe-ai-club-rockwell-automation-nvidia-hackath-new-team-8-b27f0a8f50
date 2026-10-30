@@ -1,0 +1,462 @@
+# Current project guide for SIDC Lab physical testing
+
+Last reconciled: October 30, 2026 (America/Chicago)
+
+The live https://hackathon.sidclab.org/ page is authoritative. The long section
+below this guide is a preserved copy/paste snapshot and may contain older
+limits, old results, secrets-adjacent URLs, or task descriptions. Do not follow
+the snapshot blindly. Never share the private results URL or the contents of
+hardware/fanuc_cell/.request.json.
+
+The complete maintained procedure is:
+
+  docs/PHYSICAL_HARDWARE_TEST_SETUP.md
+
+If any term or command is unclear, ask your coding AI or the project lead before
+using the physical slot. The AI should explain what the command reads, changes,
+and sends rather than merely repeating it.
+
+CURRENT VERIFIED PROJECT STATE
+
+- The official client and cube policy have run on the physical FANUC ER-4iA.
+- Recorded rollout 5 camera-verified all three red/yellow/blue cube placements
+  in fixed virtual-table destination zones.
+- This does not prove force/contact sensing, full swept-path collision safety,
+  arbitrary layouts, or a general object policy.
+- Hardware cube vision requires an explicit 10 mm or 16 mm profile. The actual
+  object must be measured or confirmed by the operator.
+- The current hardware policy expects one red, yellow, and blue cube. It does
+  not yet execute screws.
+- The scripted cube-and-screw Isaac demo uses configured screw poses. It is not
+  a camera-derived or hardware-ready screw policy.
+- Table RGB is the only camera currently trusted for motion coordinates. Side
+  and wrist cameras are diagnostic until their bias/timing/calibration and hose
+  occlusion are resolved.
+
+CURRENT LIVE LIMIT NOTE
+
+On October 30, 2026 the live site listed 150 mm/s, 15 mm per row, 60 mm queued
+ahead, and 10 degrees per row. The preserved snapshot below contains older
+100 mm/s, 12 mm, 40 mm, and 8 degree values. Recheck the live page before each
+request. This project intentionally remains more conservative at 5 mm per
+Cartesian row and a nominal 50 mm/s.
+
+BEGINNER COMMAND SEQUENCE
+
+Run from the repository root unless a step says otherwise.
+
+1. Prepare the client and run tests:
+
+   cd hardware/fanuc_cell
+   uv sync
+   cd ../..
+   uv run --project hardware/fanuc_cell python -m unittest discover -s tests -v
+
+2. Inspect settings without contacting the cell:
+
+   cd hardware/fanuc_cell
+   uv run supervised_run.py hover --cube-mm 16 --dry-run
+
+   Replace 16 with 10 only for a measured/operator-confirmed 10 mm cube.
+
+3. Run the localhost-only mock:
+
+   uv run supervised_run.py hover --cube-mm 16 --mock --trials 1 --trial-s 2
+
+   A passing mock checks protocol and target limits only. It does not test the
+   real cameras, grasp, collision clearance, or robot.
+
+4. Make submission/submission.yaml and placement.yaml match the actual test.
+
+   The checked-in YAML still has team/contact/task TODOs and describes 10 mm
+   cubes plus physical bins. Do not submit it unchanged for a 16 mm/no-bucket
+   virtual-table run. Do not invent the team/contact fields. Confirm object
+   labels and the layout with organizers.
+
+5. Submit, book, and check status:
+
+   uv run run.py --submit
+   uv run run.py --status
+
+   Book the printed request ID for an approved 30-minute slot. Keep
+   .request.json and the private results link secret.
+
+6. During the approved slot, run the ladder in order:
+
+   uv run supervised_run.py hold
+
+   This repeats one fresh measured TCP/gripper row. It is not read-only, a true
+   no-op, a safety system, or an emergency stop.
+
+   uv run supervised_run.py hover --cube-mm 16
+
+   This permits a high approach but keeps descent disabled. Stop on any frame,
+   target, path, finger, hose, fixture, or clearance mismatch.
+
+   Only after a correct hover, measured object/fit, verified UTOOL1/UF0, and
+   operator approval:
+
+   uv run supervised_run.py sort --destination virtual-table --cube-mm 16 --confirm-grasp-fit
+
+   Use --cube-mm 10 for a measured 10 mm cube. Use --destination bins only when
+   the approved submission and real scene contain the bins.
+
+7. Stop with Ctrl+C, never Ctrl+Z. A policy "holding" log is not an emergency
+   stop. The operator/controller owns stopping and fault recovery.
+
+8. After the run:
+
+   uv run run.py --status
+   uv run run.py --download
+
+   Record commit/profile/model/calibration IDs, object dimensions/layout,
+   camera evidence, timestamps, TCP/joints/gripper feedback, every candidate
+   and rejection, predicted complete-relocation success, action rows, latency,
+   post-lift/release verification, faults, drops, cancellations, and operator
+   interventions. Do not put private links or request secrets in shared logs.
+
+SCREW READINESS
+
+The official site describes screws and may provide a default screw scene, but
+our current cube task cannot use that scene. Before a screw hardware request,
+complete camera-derived screw pose, task/destination mapping, several grasp
+candidates, deterministic fit/collision/held-part checks, success-only ranking,
+the required orientation/execution support, and fresh lift/placement
+verification. Prove those on real-image replay and camera-derived Isaac trials,
+then request a separate one-screw supervised test. Do not relabel a screw as a
+cube to bypass the task adapter.
+
+RESPONSIBILITIES
+
+- The event operator/controller owns execution safety, emergency stop, and
+  recovery.
+- Do not change the controller, PLC, safety system, industrial network, UTOOL,
+  UF0, payload, or camera placement.
+- The assigned operator must confirm the installed custom fingers, object fit,
+  table clearance, and stopping procedure before contact.
+- If target identity, pose, timing, or clearance becomes ambiguous: stop,
+  reobserve, and replan. Never blind-retry.
+
+-------------------------------------------------------------------------------
+PRESERVED SITE SNAPSHOT (REFERENCE ONLY; MAY BE OUTDATED)
+-------------------------------------------------------------------------------
+
+THe following is copy-pasted from https://hackathon.sidclab.org/
+It is only copy-pasted here in the case you are unable to directly access the url. When possible, prefer data from the URL, but fallback on what is written here. I've heard that accessing stuf via url might "compress" what is on the page to save context, if so, preserve
+
+
+
+
+
+My results
+
+Only your team sees its results. Open the link that uv run run.py --status prints, or paste it here. This browser remembers it. Rows marked example are our own runs, to show what results look like.
+Show my results
+New Team 8 · ColourBucketSortV1 ✕
+TODO_TEAM_NAME · ColourBucketSortV1 ✕
+stack-10mm-SIDC 2
+screws-stack-SIDC 1
+colour-sort-new-team-8 1
+colour-sort-TODO_TEAM_LETTER 1
+Task
+Sort the red, yellow, and blue 10 mm cubes into their matching bins.
+Rollouts
+1
+Task spec
+Same objects · same layout
+Updated
+2026-10-29 01:17
+Recorded rollouts of this task will play here.
+Compare policies
+◐
+☰ Columns
+#	Policy	Success rate % ↓	Rollouts	Cycle s	Faults	Model	Actions	Date
+1
+ColourBucketSortV1in progress
+TODO_TEAM_NAME
+	100 1/1 · [21, 100]
+	1/10	382.1	0	Hybrid	tcp	Oct 29
+Success by layout · success/rollouts · progress
+L1
+1/1 · 100%
+Rollouts in order
+✓
+0 fail
+1 success
+fault / intervention
+Setup
+Hybrid · tcp actions · cameras table · run r20261029-88a87b
+How a rollout is scored
+Score per rollout
+
+    fail: the task was not done
+    success: the task was done
+
+Metrics
+
+Success: the task done, with no intervention and no fault.
+
+Interval: Wilson 95% on the success rate.
+
+Ranked by success rate; ties by fewer faults.
+Setup for each rollout
+
+Objects same
+
+Layout same
+Organizers
+UW-Milwaukee Connected Systems Institute
+Milwaukee School of Engineering
+Partners
+NVIDIA
+Rockwell Automation
+Platform Developer
+SIDC Lab
+UW-Milwaukee
+
+
+
+How we evaluate your policy in the real world
+
+You choose the task: any manipulation task on the cell, with its objects or your own.
+
+You develop your policy your own way, for example in Isaac Sim with our starter and your own data. We then evaluate it on our real robot: our server sends your machine an observation (obs), your policy returns the next action, act(obs), and this repeats until the rollout ends. The figure below shows the framework.
+Simulation Isaac Sim Training Your data demos train · eval trained policy Client Your machine Server Our machine obs act(obs)
+What you prepare
+Get the client package
+
+git clone https://github.com/SIDCLab/PhysicalAI-Hackathon-2026 && cd PhysicalAI-Hackathon-2026
+uv sync
+Copy
+
+Wrap your sim model
+
+Wrap the model you trained in simulation in policy.py. Observation and action formats ↗
+Check formats and connection
+
+Runs your policy against a stand-in for the cell on your machine, with no robot. It ends with ✓ Ready for the real robot, or tells you what to fix. Its images are synthetic: it checks the formats and the connection, not whether your policy succeeds.
+
+uv run run.py --mock
+Copy
+
+Describe your task and submit
+
+Fill in submission/submission.yaml, and submission/placement.yaml unless your task uses our default scene (8 screws and the yellow bin, the same every rollout), then send it:
+
+uv run run.py --submit
+Copy
+
+Then pick a slot in the Calendar tab with the request id it prints; we approve your request for that slot. We keep adding available slots.
+Run during your slot
+
+Once we approve your request, your client picks up its token by itself and waits for the operator.
+
+uv run run.py
+Copy
+
+Every rollout is recorded and appears with its score and videos under My results. Only your team sees them: open the link that uv run run.py --status prints.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Track 3 · Act on it: teach the robot
+Participant
+Organizer
+Physical AI Hackathon for the Factory Floor (2026)
+Participant dashboard
+
+An online platform for standardized submission, remote execution, and reproducible evaluation of robot policies on physical robots.
+UWMISC
+My results
+Submit a policy
+FAQ
+Resources
+Calendar
+Getting started
+Does the client run on my computer?
+
+Yes, on Linux and macOS, Apple Silicon included: it needs uv and git. Tell us if anything fails on your machine.
+Where does my policy run?
+
+On your own machine. The cell sends your policy an observation, your act(obs) returns the next action, and the cell plays it on the robot. This repeats until the rollout ends.
+Observations and actions
+What does my policy receive?
+
+obs["images"]: the cameras you list in CAMERAS, from table, side and wrist, at the size you set in IMAGE_SIZE (default 640 × 360), as PNG or JPEG. Each image is the whole camera frame, resized (not cropped), and each observation carries each camera's latest frame.
+
+obs["joints"]: J1–J6 in degrees and the gripper (0 open, 1 closed). obs["tcp_pose"]: the fingertip [x, y, z, w, p, r] in mm and degrees. obs["trial"]: the current rollout, with its instruction.
+Do I need the camera calibration?
+
+Usually not. The cameras in the starter's Isaac Sim scene are already placed with it, so a policy trained there sees the cell as the real cameras do.
+
+The copy under calibration/ in the client package is optional: it is for code that turns real image pixels or depth into robot coordinates, such as a planner or a VLM pipeline. cameras.json holds each camera's intrinsics and pose, FRAMES.md defines the frames, and geometry.py maps a table-image pixel to a point on the table (pixel_to_base).
+Can my policy get depth?
+
+Yes, from the table and the wrist cameras. Set DEPTH = ["table"], ["wrist"] or both in policy.py: obs["depth"] then holds a uint16 image per camera, in millimetres along that camera's optical axis (0 = no depth), refreshed about 10 times a second: 640 × 400 for the table, 848 × 480 for the wrist (the wrist colour image's view).
+
+calibration.geometry.depth_to_base(load()["table_depth"], depth) turns it into points in the robot base frame. The wrist camera moves with the arm: pass the same observation's joints too, depth_to_base(load()["wrist_depth"], depth, joints=obs["joints"]).
+
+The table camera does not see screws: to find screws or small cubes in depth, use the wrist camera close up (fingertips within about 8 cm of the table). Depth is not recorded.
+In "tcp" mode, which frame and conventions?
+
+The fingertip (the controller's UTOOL1) in user frame UF0, in mm. x and y are the robot base's (x forward, y left); zUF0 = zbase − 330 mm, so the work surface is at about −335 mm. w, p, r are FANUC's rotations about x, y and z in degrees: −180, 0, R points the fingers straight down, and R turns them about z.
+
+The gripper only opens and closes: 0 open, 1 closed (0.5 or more closes it). It switches once the arm has reached that row's target.
+When is act called, and how does a rollout end?
+
+After the arm has played the target(s) you returned, with a new observation. act has no time limit: the arm holds still while it runs. act may return up to 100 actions at once (an action chunk). Your policy cannot end a rollout: it ends when the operator scores or stops it, or on a controller fault. When your policy is done, hold still by returning the current pose.
+My policy was trained on the starter's 10 Hz data. Does the timing match?
+
+Each target you return plays as one 0.1 s step, as in that data. Rows that move faster than the cell's limits (see the next question) are spread over several steps.
+What should I know about how the real arm moves?
+
+The cell limits every action: the fingertip moves at most 100 mm/s, each row at most 12 mm from the previous target and at most 40 mm ahead of the arm, and turns at most 8° per row (joint actions: at most 8° per joint per row). A target further away is reached over several rows. Targets below z −333 mm are raised to −333 mm (about 2 mm above the table).
+
+The real arm follows its targets a little behind, which the twin does not do, so tcp_pose lags the last target you sent. The gripper opens or closes only once the arm has reached that row's target. Keep targets within about 0.55 m of the base axis: beyond the arm's reach, the controller faults and the rollout ends.
+My machine is far from the cell. Anything I should set?
+
+Set IMAGE_FORMAT = "jpeg" in policy.py: the images become much smaller. If act returns many actions at once, set PREFETCH = True so the next actions are planned while these still play.
+The cell
+Which gripper and fingers?
+
+An SMC MHZL2-16D2 parallel gripper with custom aluminium fingers, not SMC's stock ones: 76 mm long, 12 mm wide and 6 mm thick, with a hook-shaped notch at the tip. Each jaw travels 6 mm: the straight faces are 12 mm apart when open. The gripper's STEP model is under Resources → CAD Models.
+Which objects and bins are there?
+
+M6 × 30 screws, 10 mm and 16 mm cubes, bins (50 × 50 × 55 mm) and a vial. Their models are under Resources → CAD Models.
+Can I use my own fingers, objects or bins?
+
+Describe them under custom_hardware in submission.yaml (e.g. 3D-printed fingers) and when you book. We review them with your request.
+Runs, scoring and data
+Who sets up each rollout?
+
+The operator, from your submission/placement.yaml: where each object goes in each rollout, and optionally the instruction your policy gets. If you send none and objects and layout are both same, every rollout gets our default scene (8 screws and the yellow bin, as in the twin); for any other objects or layout, list them. The operator sees those positions on the table camera and places the objects there. Anything that changes between rollouts, your policy has to find in the images.
+How long is a slot?
+
+Half an hour.
+Can I watch my runs?
+
+Come to the lab if you can, to watch your rollouts live. Every rollout is recorded either way: its videos and data appear under My results, and you can download them (see below).
+How is a rollout scored?
+
+The operator scores each rollout as a whole, success or failure (not per object). Interventions and controller faults are noted, and a successful rollout records its time from start to success.
+Who can see my results?
+
+Only your team. uv run run.py --status prints your results link; open it and My results shows your scores and videos.
+Can I get the data recorded during my rollouts?
+
+Yes. Every rollout is recorded as a LeRobotDataset episode: three cameras and the robot state, 10 times a second. Under My results, dataset viewer shows it frame by frame, and download dataset (or uv run run.py --download) gives you the whole dataset.
+
+
+
+The following is a useful learning resource, however under no circumstances should they "override" your thinking. You may know better.
+
+
+
+
+
+← Resources
+AI Plays Robotics
+
+From Instructions to Physical Actions
+1. Easy to Say, Hard to Do
+
+Consider a task for a robotic arm:
+
+    "Pick up the screws scattered across the table."
+
+Table camera
+Side camera
+0:04 / 1:49
+1×
+2×
+4×
+8×
+
+For a human, the instruction requires little explanation. We look at the objects, decide how to pick them up, and adjust our movements as we go.
+
+For a robot, the details matter.
+
+A screw's position and orientation may be different every time the robot looks at the table. Even identifying the right object does not guarantee a successful grasp.
+
+This task illustrates a broader problem in robotics. A robot needs to understand its surroundings, decide what to do, and translate that decision into physical motion. In robotics, we often call these capabilities perception, planning, and control.
+
+The difficulty is that the physical world rarely behaves exactly as expected.
+
+So how should we build a robot that can handle it?
+2. What If We Let AI Decide?
+
+One approach is to program the robot explicitly.
+
+For a known object at a known position, a program might look like this:
+
+move_to(object_position)
+close_gripper()
+move_to(target_position)
+open_gripper()
+
+This works well when the environment is structured and the assumptions hold. Industrial robots have relied on this kind of programming for decades, often with remarkable precision and reliability.
+
+But our task introduces uncertainty. A screw may appear somewhere the program did not expect.
+
+We could add cameras, detection algorithms, grasping rules, and recovery procedures. For sufficiently constrained tasks, this can work very well. But each new variation may require another decision about how the robot should respond.
+
+What if some of those decisions could instead be made by AI?
+
+Recent advances in robot learning and foundation models[1, 2] offer several ways to approach this. A robot might learn movements from demonstrations, use a vision-language model to reason about a scene, or predict the consequences of an action before executing it.
+
+Rather than prescribing every movement, we can give the system observations and let it determine what actions to take.
+
+This raises another question: what should the AI actually look like?
+3. One Robot, Many Ways to Think
+
+There is no single architecture for turning AI decisions into robot actions.
+
+Some systems learn to map camera images directly to movements. Others separate high-level reasoning from low-level execution. Still others use explicit planners or predictive models of the physical world.
+
+Here are several approaches worth exploring:
+Visuomotor Policy	Learns actions from visual observations and demonstrations
+VLA	Predicts robot actions from images and language instructions
+VLM + BM	Uses a vision-language model to make decisions and a behavior model to execute them
+TAMP + FMs	Combines foundation models with explicit task and motion planning
+WAM	Uses predictions of future world states to guide actions
+Your Architecture	Combines approaches or introduces something new
+
+Each approach offers a different way to tackle the same underlying problem.
+
+For picking screws, a vision-language system might identify the objects and choose grasping strategies, while a motion planner handles the robot's movements.
+
+None of these choices guarantees success.
+
+A model may correctly identify an object but fail to grasp it. A planner may produce a valid trajectory that does not account for an object slipping. A learned policy may perform well on familiar arrangements but struggle when the scene changes.
+
+The interesting question is not just whether an AI can produce a plausible action.
+
+Can it make that action work on a real robot?
+4. Let's Find Out
+
+We provide a shared industrial robotic testbed where you can define your own manipulation task, build your AI policy, and test it on a real robot.
+
+Through a common interface, your AI receives observations and returns robot actions. We handle physical execution and evaluate whether your system completes the task.
+
+What can your AI make a robot do?
+References
+
+    K. Black et al. π0: A Vision-Language-Action Flow Model for General Robot Control. arXiv:2410.24164, 2024.
+    Gemini Robotics Team. Gemini Robotics: Bringing AI into the Physical World. arXiv:2503.20020, 2025.

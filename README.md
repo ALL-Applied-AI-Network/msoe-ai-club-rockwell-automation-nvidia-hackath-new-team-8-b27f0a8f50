@@ -8,20 +8,27 @@ This is your team's repository for the four-week physical AI hackathon run by Ro
 
 ## Brev setup
 
-See [BREV_SETUP.md](BREV_SETUP.md). Coding agents can simply be told: “Set this up.”
+See [BREV_SETUP.md](BREV_SETUP.md). On a teammate's first setup, the coding
+agent asks once whether they are on **computer vision**, **grasping**, or **lead
+development**, then follows that role's setup guide and working branch. After
+that one role choice, the agent can simply be told: “Set this up.”
 
 ## Simulation demos
 
 - [Scripted colour bucket sort](demos/scripted_colour_bucket_sort/README.md):
   a headless Isaac Sim smoke test that places three coloured cubes into matching
   supplied bin models. Its preserved default mode intentionally uses configured
-  simulator poses; opt-in camera/training modes make decisions from rendered RGB.
-  None of these modes uses Cosmos, and the demo is not proof of real-robot use.
+  simulator poses; opt-in camera/training modes make decisions from rendered
+  RGB. The `--training-data` mode adds seeded appearance, lighting, sensor, and
+  clutter variation and records table/side/wrist artifacts. It is provisional
+  domain randomization matched toward the available recordings—not a claim of
+  photorealism or native camera calibration. None of these modes uses Cosmos.
 - [Scripted cube-and-screw bucket sort](demos/scripted_cube_screw_bucket_sort/README.md):
   a separate headless physics demo that keeps the same three cube placements,
   then grasps two supplied ISO 10642 M6 x 30 screw CAD models by their shafts
   and places both in the red bin. Screw targets are configured simulator poses;
-  the current colour/cube camera detector does not perceive screws.
+  the current colour/cube camera detector does not perceive screws, and this
+  separate demo does not yet have a camera or `--training-data` mode.
 - [Measured hardware-pose shadow replay](demos/hardware_pose_replay/README.md):
   an Isaac-only diagnostic that renders the table, side, and wrist cameras at
   curated measured robot poses. It never replays recorded actions or sends a
@@ -44,18 +51,23 @@ first physical session's no-motion diagnosis and guarded retry commands are in
 [`docs/HARDWARE_FIRST_RUN_DIAGNOSIS.md`](docs/HARDWARE_FIRST_RUN_DIAGNOSIS.md).
 The official mock checks the client contract and action limits; it does **not**
 prove that perception, motion, grasping, collision avoidance, or the physical
-sort works. No physical run has been completed by this project yet.
+sort works. A constrained physical cube run has now been completed: rollout 5
+freshly camera-verified all three red/yellow/blue placements at the configured
+virtual-table destinations. That is evidence for this one cube setup, not proof
+of general collision avoidance, screw handling, or reliable repeated operation.
 
-The preserved simulator task uses **10 mm cubes**. Hardware motion now requires
-an explicit 10 mm or 16 mm camera profile after the placed cube is identified;
-the first resized result video strongly suggests 16 mm but is not a physical
-measurement. UTOOL1/TCP remains assumed at the fingertips following the pinned
-executable client. Separately, an organizer clarified on October 26, 2026 that
-the standard fingers touch the table near UF0 Z = -335 mm; the former -345 mm
-FAQ value came from another group's shorter fingers and was reverted. The
-installed fingers, cube fit, and active UTOOL1/UF0 still require a supervised
-high check before physical descent. Do not treat a policy-issued hold as an
-emergency stop.
+The preserved simulator task and shared planning heights use **10 mm cubes**.
+Physical hardware is separate: its camera adapter requires an explicit 10 mm or
+16 mm observation profile after the placed cube is identified or measured. The
+first resized result video strongly suggests 16 mm but is not a physical
+measurement, and selecting 16 mm does not make the simulator or shared planner
+generally dimension-aware. UTOOL1/TCP remains assumed at the fingertips
+following the pinned executable client. Separately, an organizer clarified on
+October 26, 2026 that the standard fingers touch the table near UF0 Z = -335 mm;
+the former -345 mm FAQ value came from another group's shorter fingers and was
+reverted. The installed fingers, cube fit, and active UTOOL1/UF0 still require a
+supervised high check before physical descent. Do not treat a policy-issued
+hold as an emergency stop.
 
 ## Team integration points
 
@@ -63,11 +75,15 @@ Computer-vision and grasping work plugs into the shared pipeline through
 versioned contracts and independently selectable plugins; teammates add files
 under [`team_plugins`](team_plugins) and select a strict JSON profile instead
 of editing the Isaac or FANUC state machines. Start with the vision team's
-[`AGENTS.md`](team_plugins/computer_vision/AGENTS.md) or the grasp team's
-[`AGENTS.md`](team_plugins/grasping/AGENTS.md). The shared
+[`SETUP.md`](team_plugins/computer_vision/SETUP.md) or the grasp team's
+[`SETUP.md`](team_plugins/grasping/SETUP.md); lead developers use
+[`team_plugins/lead/SETUP.md`](team_plugins/lead/SETUP.md). The shared
 [`docs/TEAM_INTEGRATION.md`](docs/TEAM_INTEGRATION.md) documents every intended
 extension point, exact inputs/outputs, minimal implementations, and contract
-tests.
+tests. The active learned objective is the highest predicted probability of a
+**complete relocation**—acquire, retain through transport, and release on
+command—among candidates that already pass deterministic checks. Elapsed and
+recovery times remain evaluation telemetry; they do not rank grasps.
 
 ## Key dates
 

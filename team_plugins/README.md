@@ -5,6 +5,19 @@ teams. Teammates normally add files below their own subdirectory and select
 them through an integration profile. They do not need to modify the working
 cube demo, physical-robot policy, Isaac adapters, or shared contracts.
 
+Start with the setup guide for your assigned role:
+
+- `computer_vision/SETUP.md` on branch `computer-vision`;
+- `grasping/SETUP.md` on branch `grasping`; or
+- `lead/SETUP.md` on the integration branch `main`.
+
+The active project scope is known cubes plus the supplied ISO 10642 M6×30
+screw. Vision hands off a typed `SceneObservation` (or its validated JSON
+serialization), never a prose string. Grasping selects the feasible candidate
+with the highest predicted probability of retaining the object through the
+complete move and commanded release. Predicting or balancing execution time is
+not part of the current project objective.
+
 The checked-in example factories deliberately reproduce the current baseline:
 
 - `computer_vision/baseline_provider.py` wraps the deterministic table-camera
@@ -31,21 +44,46 @@ have both teams repeatedly edit one shared working profile during development.
 
 ## Parallel-work and merge protocol
 
-1. Each team changes only its owned directory and its own named profile while
-   developing. Small serialized fixtures may be exchanged through reviewed
-   Git files; datasets and model weights stay in documented external storage.
-2. Each team proves its component independently with the other component
-   omitted from the profile, which keeps the checked-in baseline on that side.
-3. The integration lead reviews both nested `AGENTS.md` handoff checklists,
-   then creates and version-bumps a **new** combined profile under `profiles/`.
-   The lead does not copy model code into `sorting_core`.
-4. Run the combined profile first on offline replays, then Isaac camera input.
-   A hardware run is a separate reviewed step; successful imports or simulator
-   motion are not evidence of physical readiness.
-5. If either component needs a shared-contract change, stop and describe the
-   missing field or behavior with a failing fixture. The integration lead owns
-   the reviewed contract/version change so one team cannot silently break the
-   other implementation or the baseline.
+The repository uses `main`, not `master`. Each team changes only its owned
+directory and its own named profile while developing. Small serialized fixtures
+may be exchanged through reviewed Git files; datasets and model weights stay in
+documented external storage.
+
+At the beginning of a work session, before a costly Brev run, and before a
+handoff, update a **clean** team branch. Substitute `grasping` for
+`computer-vision` when appropriate:
+
+```bash
+git switch computer-vision
+git status --short
+# Stop and ask the AI/lead if the status is not empty.
+git fetch origin
+git merge --ff-only origin/computer-vision
+git merge --no-edit origin/main
+```
+
+If Git reports a conflict, do not reset, discard, or guess at another person's
+change. Show the conflicting paths to the AI and integration lead. After the
+merge succeeds, run the role guide's focused tests. Then publish only the team
+branch:
+
+```bash
+git push origin computer-vision
+```
+
+Team members never merge their own branch into `main`. The integration lead:
+
+1. reviews each team handoff and its tests;
+2. creates and version-bumps a **new** combined profile under `profiles/`;
+3. integrates through a reviewed merge or pull request;
+4. runs the combined profile first on offline replays, then Isaac camera input;
+5. treats a physical run as a separate reviewed step—successful imports or
+   simulator motion are not evidence of physical readiness.
+
+If either component needs a shared-contract change, stop and describe the
+missing field or behavior with a failing fixture. The integration lead owns the
+reviewed contract/version change so one team cannot silently break the other
+implementation or the baseline.
 
 This keeps normal merges additive: provider/pipeline modules, their tests, and
 their individual profiles should not overlap. Only the integration lead edits
@@ -114,13 +152,14 @@ feature-schema version.
 |---|---|---|
 | `computer_vision/` | Vision team | Camera inference, pose estimation, tracking, and `SceneObservation` output |
 | `grasping/` | Grasp team | Candidate generation, deterministic feasibility, features, scoring, and selection |
+| `lead/` and `profiles/` | Integration lead | Role onboarding, combined profiles, reviewed cross-team integration |
 | `sorting_core/` | Integration lead | Stable shared contracts and runtime validation |
 | `isaac_bridge/` | Integration lead | Isaac frame and execution adapter |
 | `hardware/fanuc_cell/` | Integration lead/operator workflow | Official physical-cell client and bounded action execution |
 
-Read the `AGENTS.md` inside your team directory before changing anything. It is
-both a human onboarding guide and the instruction boundary for coding agents
-working in that subtree.
+Read the `SETUP.md` and then `AGENTS.md` inside your role directory before
+changing anything. `AGENTS.md` is both a human technical guide and the
+instruction boundary for coding agents working in that subtree.
 
 ## Rules shared by both teams
 
