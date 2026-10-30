@@ -7,8 +7,9 @@ directory.
 
 This repository now has a separate, host-testable data contract:
 
-- `config/synthetic_data_generation.json` defines native table-camera capture
-  and bounded, seeded randomization requests.
+- `config/synthetic_data_generation.json` defines the primary native
+  table-camera contract and bounded, seeded randomization requests; collection
+  validates table, side, and wrist against the same calibration file.
 - `sorting_core.synthetic_data` validates that contract against the checked-in
   physical camera calibration, samples replayable per-episode manifests,
   applies deterministic derived sensor effects, and builds synchronized frame
@@ -27,7 +28,8 @@ This repository now has a separate, host-testable data contract:
 
 ## Non-negotiable capture rules
 
-1. Capture the calibrated table camera at **1920×1080 RGB**.
+1. Capture table and side at **1920×1080 RGB** and wrist at **1280×720 RGB**,
+   matching each checked-in calibration. Only table currently drives motion.
 2. Save a lossless, raw PNG before presentation text or lossy compression.
 3. Keep any augmented image separate from the raw image.
 4. Save the exact camera/calibration version, image timestamp, robot-state
@@ -45,11 +47,13 @@ This repository now has a separate, host-testable data contract:
 
 The capture config references
 `hardware/fanuc_cell/calibration/cameras.json` instead of copying intrinsics.
-The loader rejects a resolution different from the table calibration. The
-optional postprocess adds the table camera's measured one-term radial
-distortion (`k1`) to a pinhole render and applies replayable exposure, white
-balance, gamma, noise, blur, vignette, and JPEG effects. These display-RGB
-effects are robustness approximations, not a physical camera model.
+The loader rejects a resolution different from the selected calibration. The
+postprocess adds each selected camera's measured one-term radial distortion
+(`k1`) to its pinhole render and applies replayable, camera-separated exposure,
+white balance, gamma, noise, blur, vignette, and JPEG effects. These display-RGB
+effects are robustness approximations, not a physical camera model. A separate
+archive preview applies fixed per-camera gains and an I420 round trip without
+claiming to reproduce the downloaded AV1 bitstream.
 
 Training mode also enables the checked-in scan of the real work surface,
 `reference-assets/table/manipbench-table-surface.png`, and removes the pristine
@@ -85,12 +89,13 @@ deliberately exclude the moving robot corridor and saturated objects. Collect
 a native, lossless 1920x1080 real table-camera still before fitting sensor
 noise, precise blur, camera response, or small-object edge appearance.
 
-For an Isaac training run, `--training-cameras table,side,wrist` opt-in saves
-native raw RGB for all three views and camera-specific 640x360 derived previews.
-Raw renders are never overwritten. The optional `--wrist-hose-stress` flag
-adds only a seeded derived wrist occluder and conservative geometry mask; table and side views
-are never hose-augmented. Treat hose views as unlabeled robustness data unless
-the mask is incorporated into visibility labels. See the
+An Isaac training run now defaults to `--training-cameras table,side,wrist` and
+saves native raw and sensor-derived RGB for all three views plus camera-specific
+640x360 archive-domain previews. Raw renders are never overwritten. The
+optional `--wrist-hose-stress` flag adds only a seeded derived wrist occluder,
+its geometry mask, and a conservatively dilated ignore mask for antialias/chroma
+spill; table and side views are never hose-augmented. Exclude the ignore mask
+from supervised pixel loss or treat hose views as unlabeled robustness data. See the
 [scripted demo guide](../demos/scripted_colour_bucket_sort/README.md) for the
 complete command.
 
@@ -136,23 +141,27 @@ to `isaac_randomization_readback.json`.
 ```python
 from sorting_core.synthetic_data import (
     augment_sensor_rgb,
-    load_capture_calibration,
+    load_camera_calibration,
 )
 
-calibration = load_capture_calibration(spec)
+camera_id = "wrist"
+calibration = load_camera_calibration(spec, calibration_entry=camera_id)
 result = augment_sensor_rgb(
     raw_rgb,
     manifest,
     frame_index=frame_number,
     camera_calibration=calibration,
+    camera_id=camera_id,
+    expected_resolution=calibration["size"],
+    apply_calibrated_radial_distortion=True,
 )
 derived_rgb = result.image_rgb
 ```
 
-`raw_rgb` must be the native 1920×1080 `uint8` RGB render. Save it first. The
-result remains 1920×1080 RGB and reports every applied sensor parameter.
-Gaussian noise uses a recorded deterministic per-frame seed derived from the
-episode seed and `frame_index`; adjacent frames do not repeat one noise field.
+`raw_rgb` must be that camera's native `uint8` RGB render. Save it first. The
+result retains native resolution and reports every applied sensor parameter.
+Gaussian noise uses a recorded deterministic seed derived from episode,
+camera, and frame; adjacent frames and different cameras do not share a field.
 Instance masks should use `apply_radial_distortion(..., nearest=True)`; point
 labels should use `distort_points_uv(...)`.
 
@@ -206,10 +215,12 @@ separately and is not an independent placement-success measurement.
 
 The checked-in ranges cover:
 
-- coloured-plastic albedo and roughness, and table roughness;
-- dome/key/fill/rim intensity and light-source size (shadow softness);
+- independent cube and orange/yellow/light-blue destination hue, saturation,
+  brightness, roughness, and table roughness;
+- dome/key/fill/rim intensity, RGB tint, and light-source size (shadow softness);
 - small camera pose and focal perturbations;
-- exposure, white balance, gamma, noise, blur, vignette, and compression;
+- per-camera exposure, white balance, gamma, noise, blur, vignette, distortion,
+  and decoded-image compression approximations;
 - independent cube position/yaw perturbations; and
 - cube mass, physically ordered static/dynamic friction, and restitution.
 
@@ -233,47 +244,53 @@ The task-cube visuals are referenced USD assets with their own variant
 materials. Training mode therefore authors a separate local material for each
 `/World/SortCube*/Visual/Geom/Die`, binds it on that exact mesh, verifies the
 effective binding and shader-input readback, and only then classifies the
-albedo/roughness requests as applied. The table material, lights, cube
-transforms/masses and PhysX coefficients receive the same readback treatment.
+appearance requests as applied. Logical destination labels stay red/yellow/blue
+while independently bound materials render orange/yellow/light-blue to match
+the observed containers. The table material, lights, cube transforms/masses
+and PhysX coefficients receive the same readback treatment.
+The cube base colours are still inherited from the starter asset and have not
+been fitted to isolated real-cube masks. Their randomized jitter is therefore
+coverage around a provisional nominal, not a physical colour calibration.
 When the real printed tabletop artwork overlay is present, its texture remains
 enabled and the collector changes/verifies that overlay shader's roughness too;
 otherwise varying only the hidden material below it would not change pixels.
 
-`effective_camera.json` contains the focal/aperture and USD transform read from
+`effective_camera.json` contains the primary table focal/aperture and USD transform read from
 the live camera prim, not just the requested config. It records both
 `camera_to_world` and `camera_to_robot_base` explicitly (the axes align in this
 twin, while the origins do not) and carries a SHA-256 digest. Every frame label
 embeds that effective metadata and references both episode readback hashes. The
 real-camera lens distortion remains a distinct derived-image transform; it is
-not falsely described as an Isaac camera intrinsic.
+not falsely described as an Isaac camera intrinsic. `camera_validation.json`
+checks table, side, and wrist stage readback against named calibration entries,
+and `geometry_validation.json` records asset hashes, measured dimensions, and
+the known sharp-collider/rounded-visual mismatch.
 
 The following work remains before calling the images a complete perception
 training dataset:
 
-1. vary object count and create deliberate clutter, touching/overlap,
-   occlusion, blocked approaches, and arrival/motion sequences; the current
-   episode always contains exactly three cubes and only perturbs each cube's
-   XY/yaw within a small range;
-2. independently materialize bin materials too if individual-bin appearance
-   variation becomes useful; task cubes are already materialized per instance;
-3. add semantic/instance render passes, measured visibility/occlusion,
+1. extend the new seeded visual-only background distractors into deliberate
+   touching/overlap, target occlusion, blocked approaches, varied target count,
+   and arrival/motion sequences; current clutter is deliberately outside the
+   pickup region, has no collider, and does not prove blocked-grasp handling;
+2. add semantic/instance render passes, measured visibility/occlusion,
    instance masks and—only where the selected model needs them—depth/normals;
-4. validate randomized layouts with complete swept-volume collision checks,
+3. validate randomized layouts with complete swept-volume collision checks,
    not only separation, IK and physical execution gates;
-5. model motion blur, rolling shutter, auto-exposure and the measured camera
+4. model physical motion blur, rolling shutter, auto-exposure and the measured camera
    response instead of generic display-RGB approximations;
-6. add a deployable camera-based post-place outcome check rather than using
+5. add a deployable camera-based post-place outcome check rather than using
    simulator-truth placement scores;
-7. replace every provisional range using physical samples/measurements and
+6. replace every provisional range using physical samples/measurements and
    validate held-out real-camera performance;
-8. decouple capture/label writing from policy success (or label failed decision
+7. decouple capture/label writing from policy success (or label failed decision
    frames), because the current training run aborts before dataset frames when
    randomized appearance defeats the HSV policy and therefore undersamples the
    hardest conditions; and
-9. record the clean project commit, Isaac/renderer build and settings, GPU, and
+8. record the clean project commit, Isaac/renderer build and settings, GPU, and
    driver in each episode manifest; current config/calibration/readback hashes
    do not fully identify the generator runtime; and
-10. measure yaw accuracy at the real camera's native part scale. In the current
+9. measure yaw accuracy at the real camera's native part scale. In the current
     wide table view a 10 mm cube spans only about 14--16 pixels. A fixed 3x3
     morphology opening was therefore disabled after it changed a stationary
     seed-7 cube's estimated yaw by 18.7 degrees. The shared physical-size,

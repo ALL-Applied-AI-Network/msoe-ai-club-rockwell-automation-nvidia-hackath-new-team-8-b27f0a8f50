@@ -142,8 +142,10 @@ artifacts with:
   --training-data --seed 7 --dataset-stride 15
 ```
 
-The default remains table-camera-only. To capture all three simulated cameras
-for teammate integration, opt in explicitly:
+Training mode now captures all three calibrated colour cameras by default.
+The table camera remains the only camera used for motion decisions; side and
+wrist are synchronized auxiliary training/diagnostic views until their
+physical cross-camera errors are validated. An explicit command is:
 
 ```bash
 "$ISAAC/python.sh" \
@@ -154,29 +156,56 @@ for teammate integration, opt in explicitly:
 ```
 
 This writes native, lossless table RGB to `raw_frames/`, native side/wrist RGB
-to `raw_frames/side/` and `raw_frames/wrist/`, and separate 640x360
-camera-matched previews to `deployment_frames/<camera>/`. The previews apply a
-bounded, recorded neutral-colour adjustment and an I420 chroma round trip based
-on privacy-curated compressed hardware video. They do not overwrite the raw
-renders and are not a photometric calibration.
+to `raw_frames/side/` and `raw_frames/wrist/`, and native sensor-derived RGB
+for every selected camera under `sensor_frames/` (the legacy table path stays
+flat; side/wrist use subdirectories). Every camera gets its own checked-in
+radial calibration, deterministic noise seed, exposure/white-balance, gamma,
+vignette, blur, and JPEG robustness transform. Separate 640x360 archive-like
+previews live under `deployment_frames/<camera>/`. Those previews use a fixed,
+recorded camera gain so they do not normalize away randomized exposure, then
+apply an I420 chroma round trip. They approximate the decoded archive domain;
+they do not reproduce the AV1 bitstream or constitute a photometric
+calibration. Raw renders are never overwritten.
+
+Training mode also adds three seeded neutral visual distractors by default,
+outside the active pickup region. Override the count with
+`--neutral-clutter-count 0..4`. This covers background clutter only; it is not
+evidence that blocked-grasp planning or full swept-volume collision avoidance
+works. They deliberately have no colliders, because their placement has not
+been checked against the arm's complete swept volume. The policy still sees
+exactly one target of each logical colour.
+
+The logical destination labels remain red, yellow, and blue, while training
+renders use the observed physical container appearances: orange for the red
+destination, yellow for yellow, and light blue for blue. Cube and destination
+materials vary independently in hue, saturation, brightness, and roughness;
+light intensity, source size, and a conservative RGB tint are also sampled and
+read back from USD. The cube base colours remain the starter asset colours;
+their small jitter is useful coverage but is not a measured fit to masked real
+cube pixels.
 
 The blue hose sometimes blocks the physical wrist camera. Treat that as an
 occlusion robustness problem, not normal appearance. Add
 `--wrist-hose-stress` only with `--training-data --training-cameras
 table,side,wrist`. It affects only derived wrist previews and stores a
 conservative pre-I420 cable-and-shadow geometry mask under
-`occluder_masks/wrist/`; it never alters table/side images or native
-raw frames. These augmented images are unlabeled robustness views unless the
-mask is propagated into the training labels.
+`occluder_masks/wrist/`; a dilated chroma/antialias spill mask is saved under
+`ignore_masks/wrist/`. It never alters table/side images or native raw frames.
+Exclude the ignore mask from supervised pixel loss, or keep these as unlabeled
+robustness views. The mask alone is not an object-visibility measurement.
 
 Training mode implies camera perception and native 1920×1080 rendering. It
 keeps presentation overlays under `frames/`, lossless unannotated renderer
 images under `raw_frames/`, derived distorted/sensor-augmented images under
 `sensor_frames/`, and synchronized JSON under `frame_labels/`. It also writes
 requested and finalized randomization manifests, hashed USD/PhysX evidence in
-`isaac_randomization_readback.json`, and hashed live-camera intrinsics plus
-world/base-frame extrinsics in `effective_camera.json`. Each frame label embeds
-the effective camera readback and both evidence hashes. A run fails rather than
+`isaac_randomization_readback.json`, table-camera readback in
+`effective_camera.json`, all-camera calibration checks in
+`camera_validation.json`, and dimension/asset checks in
+`geometry_validation.json`. The training override replaces rounded camera
+constants with the checked-in physical calibration before sampling the small
+table-camera pose/focal perturbation. Each frame label embeds the effective
+camera readback and all evidence hashes. A run fails rather than
 claiming a sampled parameter that was not actually applied and read back. Each
 label keeps six measured arm-joint angles separate from measured gripper
 opening/closure, derives the measured TCP from articulation readback through
@@ -194,5 +223,9 @@ are explicitly **amodal, image-clipped projections of the simulator-truth 3D
 cuboids**. They are not visible-pixel boxes and do not measure occlusion. The
 pipeline distorts the eight projected cuboid vertices before computing the
 derived-image box. Timestamped 3D poses are present, but visibility fractions,
-instance masks, depth, normals, motion blur, rolling shutter, and a measured
-real-camera response are not yet available.
+instance masks, depth, normals, physical motion blur, rolling shutter,
+auto-exposure, and a measured real-camera response are not yet available. The
+active geometry remains the explicit **10 mm assumption**: a rounded 16 mm
+visual asset scaled to 10 mm with a sharp 10 mm box collider. Measure the
+physical cube before changing that profile; rendering cannot resolve the
+10/16 mm question.

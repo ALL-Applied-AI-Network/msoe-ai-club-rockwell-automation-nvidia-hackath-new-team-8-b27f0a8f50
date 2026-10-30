@@ -8,6 +8,7 @@ and motion path remain available as a regression test.
 
 from __future__ import annotations
 
+import colorsys
 import hashlib
 import json
 import math
@@ -41,9 +42,55 @@ MATERIAL_PARAMETER_NAMES = frozenset(
     {
         "materials.coloured_plastic_roughness",
         "materials.coloured_plastic_albedo_scale",
+        "materials.cube_hue_jitter_deg",
+        "materials.cube_saturation_scale",
         "materials.table_roughness",
     }
 )
+DESTINATION_MATERIAL_PARAMETER_NAMES = frozenset(
+    {
+        "materials.destination_plastic_roughness",
+        "materials.destination_albedo_scale",
+        "materials.destination_hue_jitter_deg",
+        "materials.destination_saturation_scale",
+    }
+)
+LIGHT_COLOR_PARAMETER_NAMES = frozenset(
+    {
+        "lighting.color_r_scale",
+        "lighting.color_g_scale",
+        "lighting.color_b_scale",
+    }
+)
+
+# The logical destination labels deliberately remain red/yellow/blue so the
+# sorting policy and ground-truth schema do not change.  Only their rendered
+# appearances follow the physical orange/yellow/light-blue containers.  The
+# observed hue/saturation values are stable medians from manually isolated
+# regions in table_frame0.png and table_frame400.png (compressed 640x360
+# rollout video).  They are display-RGB evidence, not measured material
+# albedos.  The nominal diffuse values preserve those hue/saturation targets
+# at conservative brightnesses suitable for the existing lighting rig.
+DESTINATION_APPEARANCE_TARGETS: Mapping[str, Mapping[str, Any]] = {
+    "red": {
+        "appearance_name": "orange",
+        "observed_display_hue_deg": 16.5,
+        "observed_display_saturation": 0.760,
+        "nominal_diffuse_rgb": (0.640, 0.288, 0.154),
+    },
+    "yellow": {
+        "appearance_name": "yellow",
+        "observed_display_hue_deg": 46.0,
+        "observed_display_saturation": 0.724,
+        "nominal_diffuse_rgb": (0.780, 0.648, 0.215),
+    },
+    "blue": {
+        "appearance_name": "light_blue",
+        "observed_display_hue_deg": 208.0,
+        "observed_display_saturation": 0.520,
+        "nominal_diffuse_rgb": (0.326, 0.515, 0.680),
+    },
+}
 
 TRAINING_APPEARANCE_PROFILE = {
     "name": "real-table-video-broad-fit-v1",
@@ -129,6 +176,47 @@ def _set_and_verify(attribute: Any, value: float, name: str) -> float:
 
 def _value(manifest: RandomizationManifest, name: str) -> float:
     return float(manifest.value(name))
+
+
+def _vary_rgb(
+    rgb: Any,
+    *,
+    hue_jitter_deg: float,
+    saturation_scale: float,
+    value_scale: float,
+) -> tuple[float, float, float]:
+    """Apply bounded HSV appearance variation to one linear RGB triplet.
+
+    HSV is used only to keep the independently sampled hue and saturation
+    changes interpretable.  The result is still an authored USD diffuse RGB
+    value, not a claim that display RGB is a physical reflectance model.
+    """
+
+    source = np.asarray(rgb, dtype=float)
+    if source.shape != (3,) or not np.all(np.isfinite(source)):
+        raise SyntheticDataError(
+            "material diffuse colour must be three finite values"
+        )
+    if np.any(source < 0.0) or np.any(source > 1.0):
+        raise SyntheticDataError("material diffuse colour must be inside [0, 1]")
+    if saturation_scale <= 0.0 or value_scale <= 0.0:
+        raise SyntheticDataError("material appearance scales must be positive")
+    hue, saturation, value = colorsys.rgb_to_hsv(*(float(v) for v in source))
+    hue = (hue + float(hue_jitter_deg) / 360.0) % 1.0
+    saturation = float(np.clip(saturation * saturation_scale, 0.0, 1.0))
+    value = float(np.clip(value * value_scale, 0.0, 1.0))
+    return tuple(float(v) for v in colorsys.hsv_to_rgb(hue, saturation, value))
+
+
+def _rgb_evidence(rgb: Any) -> dict[str, Any]:
+    values = tuple(float(value) for value in rgb)
+    hue, saturation, value = colorsys.rgb_to_hsv(*values)
+    return {
+        "rgb": list(values),
+        "hue_deg": float(hue * 360.0),
+        "saturation": float(saturation),
+        "value": float(value),
+    }
 
 
 def _rotate(vector: np.ndarray, axis: np.ndarray, angle_deg: float) -> np.ndarray:
@@ -262,9 +350,16 @@ def prepare_prebuild_randomization(
 
     roughness = _value(manifest, "materials.coloured_plastic_roughness")
     albedo_scale = _value(manifest, "materials.coloured_plastic_albedo_scale")
+    hue_jitter_deg = _value(manifest, "materials.cube_hue_jitter_deg")
+    saturation_scale = _value(manifest, "materials.cube_saturation_scale")
     for name in ("plastic_red", "plastic_yellow", "plastic_blue"):
         diffuse, metallic, _ = cell_module._MATERIAL_SPEC[name]
-        varied = tuple(float(np.clip(v * albedo_scale, 0.0, 1.0)) for v in diffuse)
+        varied = _vary_rgb(
+            diffuse,
+            hue_jitter_deg=hue_jitter_deg,
+            saturation_scale=saturation_scale,
+            value_scale=albedo_scale,
+        )
         cell_module._MATERIAL_SPEC[name] = (varied, metallic, roughness)
     table_diffuse, table_metallic, _ = cell_module._MATERIAL_SPEC["table_white"]
     cell_module._MATERIAL_SPEC["table_white"] = (
@@ -315,17 +410,16 @@ def apply_postbuild_randomization(
         base_diffuse, base_metallic, _ = base_values["materials"][
             f"plastic_{colour}"
         ]
-        expected_diffuse = [
-            float(
-                np.clip(
-                    value
-                    * _value(manifest, "materials.coloured_plastic_albedo_scale"),
-                    0.0,
-                    1.0,
-                )
-            )
-            for value in base_diffuse
-        ]
+        expected_diffuse = _vary_rgb(
+            base_diffuse,
+            hue_jitter_deg=_value(manifest, "materials.cube_hue_jitter_deg"),
+            saturation_scale=_value(
+                manifest, "materials.cube_saturation_scale"
+            ),
+            value_scale=_value(
+                manifest, "materials.coloured_plastic_albedo_scale"
+            ),
+        )
         expected_roughness = _value(
             manifest, "materials.coloured_plastic_roughness"
         )
@@ -391,12 +485,16 @@ def apply_postbuild_randomization(
             roughness_readback, expected_roughness, f"{colour} cube roughness"
         )
         material_rows[colour] = {
+            "semantic_label": colour,
+            "appearance_name": colour,
             "task_prim_path": f"/World/SortCube{index}",
             "referenced_visual_mesh_path": mesh_path,
             "effective_material_path": material_path,
             "binding_strength": "strongerThanDescendants",
             "shader_id": str(shader.GetIdAttr().Get()),
             "diffuse_color": diffuse_readback,
+            "base_appearance": _rgb_evidence(base_diffuse),
+            "effective_appearance": _rgb_evidence(diffuse_readback),
             "metallic": metallic_readback,
             "roughness": roughness_readback,
         }
@@ -604,6 +702,46 @@ def apply_postbuild_randomization(
         }
         applied.add(parameter)
 
+    # A small RGB tint variation covers plausible changes in the cell's mixed
+    # illumination without pretending that the compressed rollout calibrated a
+    # physical colour temperature.  Normalize when needed so a white light does
+    # not clip one channel and silently erase a sampled scale.
+    color_scale = np.asarray(
+        [
+            _value(manifest, "lighting.color_r_scale"),
+            _value(manifest, "lighting.color_g_scale"),
+            _value(manifest, "lighting.color_b_scale"),
+        ],
+        dtype=float,
+    )
+    for path in light_scales:
+        prim = stage.GetPrimAtPath(path)
+        attribute = prim.GetAttribute("inputs:color") if prim.IsValid() else None
+        if attribute is None or not attribute.IsValid():
+            raise SyntheticDataError(f"Isaac light is missing color: {path}")
+        original_value = attribute.Get()
+        if original_value is None:
+            raise SyntheticDataError(f"Isaac light returned no color: {path}")
+        original_color = np.asarray(original_value, dtype=float)
+        if original_color.shape != (3,) or not np.all(np.isfinite(original_color)):
+            raise SyntheticDataError(f"Isaac light color is invalid: {path}")
+        expected_color = original_color * color_scale
+        maximum = float(np.max(expected_color))
+        if maximum > 1.0:
+            expected_color /= maximum
+        if attribute.Set(Gf.Vec3f(*(float(v) for v in expected_color))) is False:
+            raise SyntheticDataError(f"Isaac refused to set {path} color")
+        actual_color = [float(value) for value in attribute.Get()]
+        _assert_close(actual_color, expected_color, f"{path} color")
+        readback["lighting"][path].update(
+            {
+                "original_color": [float(value) for value in original_color],
+                "sampled_color_scale": [float(value) for value in color_scale],
+                "color": actual_color,
+            }
+        )
+    applied.update(LIGHT_COLOR_PARAMETER_NAMES)
+
     size_scale = _value(manifest, "lighting.source_size_scale")
     for path in ("/World/KeyLight", "/World/FillLight", "/World/RimLight"):
         prim = stage.GetPrimAtPath(path)
@@ -638,6 +776,162 @@ def apply_postbuild_randomization(
         readback.setdefault("physics_material", {})[parameter] = actual
         applied.add(parameter)
     return applied, _with_sha256(readback)
+
+
+def apply_destination_material_randomization(
+    stage: Any,
+    manifest: RandomizationManifest,
+    *,
+    stage_readback: Mapping[str, Any] | None = None,
+) -> tuple[set[str], dict[str, Any]]:
+    """Bind audited orange/yellow/light-blue materials after bins exist.
+
+    The scripted demo creates destination meshes after ``cell.build(stage)``,
+    so this is intentionally separate from :func:`apply_postbuild_randomization`.
+    Logical labels and prim paths remain red/yellow/blue; only the appearance is
+    changed.  Passing the earlier stage readback merges and re-hashes the
+    destination evidence so the caller can keep one authoritative artifact.
+    """
+
+    from pxr import Gf, Sdf, UsdGeom, UsdShade
+
+    if stage_readback is None:
+        readback: dict[str, Any] = {
+            "schema_version": 1,
+            "source": "USD/PhysX readback after training scene construction",
+            "requested_manifest_sha256": manifest.sha256,
+        }
+    else:
+        readback = dict(stage_readback)
+        supplied_sha256 = readback.pop("sha256", None)
+        expected_sha256 = _with_sha256(readback)["sha256"]
+        if supplied_sha256 != expected_sha256:
+            raise SyntheticDataError(
+                "stage randomization readback changed before destination binding"
+            )
+        if readback.get("requested_manifest_sha256") != manifest.sha256:
+            raise SyntheticDataError(
+                "destination material manifest does not match stage readback"
+            )
+
+    materials_readback = dict(readback.get("materials", {}))
+    if "destinations" in materials_readback:
+        raise SyntheticDataError("destination materials were already applied")
+
+    UsdGeom.Scope.Define(stage, "/World/Looks/TrainingData")
+    roughness = _value(manifest, "materials.destination_plastic_roughness")
+    hue_jitter_deg = _value(manifest, "materials.destination_hue_jitter_deg")
+    saturation_scale = _value(
+        manifest, "materials.destination_saturation_scale"
+    )
+    albedo_scale = _value(manifest, "materials.destination_albedo_scale")
+    rows: dict[str, Any] = {}
+    for semantic_label in COLOURS:
+        target = DESTINATION_APPEARANCE_TARGETS[semantic_label]
+        appearance_name = str(target["appearance_name"])
+        base_diffuse = tuple(float(v) for v in target["nominal_diffuse_rgb"])
+        expected_diffuse = _vary_rgb(
+            base_diffuse,
+            hue_jitter_deg=hue_jitter_deg,
+            saturation_scale=saturation_scale,
+            value_scale=albedo_scale,
+        )
+        material_path = (
+            f"/World/Looks/TrainingData/Destination_{semantic_label}_"
+            f"{appearance_name}"
+        )
+        shader_path = material_path + "/PreviewSurface"
+        material = UsdShade.Material.Define(stage, material_path)
+        shader = UsdShade.Shader.Define(stage, shader_path)
+        shader.CreateIdAttr("UsdPreviewSurface")
+        diffuse_input = shader.CreateInput(
+            "diffuseColor", Sdf.ValueTypeNames.Color3f
+        )
+        metallic_input = shader.CreateInput("metallic", Sdf.ValueTypeNames.Float)
+        roughness_input = shader.CreateInput(
+            "roughness", Sdf.ValueTypeNames.Float
+        )
+        diffuse_input.Set(Gf.Vec3f(*expected_diffuse))
+        metallic_input.Set(0.0)
+        roughness_input.Set(roughness)
+        shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+        material.CreateSurfaceOutput().ConnectToSource(
+            shader.ConnectableAPI(), "surface"
+        )
+
+        prim_path = f"/World/ColourBin_{semantic_label}"
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            raise SyntheticDataError(
+                f"destination visual prim is missing; call after add_bin: {prim_path}"
+            )
+        binding_api = UsdShade.MaterialBindingAPI.Apply(prim)
+        binding_api.Bind(
+            material,
+            bindingStrength=UsdShade.Tokens.strongerThanDescendants,
+        )
+        bound_result = binding_api.ComputeBoundMaterial()
+        bound_material = (
+            bound_result[0] if isinstance(bound_result, tuple) else bound_result
+        )
+        if (
+            not bound_material
+            or bound_material.GetPrim().GetPath() != material.GetPrim().GetPath()
+        ):
+            bound_path = (
+                None
+                if not bound_material
+                else str(bound_material.GetPrim().GetPath())
+            )
+            raise SyntheticDataError(
+                f"destination material binding did not take for {prim_path}: "
+                f"got {bound_path}, expected {material_path}"
+            )
+
+        diffuse_readback = [float(value) for value in diffuse_input.Get()]
+        metallic_readback = float(metallic_input.Get())
+        roughness_readback = float(roughness_input.Get())
+        _assert_close(
+            diffuse_readback,
+            expected_diffuse,
+            f"{semantic_label}/{appearance_name} destination diffuse colour",
+        )
+        _assert_close(metallic_readback, 0.0, "destination metallic")
+        _assert_close(
+            roughness_readback,
+            roughness,
+            f"{semantic_label} destination roughness",
+        )
+        rows[semantic_label] = {
+            "semantic_label": semantic_label,
+            "appearance_name": appearance_name,
+            "prim_path": prim_path,
+            "effective_material_path": material_path,
+            "binding_strength": "strongerThanDescendants",
+            "shader_id": str(shader.GetIdAttr().Get()),
+            "evidence_source_files": [
+                "../HardwareResults/HardwareResultVideos/table_frame0.png",
+                "../HardwareResults/HardwareResultVideos/table_frame400.png",
+            ],
+            "observed_compressed_display_hue_deg": float(
+                target["observed_display_hue_deg"]
+            ),
+            "observed_compressed_display_saturation": float(
+                target["observed_display_saturation"]
+            ),
+            "evidence_limitation": (
+                "display-RGB median from compressed 640x360 video; not a "
+                "measured physical albedo"
+            ),
+            "base_appearance": _rgb_evidence(base_diffuse),
+            "effective_appearance": _rgb_evidence(diffuse_readback),
+            "metallic": metallic_readback,
+            "roughness": roughness_readback,
+        }
+
+    materials_readback["destinations"] = rows
+    readback["materials"] = materials_readback
+    return set(DESTINATION_MATERIAL_PARAMETER_NAMES), _with_sha256(readback)
 
 
 def readback_effective_camera(
@@ -780,6 +1074,7 @@ def readback_effective_camera(
 
 
 __all__ = [
+    "apply_destination_material_randomization",
     "apply_postbuild_randomization",
     "prepare_prebuild_randomization",
     "readback_effective_camera",

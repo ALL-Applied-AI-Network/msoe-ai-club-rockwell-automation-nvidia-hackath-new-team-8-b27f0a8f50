@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "purpose": "Seeded, replayable synthetic-data capture for the colour-bucket sorting task. Broad exposure, colour-cast, vignetting, and tabletop appearance ranges were fitted from compressed real table-camera rollouts; remaining ranges are conservative engineering starting values.",
+  "purpose": "Seeded, replayable synthetic-data capture for the colour-bucket sorting task. Broad exposure, colour-cast, vignetting, tabletop appearance, and destination display hues were fitted from compressed real table-camera rollouts; remaining ranges are conservative engineering starting values.",
   "capture": {
     "camera_name": "table",
     "resolution": [1920, 1080],
@@ -15,7 +15,7 @@
   },
   "range_status": {
     "name": "provisional_unmeasured",
-    "warning": "The appearance profile is only a broad fit to compressed 640x360 hardware video. Native sensor noise, precise blur, camera response, small-object edges, materials, and physics remain unmeasured. Record sampled and actually applied values separately and validate on native held-out images before claiming sim-to-real accuracy."
+    "warning": "The appearance profile is only a broad fit to compressed 640x360 hardware video. Orange/yellow/light-blue destination hue and saturation targets are display-RGB observations, not measured material albedos. Cube base colours still come from the starter asset and have not been fitted to masked real-cube samples. Native sensor noise, precise blur, camera response, small-object edges, materials, and physics remain unmeasured. Record sampled and actually applied values separately and validate on native held-out images before claiming sim-to-real accuracy."
   },
   "parameters": {
     "materials.coloured_plastic_roughness": {
@@ -31,6 +31,54 @@
       "distribution": "uniform",
       "minimum": 0.85,
       "maximum": 1.15,
+      "unit": "multiplier",
+      "nominal": 1.0
+    },
+    "materials.cube_hue_jitter_deg": {
+      "consumer": "isaac_stage",
+      "distribution": "uniform",
+      "minimum": -2.0,
+      "maximum": 2.0,
+      "unit": "deg",
+      "nominal": 0.0
+    },
+    "materials.cube_saturation_scale": {
+      "consumer": "isaac_stage",
+      "distribution": "uniform",
+      "minimum": 0.96,
+      "maximum": 1.04,
+      "unit": "multiplier",
+      "nominal": 1.0
+    },
+    "materials.destination_plastic_roughness": {
+      "consumer": "isaac_stage",
+      "distribution": "uniform",
+      "minimum": 0.30,
+      "maximum": 0.50,
+      "unit": "unitless",
+      "nominal": 0.40
+    },
+    "materials.destination_albedo_scale": {
+      "consumer": "isaac_stage",
+      "distribution": "uniform",
+      "minimum": 0.92,
+      "maximum": 1.08,
+      "unit": "multiplier",
+      "nominal": 1.0
+    },
+    "materials.destination_hue_jitter_deg": {
+      "consumer": "isaac_stage",
+      "distribution": "uniform",
+      "minimum": -2.0,
+      "maximum": 2.0,
+      "unit": "deg",
+      "nominal": 0.0
+    },
+    "materials.destination_saturation_scale": {
+      "consumer": "isaac_stage",
+      "distribution": "uniform",
+      "minimum": 0.96,
+      "maximum": 1.04,
       "unit": "multiplier",
       "nominal": 1.0
     },
@@ -79,6 +127,30 @@
       "distribution": "uniform",
       "minimum": 0.75,
       "maximum": 1.25,
+      "unit": "multiplier",
+      "nominal": 1.0
+    },
+    "lighting.color_r_scale": {
+      "consumer": "isaac_stage",
+      "distribution": "uniform",
+      "minimum": 0.98,
+      "maximum": 1.02,
+      "unit": "multiplier",
+      "nominal": 1.0
+    },
+    "lighting.color_g_scale": {
+      "consumer": "isaac_stage",
+      "distribution": "uniform",
+      "minimum": 0.98,
+      "maximum": 1.02,
+      "unit": "multiplier",
+      "nominal": 1.0
+    },
+    "lighting.color_b_scale": {
+      "consumer": "isaac_stage",
+      "distribution": "uniform",
+      "minimum": 0.98,
+      "maximum": 1.02,
       "unit": "multiplier",
       "nominal": 1.0
     },

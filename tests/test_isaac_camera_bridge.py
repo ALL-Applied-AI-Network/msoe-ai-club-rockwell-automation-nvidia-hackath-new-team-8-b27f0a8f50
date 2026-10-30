@@ -113,6 +113,13 @@ class PinholeCameraTests(unittest.TestCase):
 
     def test_training_camera_selection_is_opt_in_and_keeps_table(self):
         self.assertEqual(
+            parse_training_cameras(None, training_data=True),
+            ("table", "side", "wrist"),
+        )
+        self.assertEqual(
+            parse_training_cameras(None, training_data=False), ("table",)
+        )
+        self.assertEqual(
             parse_training_cameras("table,side,wrist", training_data=True),
             ("table", "side", "wrist"),
         )

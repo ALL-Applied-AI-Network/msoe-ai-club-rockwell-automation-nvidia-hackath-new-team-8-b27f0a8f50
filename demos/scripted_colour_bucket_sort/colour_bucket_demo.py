@@ -75,9 +75,21 @@ from sorting_core.camera_appearance import (  # noqa: E402
     create_deployment_preview,
     load_camera_appearance_profiles,
 )
-from sorting_core.synthetic_data import distort_points_uv, write_json_atomic  # noqa: E402
+from sorting_core.synthetic_data import (  # noqa: E402
+    distort_points_uv,
+    load_camera_calibration,
+    write_json_atomic,
+)
 from isaac_bridge import CalibratedPinholeCamera, IsaacCameraSortAdapter  # noqa: E402
+from isaac_bridge.sim_validation import (  # noqa: E402
+    CameraCalibrationExpectation,
+    GeometryExpectation,
+    isaac_camera_config_from_calibration,
+    validate_camera_readback,
+    validate_geometry_readback,
+)
 from isaac_bridge.training_episode import (  # noqa: E402
+    apply_destination_material_randomization,
     apply_training_appearance_profile,
     apply_postbuild_randomization,
     prepare_prebuild_randomization,
@@ -198,10 +210,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--training-cameras",
-        default="table",
+        default=None,
         help=(
             "comma-separated native RGB streams saved by --training-data; "
-            "choices are table,side,wrist and table is always required"
+            "choices are table,side,wrist and table is always required. "
+            "Training mode defaults to all three cameras"
         ),
     )
     parser.add_argument(
@@ -212,14 +225,33 @@ def parse_args() -> argparse.Namespace:
             "wrist previews; raw RGB remains unchanged"
         ),
     )
+    parser.add_argument(
+        "--neutral-clutter-count",
+        type=int,
+        default=None,
+        help=(
+            "number of seeded neutral background distractors (0-4). The "
+            "training-data default is 3; the ordinary demo default is 0. "
+            "Distractors stay outside the active pickup region and are visual-only"
+        ),
+    )
     return parser.parse_args()
 
 
-def parse_training_cameras(value: str, *, training_data: bool) -> tuple[str, ...]:
+def parse_training_cameras(
+    value: str | None, *, training_data: bool
+) -> tuple[str, ...]:
     """Validate opt-in camera capture without changing the default demo."""
 
+    selected = (
+        "table,side,wrist"
+        if value is None and training_data
+        else ("table" if value is None else str(value))
+    )
     requested = tuple(
-        dict.fromkeys(part.strip().lower() for part in str(value).split(",") if part.strip())
+        dict.fromkeys(
+            part.strip().lower() for part in selected.split(",") if part.strip()
+        )
     )
     allowed = {"table", "side", "wrist"}
     unknown = set(requested) - allowed
@@ -232,6 +264,73 @@ def parse_training_cameras(value: str, *, training_data: bool) -> tuple[str, ...
     if not training_data and requested != ("table",):
         raise ValueError("--training-cameras requires --training-data")
     return requested
+
+
+def generate_background_distractors(
+    episode_seed: int, count: int
+) -> tuple[dict[str, object], ...]:
+    """Generate reproducible visual clutter outside the active pickup region.
+
+    These neutral boxes make all three camera streams less visually sterile
+    without changing the one-target-per-colour policy or robot-physics
+    contracts. Their nearest edge remains beyond the configured pickup
+    region's +X boundary. They deliberately have no collider because that
+    simple region check does not prove clearance from the arm's swept volume.
+    This is background-clutter coverage, not blocked-grasp planning.
+    """
+
+    if isinstance(episode_seed, bool) or not isinstance(episode_seed, int):
+        raise ValueError("episode_seed must be an integer")
+    if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 4:
+        raise ValueError("neutral clutter count must be an integer from 0 to 4")
+    digest = hashlib.sha256(
+        f"rockwell-neutral-clutter-v1:{episode_seed}".encode("utf-8")
+    ).digest()
+    rng = np.random.default_rng(int.from_bytes(digest[:8], "big", signed=False))
+    anchors = ((0.605, -0.270), (0.605, -0.090), (0.605, 0.090), (0.605, 0.270))
+    rows = []
+    pickup_x_max = float(TASK_CONFIG.task.pickup_region_base_m["x"][1])
+    for index, (anchor_x, anchor_y) in enumerate(anchors[:count]):
+        size = np.asarray(
+            (
+                rng.uniform(0.014, 0.024),
+                rng.uniform(0.014, 0.024),
+                rng.uniform(0.009, 0.022),
+            ),
+            dtype=float,
+        )
+        centre = np.asarray(
+            (
+                anchor_x + rng.uniform(-0.004, 0.004),
+                anchor_y + rng.uniform(-0.010, 0.010),
+            ),
+            dtype=float,
+        )
+        if centre[0] - size[0] / 2.0 <= pickup_x_max + 0.025:
+            raise RuntimeError("generated distractor entered active pickup clearance")
+        rows.append(
+            {
+                "track_id": f"isaac-neutral-distractor-{index}",
+                "centre_base_xy_m": centre.tolist(),
+                "dimensions_m": size.tolist(),
+                "yaw_deg": float(rng.uniform(-28.0, 28.0)),
+                "class_name": "background_distractor",
+                "colour": "neutral_grey",
+                "physics": "visual-only; no collider",
+            }
+        )
+    return tuple(rows)
+
+
+def _payload_with_sha256(payload: dict[str, object]) -> dict[str, object]:
+    """Attach a stable digest to JSON evidence without hashing the digest."""
+
+    result = dict(payload)
+    encoded = json.dumps(
+        result, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    result["sha256"] = hashlib.sha256(encoded).hexdigest()
+    return result
 
 
 def resolve_bin_model(value: str | None) -> Path:
@@ -447,15 +546,30 @@ def main() -> None:
             "--wrist-hose-stress requires --training-data and wrist in "
             "--training-cameras"
         )
+    neutral_clutter_count = (
+        3
+        if args.neutral_clutter_count is None and args.training_data
+        else int(args.neutral_clutter_count or 0)
+    )
+    if not 0 <= neutral_clutter_count <= 4:
+        raise SystemExit("--neutral-clutter-count must be from 0 to 4")
+    if neutral_clutter_count and not args.training_data:
+        raise SystemExit("--neutral-clutter-count requires --training-data")
+    background_distractors = generate_background_distractors(
+        args.seed, neutral_clutter_count
+    )
     render_resolution = (
         NATIVE_TABLE_RESOLUTION if camera_perception else VIDEO_RESOLUTION
     )
     synthetic_spec = None
     randomization = None
     capture_calibration = None
+    camera_calibrations = None
     applied_randomization: set[str] = set()
     stage_randomization_readback = None
     effective_camera = None
+    camera_validation_evidence = None
+    geometry_validation_evidence = None
     appearance_profile = None
     camera_profiles = None
     if args.training_data:
@@ -466,6 +580,12 @@ def main() -> None:
             episode_id=Path(args.run).resolve().name,
         )
         capture_calibration = load_capture_calibration(synthetic_spec)
+        camera_calibrations = {
+            name: load_camera_calibration(
+                synthetic_spec, calibration_entry=name
+            )
+            for name in ("table", "side", "wrist")
+        }
         camera_profiles = load_camera_appearance_profiles()
     print(
         f"[bucket-demo] shared config schema={TASK_CONFIG.schema_version}; "
@@ -532,6 +652,28 @@ def main() -> None:
     C.CAP_ORIENTATIONS = []
     C.SHOW_BINS = False
     C.SHOW_FIXTURE = False
+    if camera_calibrations is not None:
+        # Replace rounded scene constants with the exact checked-in physical
+        # calibration before the seeded table-camera perturbation is sampled.
+        # This is a training-simulation override only; hardware calibration is
+        # neither edited nor inferred from the simulator.
+        for camera_name, attribute_name in (
+            ("table", "TABLE_CAM"),
+            ("side", "SIDE_CAM"),
+            ("wrist", "WRIST_CAM"),
+        ):
+            previous = dict(getattr(C, attribute_name))
+            calibrated = isaac_camera_config_from_calibration(
+                camera_calibrations[camera_name],
+                parent=previous["parent"],
+                horizontal_aperture_mm=float(previous["horiz_aperture"]),
+                parent_origin_offset_m=(
+                    (0.0, 0.0, C.TABLE_TOP_Z)
+                    if camera_name in {"table", "side"}
+                    else (0.0, 0.0, 0.0)
+                ),
+            )
+            setattr(C, attribute_name, calibrated)
     C.TABLE_CAM = dict(C.TABLE_CAM)
     C.TABLE_CAM["resolution"] = render_resolution
     if randomization is not None:
@@ -616,6 +758,223 @@ def main() -> None:
         for colour in COLOURS:
             add_bin(colour)
 
+        if randomization is not None:
+            destination_applied, stage_randomization_readback = (
+                apply_destination_material_randomization(
+                    stage,
+                    randomization,
+                    stage_readback=stage_randomization_readback,
+                )
+            )
+            applied_randomization.update(destination_applied)
+            # The destination helper merges and re-hashes the earlier stage
+            # evidence now that the late-created bin meshes actually exist.
+            write_json_atomic(
+                run / "isaac_randomization_readback.json",
+                stage_randomization_readback,
+            )
+
+        for index, distractor in enumerate(background_distractors):
+            size = tuple(float(value) for value in distractor["dimensions_m"])
+            x, y = (
+                float(value) for value in distractor["centre_base_xy_m"]
+            )
+            cell.box(
+                stage,
+                f"/World/TrainingBackgroundDistractor_{index}",
+                size=size,
+                pos=(
+                    x,
+                    y,
+                    C.TABLE_TOP_Z + C.SURFACE_DZ + size[2] / 2.0,
+                ),
+                color=(0.24, 0.25, 0.27),
+                kinematic=True,
+                rot=(0.0, 0.0, float(distractor["yaw_deg"])),
+                collision=False,
+                mat="base_grey",
+            )
+
+        if randomization is not None:
+            cube_asset = (
+                Path(cell.__file__).resolve().parent
+                / "assets"
+                / "usd_assets"
+                / "cube.usda"
+            )
+            if not cube_asset.is_file():
+                raise RuntimeError(f"cube visual asset is missing: {cube_asset}")
+            cube_asset_sha256 = hashlib.sha256(cube_asset.read_bytes()).hexdigest()
+            cube_silhouette_id = (
+                f"sha256:{cube_asset_sha256};source_edge_m=0.016;"
+                f"stage_scale={C.CUBE_EDGE / 0.016:.9f}"
+            )
+            cube_expectation = GeometryExpectation.from_measurements(
+                "sort_cube_collision",
+                {
+                    "size_x": C.CUBE_EDGE,
+                    "size_y": C.CUBE_EDGE,
+                    "size_z": C.CUBE_EDGE,
+                },
+                geometry_provenance_id=(
+                    "config/colour_bucket_sort.json#assumptions.cube_edge_m"
+                ),
+                silhouette_provenance_id=cube_silhouette_id,
+            )
+            cube_geometry_rows = {}
+            for index, colour in enumerate(COLOURS):
+                collider_prim = stage.GetPrimAtPath(
+                    f"/World/SortCube{index}/Collider"
+                )
+                if not collider_prim.IsValid():
+                    raise RuntimeError(f"{colour} cube collider is missing")
+                collider = UsdGeom.Cube(collider_prim)
+                authored_size = float(collider.GetSizeAttr().Get())
+                scale_ops = [
+                    op
+                    for op in UsdGeom.Xformable(collider_prim).GetOrderedXformOps()
+                    if op.GetOpName() == "xformOp:scale"
+                ]
+                if len(scale_ops) != 1:
+                    raise RuntimeError(
+                        f"{colour} cube collider must have one scale op"
+                    )
+                scale = [float(value) for value in scale_ops[0].Get()]
+                measured = {
+                    axis: authored_size * scale[axis_index]
+                    for axis_index, axis in enumerate(("size_x", "size_y", "size_z"))
+                }
+                result = validate_geometry_readback(
+                    cube_expectation,
+                    {
+                        "measurements_m": measured,
+                        "geometry_provenance_id": (
+                            "config/colour_bucket_sort.json#assumptions.cube_edge_m"
+                        ),
+                        "silhouette_provenance_id": cube_silhouette_id,
+                    },
+                    tolerance_m=0.00001,
+                )
+                cube_geometry_rows[colour] = {
+                    **result.as_dict(),
+                    "collider_prim_path": str(collider_prim.GetPath()),
+                    "collision_shape": "sharp axis-aligned box in cube-local frame",
+                    "visual_shape": "rounded 16 mm source USDA scaled to active edge",
+                }
+
+            bin_asset_sha256 = hashlib.sha256(bin_model.read_bytes()).hexdigest()
+            bin_silhouette_id = f"sha256:{bin_asset_sha256}"
+            bin_expectation = GeometryExpectation.from_measurements(
+                "destination_bin_visual_and_proxy",
+                {
+                    "outer_x": BIN_OUTER_M,
+                    "outer_y": BIN_OUTER_M,
+                    "height": BIN_HEIGHT_M,
+                    "pocket_x": BIN_POCKET_M,
+                    "pocket_y": BIN_POCKET_M,
+                    "floor_z": BIN_FLOOR_M,
+                },
+                geometry_provenance_id=(
+                    "reference-assets/models/manipbench-bin-50x50x55.stl+"
+                    "config/colour_bucket_sort.json#bin"
+                ),
+                silhouette_provenance_id=bin_silhouette_id,
+            )
+            bin_geometry_rows = {}
+            for colour in COLOURS:
+                mesh = UsdGeom.Mesh(
+                    stage.GetPrimAtPath(f"/World/ColourBin_{colour}")
+                )
+                points = np.asarray(mesh.GetPointsAttr().Get(), dtype=float)
+                if points.ndim != 2 or points.shape[1] != 3:
+                    raise RuntimeError(f"{colour} bin points are invalid")
+                extents = points.max(axis=0) - points.min(axis=0)
+
+                proxy_root = f"/World/ColourBin_{colour}_ProxyCollider"
+
+                def measured_cube_extents(path: str) -> np.ndarray:
+                    prim = stage.GetPrimAtPath(path)
+                    if not prim.IsValid():
+                        raise RuntimeError(f"bin collision proxy is missing: {path}")
+                    cube = UsdGeom.Cube(prim)
+                    authored_size = float(cube.GetSizeAttr().Get())
+                    scale_ops = [
+                        op
+                        for op in UsdGeom.Xformable(prim).GetOrderedXformOps()
+                        if op.GetOpName() == "xformOp:scale"
+                    ]
+                    if len(scale_ops) != 1:
+                        raise RuntimeError(
+                            f"bin collision proxy must have one scale op: {path}"
+                        )
+                    return authored_size * np.asarray(scale_ops[0].Get(), dtype=float)
+
+                floor_extents = measured_cube_extents(f"{proxy_root}/Floor")
+                north_wall_extents = measured_cube_extents(
+                    f"{proxy_root}/Wall_n"
+                )
+                east_wall_extents = measured_cube_extents(
+                    f"{proxy_root}/Wall_e"
+                )
+                proxy_measurements = {
+                    "outer_x": float(floor_extents[0]),
+                    "outer_y": float(floor_extents[1]),
+                    "height": float(extents[2]),
+                    "pocket_x": float(
+                        floor_extents[0] - 2.0 * east_wall_extents[0]
+                    ),
+                    "pocket_y": float(
+                        floor_extents[1] - 2.0 * north_wall_extents[1]
+                    ),
+                    "floor_z": float(floor_extents[2]),
+                }
+                result = validate_geometry_readback(
+                    bin_expectation,
+                    {
+                        "measurements_m": proxy_measurements,
+                        "geometry_provenance_id": (
+                            "reference-assets/models/manipbench-bin-50x50x55.stl+"
+                            "config/colour_bucket_sort.json#bin"
+                        ),
+                        "silhouette_provenance_id": bin_silhouette_id,
+                    },
+                    tolerance_m=0.00005,
+                )
+                bin_geometry_rows[colour] = {
+                    **result.as_dict(),
+                    "visual_prim_path": f"/World/ColourBin_{colour}",
+                    "collision_proxy_prim_paths": [
+                        f"{proxy_root}/Floor",
+                        f"{proxy_root}/Wall_n",
+                        f"{proxy_root}/Wall_s",
+                        f"{proxy_root}/Wall_e",
+                        f"{proxy_root}/Wall_w",
+                    ],
+                    "collision_proxy": (
+                        "static floor/four-wall boxes; sharp pocket corners"
+                    ),
+                    "limitation": (
+                        "proxy is conservative for centred drops but does not "
+                        "match the visual STL's rounded inner corners"
+                    ),
+                }
+            geometry_validation_evidence = _payload_with_sha256(
+                {
+                    "schema_version": 1,
+                    "active_cube_edge_m": C.CUBE_EDGE,
+                    "active_cube_assumption": TASK_CONFIG.cube_size_note,
+                    "cube_visual_asset": str(cube_asset),
+                    "cube_visual_asset_sha256": cube_asset_sha256,
+                    "bin_visual_asset": str(bin_model),
+                    "bin_visual_asset_sha256": bin_asset_sha256,
+                    "cubes": cube_geometry_rows,
+                    "bins": bin_geometry_rows,
+                }
+            )
+            write_json_atomic(
+                run / "geometry_validation.json", geometry_validation_evidence
+            )
+
         wrappers = {}
         for index, colour in enumerate(COLOURS):
             path = f"/World/SortCube{index}"
@@ -699,6 +1058,112 @@ def main() -> None:
                     focal_length_mm=C.TABLE_CAM["focal_length"],
                     horizontal_aperture_mm=C.TABLE_CAM["horiz_aperture"],
                     default_plane_base_z_m=C.SURFACE_DZ,
+                )
+            if randomization is not None:
+                camera_rows = {}
+                for camera_name in training_camera_names:
+                    prim_path, camera_config = camera_specs[camera_name]
+                    prim = stage.GetPrimAtPath(prim_path)
+                    if not prim.IsValid():
+                        raise RuntimeError(f"{camera_name} camera prim is missing")
+                    xformable = UsdGeom.Xformable(prim)
+                    if camera_name == "wrist":
+                        matrix_value = xformable.GetLocalTransformation()
+                        if isinstance(matrix_value, tuple):
+                            matrix_value = matrix_value[0]
+                        origin_offset = np.zeros(3, dtype=float)
+                    else:
+                        matrix_value = xformable.ComputeLocalToWorldTransform(0)
+                        origin_offset = np.asarray(
+                            (0.0, 0.0, C.TABLE_TOP_Z), dtype=float
+                        )
+                    usd_row_matrix = np.asarray(
+                        [
+                            [
+                                float(matrix_value[row][column])
+                                for column in range(4)
+                            ]
+                            for row in range(4)
+                        ],
+                        dtype=float,
+                    )
+                    calibration_transform = np.eye(4, dtype=float)
+                    # USD uses row vectors and camera (+X,+Y,-Z); the physical
+                    # JSON uses column vectors and (+X,+Y-down,+Z-forward).
+                    calibration_transform[:3, 0] = usd_row_matrix[0, :3]
+                    calibration_transform[:3, 1] = -usd_row_matrix[1, :3]
+                    calibration_transform[:3, 2] = -usd_row_matrix[2, :3]
+                    calibration_transform[:3, 3] = (
+                        usd_row_matrix[3, :3] - origin_offset
+                    )
+                    camera_prim = UsdGeom.Camera(prim)
+                    focal_mm = float(camera_prim.GetFocalLengthAttr().Get())
+                    aperture_mm = float(
+                        camera_prim.GetHorizontalApertureAttr().Get()
+                    )
+                    provenance_id = (
+                        "hardware/fanuc_cell/calibration/cameras.json#"
+                        f"{camera_name}"
+                    )
+                    expectation = CameraCalibrationExpectation.from_calibration_mapping(
+                        camera_name,
+                        camera_calibrations[camera_name],
+                        provenance_id=provenance_id,
+                    )
+                    readback = {
+                        "resolution": list(camera_config["resolution"]),
+                        "focal_length_mm": focal_mm,
+                        "horizontal_aperture_mm": aperture_mm,
+                        "projection_provenance_id": provenance_id,
+                        "distortion": {
+                            "k1": float(camera_calibrations[camera_name]["k1"]),
+                            "application": "postprocess",
+                            "provenance_id": provenance_id,
+                        },
+                        "extrinsic_frame": expectation.extrinsic_frame,
+                        "camera_to_parent_row_major": (
+                            calibration_transform.tolist()
+                        ),
+                    }
+                    result = validate_camera_readback(
+                        expectation,
+                        readback,
+                        focal_tolerance_px=(
+                            3.5 if camera_name == "table" else 0.05
+                        ),
+                        require_extrinsics=True,
+                        translation_tolerance_m=(
+                            0.002 if camera_name == "table" else 0.0001
+                        ),
+                        rotation_tolerance_deg=(
+                            0.35 if camera_name == "table" else 0.05
+                        ),
+                    )
+                    camera_rows[camera_name] = {
+                        "validation": result.as_dict(),
+                        "stage_readback": readback,
+                        "calibration_rms_px": float(
+                            camera_calibrations[camera_name]["rms_px"]
+                        ),
+                        "training_pose_randomized": camera_name == "table",
+                        "motion_coordinate_use": (
+                            "table camera only; side/wrist are auxiliary until "
+                            "their real cross-camera errors are resolved"
+                        ),
+                    }
+                camera_validation_evidence = _payload_with_sha256(
+                    {
+                        "schema_version": 1,
+                        "source": (
+                            "live USD stage readback checked against physical "
+                            "camera calibration; radial distortion applied in "
+                            "derived sensor images"
+                        ),
+                        "cameras": camera_rows,
+                    }
+                )
+                write_json_atomic(
+                    run / "camera_validation.json", camera_validation_evidence
                 )
             camera_adapter = IsaacCameraSortAdapter(camera_model, TASK_CONFIG)
 
@@ -885,17 +1350,27 @@ def main() -> None:
 
         def truth_object_labels():
             labels = []
-            half = C.CUBE_EDGE / 2.0
-            for name in COLOURS:
-                pose = cube_pose(name)
-                centre_world = np.asarray(pose["centre"], dtype=float)
+
+            def cuboid_label(
+                *,
+                track_id,
+                class_name,
+                colour,
+                centre_world,
+                rotation,
+                quaternion_wxyz,
+                dimensions_m,
+            ):
+                centre_world = np.asarray(centre_world, dtype=float)
+                rotation = np.asarray(rotation, dtype=float)
+                dimensions = np.asarray(dimensions_m, dtype=float)
                 centre_base = centre_world.copy()
                 centre_base[2] -= C.TABLE_TOP_Z
-                rotation = rotation_matrix_from_quat(pose["orientation_wxyz"])
+                half_extents = dimensions / 2.0
                 corners_base = []
-                for dx in (-half, half):
-                    for dy in (-half, half):
-                        for dz in (-half, half):
+                for dx in (-half_extents[0], half_extents[0]):
+                    for dy in (-half_extents[1], half_extents[1]):
+                        for dz in (-half_extents[2], half_extents[2]):
                             corner_world = centre_world + rotation @ np.array(
                                 [dx, dy, dz], dtype=float
                             )
@@ -920,33 +1395,77 @@ def main() -> None:
                             fx=float(capture_calibration["fx"]),
                             k1=float(capture_calibration["k1"]),
                         )
-                        distorted = np.asarray(distorted, dtype=float)
                         derived_bbox, derived_bbox_status = _clipped_amodal_bbox(
-                            distorted, render_resolution
+                            np.asarray(distorted, dtype=float), render_resolution
                         )
                     else:
                         derived_bbox_status = "not_generated"
+                return {
+                    "track_id": track_id,
+                    "class_name": class_name,
+                    "colour": colour,
+                    "position_base_m": centre_base.tolist(),
+                    "quaternion_base_wxyz": list(quaternion_wxyz),
+                    "dimensions_m": dimensions.tolist(),
+                    # Occlusion requires an instance render pass. Do not pretend
+                    # a projected 3D box measured visible pixels.
+                    "visible_fraction": None,
+                    "visibility_status": "unknown_not_annotated",
+                    "amodal_bbox_type": "projected_3d_cuboid_clipped_to_image",
+                    "raw_amodal_bbox_xyxy_px": raw_bbox,
+                    "raw_amodal_bbox_status": raw_bbox_status,
+                    "derived_amodal_bbox_xyxy_px": derived_bbox,
+                    "derived_amodal_bbox_status": derived_bbox_status,
+                    "instance_mask_relpath": None,
+                }
+
+            for name in COLOURS:
+                pose = cube_pose(name)
+                rotation = rotation_matrix_from_quat(pose["orientation_wxyz"])
                 labels.append(
-                    {
-                        "track_id": f"isaac-{name}-0",
-                        "class_name": "cube",
-                        "colour": name,
-                        "position_base_m": centre_base.tolist(),
-                        "quaternion_base_wxyz": pose["orientation_wxyz"],
-                        "dimensions_m": [C.CUBE_EDGE] * 3,
-                        # Occlusion requires an instance render pass.  Do not
-                        # pretend a projected 3D box measured visibility.
-                        "visible_fraction": None,
-                        "visibility_status": "unknown_not_annotated",
-                        "amodal_bbox_type": (
-                            "projected_3d_cuboid_clipped_to_image"
+                    cuboid_label(
+                        track_id=f"isaac-{name}-0",
+                        class_name="cube",
+                        colour=name,
+                        centre_world=pose["centre"],
+                        rotation=rotation,
+                        quaternion_wxyz=pose["orientation_wxyz"],
+                        dimensions_m=[C.CUBE_EDGE] * 3,
+                    )
+                )
+            for distractor in background_distractors:
+                dimensions = np.asarray(distractor["dimensions_m"], dtype=float)
+                x, y = (
+                    float(value) for value in distractor["centre_base_xy_m"]
+                )
+                yaw = math.radians(float(distractor["yaw_deg"]))
+                rotation = np.asarray(
+                    [
+                        [math.cos(yaw), -math.sin(yaw), 0.0],
+                        [math.sin(yaw), math.cos(yaw), 0.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                    dtype=float,
+                )
+                labels.append(
+                    cuboid_label(
+                        track_id=distractor["track_id"],
+                        class_name=distractor["class_name"],
+                        colour=distractor["colour"],
+                        centre_world=(
+                            x,
+                            y,
+                            C.TABLE_TOP_Z + C.SURFACE_DZ + dimensions[2] / 2.0,
                         ),
-                        "raw_amodal_bbox_xyxy_px": raw_bbox,
-                        "raw_amodal_bbox_status": raw_bbox_status,
-                        "derived_amodal_bbox_xyxy_px": derived_bbox,
-                        "derived_amodal_bbox_status": derived_bbox_status,
-                        "instance_mask_relpath": None,
-                    }
+                        rotation=rotation,
+                        quaternion_wxyz=(
+                            math.cos(yaw / 2.0),
+                            0.0,
+                            0.0,
+                            math.sin(yaw / 2.0),
+                        ),
+                        dimensions_m=dimensions,
+                    )
                 )
             return labels
 
@@ -993,20 +1512,8 @@ def main() -> None:
                     str(raw_path), cv2.cvtColor(raw_rgb, cv2.COLOR_RGB2BGR)
                 ):
                     raise RuntimeError(f"OpenCV could not write {raw_path}")
-                sensor_result = augment_sensor_rgb(
-                    raw_rgb,
-                    randomization,
-                    frame_index=frame_number,
-                    camera_calibration=capture_calibration,
-                )
-                applied_randomization.update(sensor_result.applied_parameters)
-                sensor_path = run / sensor_relative
-                if not cv2.imwrite(
-                    str(sensor_path),
-                    cv2.cvtColor(sensor_result.image_rgb, cv2.COLOR_RGB2BGR),
-                ):
-                    raise RuntimeError(f"OpenCV could not write {sensor_path}")
                 camera_views = {}
+                table_sensor_result = None
                 for camera_name in training_camera_names:
                     view_rgb = raw_rgb if camera_name == "table" else capture_rgb(camera_name)
                     view_raw_relative = (
@@ -1022,8 +1529,42 @@ def main() -> None:
                             cv2.cvtColor(view_rgb, cv2.COLOR_RGB2BGR),
                         ):
                             raise RuntimeError(f"OpenCV could not write {view_raw_path}")
-                    preview_result = create_deployment_preview(
+
+                    view_sensor_relative = (
+                        sensor_relative
+                        if camera_name == "table"
+                        else f"sensor_frames/{camera_name}/f{frame_number:05d}.png"
+                    )
+                    view_sensor_result = augment_sensor_rgb(
                         view_rgb,
+                        randomization,
+                        frame_index=frame_number,
+                        camera_calibration=camera_calibrations[camera_name],
+                        camera_id=camera_name,
+                        expected_resolution=(
+                            camera_profiles.camera(camera_name).native_resolution
+                        ),
+                        apply_calibrated_radial_distortion=True,
+                    )
+                    applied_randomization.update(
+                        view_sensor_result.applied_parameters
+                    )
+                    view_sensor_path = run / view_sensor_relative
+                    view_sensor_path.parent.mkdir(parents=True, exist_ok=True)
+                    if not cv2.imwrite(
+                        str(view_sensor_path),
+                        cv2.cvtColor(
+                            view_sensor_result.image_rgb, cv2.COLOR_RGB2BGR
+                        ),
+                    ):
+                        raise RuntimeError(
+                            f"OpenCV could not write {view_sensor_path}"
+                        )
+                    if camera_name == "table":
+                        table_sensor_result = view_sensor_result
+
+                    preview_result = create_deployment_preview(
+                        view_sensor_result.image_rgb,
                         camera_profiles,
                         camera_id=camera_name,
                         episode_seed=args.seed,
@@ -1031,6 +1572,8 @@ def main() -> None:
                         add_wrist_occlusion=(
                             args.wrist_hose_stress and camera_name == "wrist"
                         ),
+                        photometric_mode="fixed_profile",
+                        compression_domain="archive_yuv420",
                     )
                     preview_relative = (
                         f"deployment_frames/{camera_name}/f{frame_number:05d}.png"
@@ -1043,6 +1586,7 @@ def main() -> None:
                     ):
                         raise RuntimeError(f"OpenCV could not write {preview_path}")
                     mask_relative = None
+                    ignore_mask_relative = None
                     if np.count_nonzero(preview_result.occluder_mask):
                         mask_relative = (
                             f"occluder_masks/{camera_name}/f{frame_number:05d}.png"
@@ -1053,6 +1597,18 @@ def main() -> None:
                             str(mask_path), preview_result.occluder_mask
                         ):
                             raise RuntimeError(f"OpenCV could not write {mask_path}")
+                    if np.count_nonzero(preview_result.ignore_mask):
+                        ignore_mask_relative = (
+                            f"ignore_masks/{camera_name}/f{frame_number:05d}.png"
+                        )
+                        ignore_mask_path = run / ignore_mask_relative
+                        ignore_mask_path.parent.mkdir(parents=True, exist_ok=True)
+                        if not cv2.imwrite(
+                            str(ignore_mask_path), preview_result.ignore_mask
+                        ):
+                            raise RuntimeError(
+                                f"OpenCV could not write {ignore_mask_path}"
+                            )
                     prim_path, camera_config = camera_specs[camera_name]
                     transform = UsdGeom.Xformable(
                         stage.GetPrimAtPath(prim_path)
@@ -1065,8 +1621,13 @@ def main() -> None:
                             int(view_rgb.shape[1]),
                             int(view_rgb.shape[0]),
                         ],
+                        "sensor_image_relpath": view_sensor_relative,
+                        "sensor_processing": dict(
+                            view_sensor_result.processing
+                        ),
                         "deployment_preview_relpath": preview_relative,
                         "synthetic_occluder_mask_relpath": mask_relative,
+                        "synthetic_ignore_mask_relpath": ignore_mask_relative,
                         "deployment_processing": dict(preview_result.processing),
                         "camera_to_world_row_major": [
                             [float(transform[row][column]) for column in range(4)]
@@ -1078,6 +1639,11 @@ def main() -> None:
                             else "unlabeled auxiliary view"
                         ),
                     }
+                    camera_views[camera_name]["deployment_processing"]["input"] = (
+                        "native sensor-augmented RGB; raw lossless RGB retained separately"
+                    )
+                if table_sensor_result is None:
+                    raise RuntimeError("table sensor stream was not generated")
                 capture_time = float(world.current_time)
                 (
                     measured_q,
@@ -1133,7 +1699,7 @@ def main() -> None:
                     objects=object_labels,
                 )
                 record["camera"]["sensor_processing"] = dict(
-                    sensor_result.processing
+                    table_sensor_result.processing
                 )
                 record["camera_views"] = camera_views
                 record["camera_view_synchronization"] = {
@@ -1166,6 +1732,14 @@ def main() -> None:
                         ),
                         "effective_camera_relpath": "effective_camera.json",
                         "effective_camera_sha256": effective_camera["sha256"],
+                        "camera_validation_relpath": "camera_validation.json",
+                        "camera_validation_sha256": (
+                            camera_validation_evidence["sha256"]
+                        ),
+                        "geometry_validation_relpath": "geometry_validation.json",
+                        "geometry_validation_sha256": (
+                            geometry_validation_evidence["sha256"]
+                        ),
                     }
                 )
                 record["synchronization"]["clock_source"] = (
@@ -1679,6 +2253,22 @@ def main() -> None:
                     if randomization is not None
                     else 0
                 ),
+                "sensor_frame_count_by_camera": (
+                    None
+                    if randomization is None
+                    else {
+                        name: len(
+                            list(
+                                (
+                                    sensor_frames
+                                    if name == "table"
+                                    else sensor_frames / name
+                                ).glob("*.png")
+                            )
+                        )
+                        for name in training_camera_names
+                    }
+                ),
                 "raw_frame_count_by_camera": (
                     None
                     if randomization is None
@@ -1708,6 +2298,14 @@ def main() -> None:
                 "wrist_hose_stress_enabled": bool(
                     randomization is not None and args.wrist_hose_stress
                 ),
+                "neutral_background_distractors": {
+                    "count": len(background_distractors),
+                    "objects": list(background_distractors),
+                    "role": (
+                        "seeded visual-only clutter outside the active pickup "
+                        "region; no collider and not blocked-grasp coverage"
+                    ),
+                },
                 "label_record_count": (
                     len(list(frame_labels.glob("*.json")))
                     if randomization is not None
@@ -1739,6 +2337,25 @@ def main() -> None:
                         "path": "effective_camera.json",
                         "sha256": effective_camera["sha256"],
                         "coordinate_frames": ["usd_world", "robot_base"],
+                    }
+                ),
+                "all_camera_calibration_validation": (
+                    None
+                    if camera_validation_evidence is None
+                    else {
+                        "path": "camera_validation.json",
+                        "sha256": camera_validation_evidence["sha256"],
+                        "distortion_domain": "derived sensor images",
+                    }
+                ),
+                "geometry_validation": (
+                    None
+                    if geometry_validation_evidence is None
+                    else {
+                        "path": "geometry_validation.json",
+                        "sha256": geometry_validation_evidence["sha256"],
+                        "cube_collision_limitation": "sharp box",
+                        "bin_collision_limitation": "sharp-corner wall/floor proxy",
                     }
                 ),
                 "camera_decision_input": (

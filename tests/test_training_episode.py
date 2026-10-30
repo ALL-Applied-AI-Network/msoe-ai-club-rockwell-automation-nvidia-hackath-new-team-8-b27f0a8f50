@@ -49,6 +49,61 @@ class ReadbackMetadataTests(unittest.TestCase):
 
 @unittest.skipUnless(HAS_NUMPY, "NumPy is available in the pinned Isaac environment")
 class TrainingEpisodeTests(unittest.TestCase):
+    def test_destination_appearance_keeps_semantics_but_matches_observed_hues(self):
+        from isaac_bridge.training_episode import (
+            DESTINATION_APPEARANCE_TARGETS,
+            DESTINATION_MATERIAL_PARAMETER_NAMES,
+            MATERIAL_PARAMETER_NAMES,
+            _rgb_evidence,
+        )
+
+        self.assertEqual(
+            set(DESTINATION_APPEARANCE_TARGETS), {"red", "yellow", "blue"}
+        )
+        self.assertEqual(
+            {
+                label: target["appearance_name"]
+                for label, target in DESTINATION_APPEARANCE_TARGETS.items()
+            },
+            {"red": "orange", "yellow": "yellow", "blue": "light_blue"},
+        )
+        for target in DESTINATION_APPEARANCE_TARGETS.values():
+            evidence = _rgb_evidence(target["nominal_diffuse_rgb"])
+            self.assertAlmostEqual(
+                evidence["hue_deg"], target["observed_display_hue_deg"], delta=0.6
+            )
+            self.assertAlmostEqual(
+                evidence["saturation"],
+                target["observed_display_saturation"],
+                delta=0.01,
+            )
+        self.assertTrue(
+            DESTINATION_MATERIAL_PARAMETER_NAMES.isdisjoint(
+                MATERIAL_PARAMETER_NAMES
+            )
+        )
+
+    def test_material_and_light_variations_are_independently_sampled(self):
+        from isaac_bridge.training_episode import LIGHT_COLOR_PARAMETER_NAMES
+
+        spec = load_synthetic_data_spec()
+        destination_names = {
+            "materials.destination_plastic_roughness",
+            "materials.destination_albedo_scale",
+            "materials.destination_hue_jitter_deg",
+            "materials.destination_saturation_scale",
+        }
+        cube_names = {
+            "materials.coloured_plastic_roughness",
+            "materials.coloured_plastic_albedo_scale",
+            "materials.cube_hue_jitter_deg",
+            "materials.cube_saturation_scale",
+        }
+        self.assertTrue(destination_names <= set(spec.parameters))
+        self.assertTrue(cube_names <= set(spec.parameters))
+        self.assertTrue(LIGHT_COLOR_PARAMETER_NAMES <= set(spec.parameters))
+        self.assertTrue(destination_names.isdisjoint(cube_names))
+
     def test_camera_matched_table_profile_is_training_only_and_auditable(self):
         from isaac_bridge.training_episode import apply_training_appearance_profile
 

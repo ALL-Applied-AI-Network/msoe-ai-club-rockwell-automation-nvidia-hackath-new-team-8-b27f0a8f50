@@ -27,6 +27,7 @@ from sorting_core.synthetic_data import (  # noqa: E402
     canonical_json_sha256,
     distort_points_uv,
     finalize_application_status,
+    load_camera_calibration,
     load_capture_calibration,
     load_synthetic_data_spec,
     sample_randomization,
@@ -51,6 +52,21 @@ class SyntheticDataConfigTests(unittest.TestCase):
         self.assertEqual(tuple(calibration["size"]), capture.resolution)
         self.assertAlmostEqual(calibration["fx"], 1024.8627910268606)
         self.assertAlmostEqual(calibration["k1"], 0.008859283169230157)
+
+    def test_all_colour_camera_calibrations_are_loadable_at_native_resolution(self):
+        expected = {
+            "table": (1920, 1080),
+            "side": (1920, 1080),
+            "wrist": (1280, 720),
+        }
+        for camera_id, resolution in expected.items():
+            with self.subTest(camera_id=camera_id):
+                calibration = load_camera_calibration(
+                    self.spec, calibration_entry=camera_id
+                )
+                self.assertEqual(tuple(calibration["size"]), resolution)
+                self.assertGreater(float(calibration["fx"]), 0.0)
+                self.assertIn("k1", calibration)
 
     def test_ranges_are_bounded_provisional_and_seeded(self):
         first = sample_randomization(
@@ -191,6 +207,71 @@ class SensorModelTests(unittest.TestCase):
                 self.manifest,
                 frame_index=0,
                 camera_calibration=self.calibration,
+            )
+
+    def test_explicit_camera_seed_is_deterministic_and_camera_specific(self):
+        table = augment_sensor_rgb(
+            self.image,
+            self.manifest,
+            frame_index=12,
+            camera_calibration=self.calibration,
+            camera_id="table",
+        )
+        repeated = augment_sensor_rgb(
+            self.image,
+            self.manifest,
+            frame_index=12,
+            camera_calibration=self.calibration,
+            camera_id="table",
+        )
+        side = augment_sensor_rgb(
+            self.image,
+            self.manifest,
+            frame_index=12,
+            camera_calibration=self.calibration,
+            camera_id="side",
+        )
+        np.testing.assert_array_equal(table.image_rgb, repeated.image_rgb)
+        self.assertEqual(
+            table.processing["sensor_noise_frame_seed"],
+            repeated.processing["sensor_noise_frame_seed"],
+        )
+        self.assertNotEqual(
+            table.processing["sensor_noise_frame_seed"],
+            side.processing["sensor_noise_frame_seed"],
+        )
+        self.assertEqual(table.processing["camera_id"], "table")
+        self.assertEqual(
+            table.processing["sensor_seed_namespace"],
+            "rockwell-sensor-noise-frame-v2-camera",
+        )
+        self.assertFalse(
+            table.processing["compression_domain_approximation"][
+                "deployment_yuv420_or_archive_codec_reproduced"
+            ]
+        )
+
+    def test_explicit_camera_uses_its_calibrated_resolution(self):
+        image = np.full((30, 40, 3), 127, dtype=np.uint8)
+        result = augment_sensor_rgb(
+            image,
+            self.manifest,
+            frame_index=0,
+            camera_calibration={"size": [40, 30], "fx": 22.0, "k1": 0.0},
+            camera_id="wrist",
+        )
+        self.assertEqual(result.image_rgb.shape, image.shape)
+        self.assertEqual(result.processing["input_resolution"], [40, 30])
+        with self.assertRaisesRegex(
+            SyntheticDataError, "calibration size does not match"
+        ):
+            augment_sensor_rgb(
+                image,
+                self.manifest,
+                frame_index=0,
+                camera_calibration={"size": [40, 30], "fx": 22.0, "k1": 0.0},
+                camera_id="wrist",
+                expected_resolution=(42, 30),
             )
 
 

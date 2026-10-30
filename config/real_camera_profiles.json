@@ -31,6 +31,8 @@
       "fit_neutral_luma_p05_median_p95_8bit": [60, 141, 167],
       "heldout_neutral_rgb_median_8bit": [140, 139, 138],
       "heldout_neutral_luma_p05_median_p95_8bit": [52, 139, 166],
+      "fixed_training_rgb_gain": [0.70149255, 0.69651741, 0.68472904],
+      "fixed_training_gain_status": "provisional gain from the current reference Isaac replay neutral median to the curated real-camera fit median; use without per-frame renormalization",
       "profile_status": "curated decoded compressed-video fit; whole-episode held-out check",
       "synthetic_hose_occlusion": {"enabled": false}
     },
@@ -47,6 +49,8 @@
       "fit_neutral_luma_p05_median_p95_8bit": [108, 157, 227],
       "heldout_neutral_rgb_median_8bit": [166, 157, 152],
       "heldout_neutral_luma_p05_median_p95_8bit": [68, 158, 228],
+      "fixed_training_rgb_gain": [0.99397588, 0.92814374, 0.88304096],
+      "fixed_training_gain_status": "provisional gain from the current reference Isaac replay neutral median to the curated real-camera fit median; use without per-frame renormalization",
       "profile_status": "curated decoded compressed-video fit; whole-episode held-out check",
       "synthetic_hose_occlusion": {"enabled": false}
     },
@@ -63,6 +67,8 @@
       "fit_neutral_luma_p05_median_p95_8bit": [135, 151, 163],
       "heldout_neutral_rgb_median_8bit": [147, 147, 149],
       "heldout_neutral_luma_p05_median_p95_8bit": [131, 147, 161],
+      "fixed_training_rgb_gain": [0.72115386, 0.72248805, 0.72380954],
+      "fixed_training_gain_status": "provisional gain from the current reference Isaac replay neutral median to the curated real-camera fit median; use without per-frame renormalization",
       "profile_status": "curated decoded compressed-video fit; wrist held-out shift tracks hose occlusion",
       "synthetic_hose_occlusion": {
         "enabled": true,
@@ -72,6 +78,7 @@
         "blue_rgb": [26, 126, 188],
         "shadow_rgb": [20, 27, 31],
         "shadow_offset_px": [3, 6],
+        "ignore_mask_dilation_px": 3,
         "status": "provisional image-space robustness augmentation",
         "evidence": "The curated stress episodes show a large blue component in 100% of 1 Hz samples with median largest-component area about 9-10%; held-out episode 10 exceeds 2% in about 60% of samples and reaches about 15.5%. The proxy can include blue hardware/cubes and is not a semantic mask."
       }

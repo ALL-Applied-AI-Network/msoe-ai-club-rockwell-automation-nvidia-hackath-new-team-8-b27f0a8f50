@@ -463,8 +463,18 @@ def finalize_application_status(
     return result
 
 
-def load_capture_calibration(spec: SyntheticDataSpec) -> Mapping[str, Any]:
-    """Load the exact calibrated camera entry referenced by the capture policy."""
+def load_camera_calibration(
+    spec: SyntheticDataSpec,
+    *,
+    calibration_entry: str | None = None,
+) -> Mapping[str, Any]:
+    """Load one colour-camera calibration from the capture calibration file.
+
+    ``calibration_entry=None`` preserves the capture-policy behaviour.  An
+    explicit entry lets multi-camera data generation use the table, side, or
+    wrist calibration without duplicating or weakening the checked-in file
+    hash check.
+    """
 
     path, _ = _repo_relative_file(
         spec.capture.calibration_file, "capture.calibration_file"
@@ -472,7 +482,20 @@ def load_capture_calibration(spec: SyntheticDataSpec) -> Mapping[str, Any]:
     if _sha256_bytes(path.read_bytes()) != spec.capture.calibration_sha256:
         raise SyntheticDataError("camera calibration changed after spec was loaded")
     root = _mapping(json.loads(path.read_text(encoding="utf-8")), "calibration")
-    return _mapping(root.get(spec.capture.calibration_entry), "camera calibration")
+    entry = (
+        spec.capture.calibration_entry
+        if calibration_entry is None
+        else str(calibration_entry).strip()
+    )
+    if not entry:
+        raise SyntheticDataError("camera calibration entry must not be empty")
+    return _mapping(root.get(entry), f"camera calibration entry {entry!r}")
+
+
+def load_capture_calibration(spec: SyntheticDataSpec) -> Mapping[str, Any]:
+    """Load the exact calibrated camera entry referenced by the capture policy."""
+
+    return load_camera_calibration(spec)
 
 
 def radial_distortion_maps(
@@ -572,6 +595,9 @@ def augment_sensor_rgb(
     *,
     frame_index: int,
     camera_calibration: Mapping[str, Any] | None = None,
+    camera_id: str | None = None,
+    expected_resolution: Sequence[int] | None = None,
+    apply_calibrated_radial_distortion: bool | None = None,
 ) -> SensorAugmentationResult:
     """Create a deterministic derived RGB image; never overwrite the raw PNG.
 
@@ -587,18 +613,67 @@ def augment_sensor_rgb(
         raise SyntheticDataError("frame_index must be a non-negative integer")
     if frame_index < 0:
         raise SyntheticDataError("frame_index must be a non-negative integer")
-    frame_seed_digest = hashlib.sha256(
-        (
-            "rockwell-sensor-noise-frame-v1:"
-            f"{manifest.sensor_noise_seed}:{frame_index}"
-        ).encode("utf-8")
-    ).digest()
+    legacy_seed_namespace = camera_id is None
+    if camera_id is None:
+        selected_camera = str(manifest.capture.get("camera_name", "capture")).strip()
+    else:
+        selected_camera = str(camera_id).strip().lower()
+        if not selected_camera:
+            raise SyntheticDataError("camera_id must not be empty")
+    if legacy_seed_namespace:
+        seed_namespace = "rockwell-sensor-noise-frame-v1"
+        seed_material = (
+            f"{seed_namespace}:{manifest.sensor_noise_seed}:{frame_index}"
+        )
+    else:
+        seed_namespace = "rockwell-sensor-noise-frame-v2-camera"
+        seed_material = (
+            f"{seed_namespace}:{manifest.sensor_noise_seed}:"
+            f"{selected_camera}:{frame_index}"
+        )
+    frame_seed_digest = hashlib.sha256(seed_material.encode("utf-8")).digest()
     frame_noise_seed = int.from_bytes(frame_seed_digest[:8], "big", signed=False)
 
     image = np.asarray(image_rgb)
     if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
         raise SyntheticDataError("sensor input must be HxWx3 uint8 RGB")
-    expected_width, expected_height = manifest.capture["resolution"]
+    calibration = (
+        None
+        if camera_calibration is None
+        else _mapping(camera_calibration, "camera_calibration")
+    )
+    calibration_size: tuple[int, int] | None = None
+    if calibration is not None:
+        try:
+            calibration_size = tuple(int(v) for v in calibration.get("size", ()))
+        except (TypeError, ValueError) as exc:
+            raise SyntheticDataError(
+                "camera calibration size must contain two integers"
+            ) from exc
+        if len(calibration_size) != 2 or any(value < 2 for value in calibration_size):
+            raise SyntheticDataError(
+                "camera calibration size must contain two positive dimensions"
+            )
+    if expected_resolution is not None:
+        try:
+            selected_resolution = tuple(int(v) for v in expected_resolution)
+        except (TypeError, ValueError) as exc:
+            raise SyntheticDataError(
+                "expected_resolution must contain width and height"
+            ) from exc
+        if len(selected_resolution) != 2 or any(
+            value < 2 for value in selected_resolution
+        ):
+            raise SyntheticDataError(
+                "expected_resolution must contain width and height"
+            )
+    elif not legacy_seed_namespace and calibration_size is not None:
+        selected_resolution = calibration_size
+    else:
+        selected_resolution = tuple(int(v) for v in manifest.capture["resolution"])
+    expected_width, expected_height = selected_resolution
+    if calibration_size is not None and calibration_size != selected_resolution:
+        raise SyntheticDataError("camera calibration size does not match image")
     if (image.shape[1], image.shape[0]) != (expected_width, expected_height):
         raise SyntheticDataError(
             "sensor input must use manifest native capture resolution "
@@ -625,13 +700,22 @@ def augment_sensor_rgb(
             "sensor manifest parameter set changed; update augmentation atomically"
         )
 
+    if (
+        apply_calibrated_radial_distortion is not None
+        and not isinstance(apply_calibrated_radial_distortion, bool)
+    ):
+        raise SyntheticDataError(
+            "apply_calibrated_radial_distortion must be a boolean"
+        )
+    distortion_requested = (
+        bool(manifest.capture["apply_calibrated_radial_distortion"])
+        if apply_calibrated_radial_distortion is None
+        else apply_calibrated_radial_distortion
+    )
     working = image
     distortion_applied = False
-    if bool(manifest.capture["apply_calibrated_radial_distortion"]):
-        calibration = _mapping(camera_calibration, "camera_calibration")
-        calibration_size = tuple(int(v) for v in calibration.get("size", ()))
-        if calibration_size != (expected_width, expected_height):
-            raise SyntheticDataError("camera calibration size does not match image")
+    if distortion_requested:
+        calibration = _mapping(calibration, "camera_calibration")
         working = apply_radial_distortion(
             working,
             fx=_finite(calibration.get("fx"), "camera fx"),
@@ -693,10 +777,26 @@ def augment_sensor_rgb(
         processing={
             "input": "raw lossless pinhole RGB",
             "output": "derived sensor-augmented RGB",
+            "camera_id": selected_camera,
+            "input_resolution": [expected_width, expected_height],
             "calibrated_radial_distortion_applied": distortion_applied,
             "sensor_noise_base_seed": manifest.sensor_noise_seed,
             "sensor_noise_frame_seed": frame_noise_seed,
+            "sensor_seed_namespace": seed_namespace,
             "frame_index": frame_index,
+            "compression_domain_approximation": {
+                "domain": "display-RGB JPEG robustness augmentation",
+                "codec": "jpeg" if quality < 100 else "none",
+                "jpeg_quality": quality,
+                "chroma_subsampling": (
+                    "OpenCV JPEG encoder default; a YUV420 layout is not asserted"
+                ),
+                "deployment_yuv420_or_archive_codec_reproduced": False,
+                "limitation": (
+                    "This stresses a decoded RGB input and does not reproduce "
+                    "the deployment archive's YUV420/codec/rate-control domain."
+                ),
+            },
             "warning": (
                 "Display-RGB approximation only; physical camera response, motion "
                 "blur, auto-exposure and rolling shutter remain unmeasured."
@@ -1019,6 +1119,7 @@ __all__ = [
     "canonical_json_sha256",
     "distort_points_uv",
     "finalize_application_status",
+    "load_camera_calibration",
     "load_capture_calibration",
     "load_synthetic_data_spec",
     "radial_distortion_maps",

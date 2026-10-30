@@ -261,6 +261,7 @@ class HoseOcclusionProfile:
     blue_rgb: tuple[int, int, int] = (0, 0, 0)
     shadow_rgb: tuple[int, int, int] = (0, 0, 0)
     shadow_offset_px: tuple[int, int] = (0, 0)
+    ignore_mask_dilation_px: int = 0
 
 
 @dataclass(frozen=True)
@@ -280,6 +281,8 @@ class CameraAppearanceProfile:
     heldout_neutral_luma_p05_median_p95_8bit: tuple[int, int, int]
     profile_status: str
     hose_occlusion: HoseOcclusionProfile
+    fixed_training_rgb_gain: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    fixed_training_gain_status: str = "identity fallback"
 
 
 @dataclass(frozen=True)
@@ -290,6 +293,10 @@ class CameraAppearanceProfiles:
     deployment_resolution: tuple[int, int]
     deployment_fps: int
     cameras: Mapping[str, CameraAppearanceProfile]
+    deployment_pixel_format: str = "yuv420p"
+    codec_evidence: str = "unknown"
+    crf_evidence: int | None = None
+    preview_approximation: str = "not specified"
 
     def camera(self, camera_id: str) -> CameraAppearanceProfile:
         name = str(camera_id).strip().lower()
@@ -306,6 +313,20 @@ def _rgb8(value: Any, name: str) -> tuple[int, int, int]:
         raise CameraAppearanceError(f"{name} must contain three integers") from exc
     if len(result) != 3 or any(item < 0 or item > 255 for item in result):
         raise CameraAppearanceError(f"{name} must contain three values in [0, 255]")
+    return result  # type: ignore[return-value]
+
+
+def _bounded_rgb_gain(value: Any, name: str) -> tuple[float, float, float]:
+    try:
+        result = tuple(_finite(item, name) for item in value)
+    except TypeError as exc:
+        raise CameraAppearanceError(f"{name} must contain three values") from exc
+    if len(result) != 3 or any(
+        item < 2.0 / 3.0 or item > 1.5 for item in result
+    ):
+        raise CameraAppearanceError(
+            f"{name} must contain three values in [2/3, 1.5]"
+        )
     return result  # type: ignore[return-value]
 
 
@@ -338,6 +359,13 @@ def _parse_hose(value: Any, camera_id: str) -> HoseOcclusionProfile:
         minimum=1,
     )
     offset = _integer_pair(raw.get("shadow_offset_px"), "hose shadow_offset_px")
+    dilation = _integer(
+        raw.get("ignore_mask_dilation_px", 0), "hose ignore_mask_dilation_px"
+    )
+    if not 0 <= dilation <= 32:
+        raise CameraAppearanceError(
+            "hose ignore_mask_dilation_px must be in [0, 32]"
+        )
     return HoseOcclusionProfile(
         enabled=True,
         application_probability=probability,
@@ -346,6 +374,7 @@ def _parse_hose(value: Any, camera_id: str) -> HoseOcclusionProfile:
         blue_rgb=_rgb8(raw.get("blue_rgb"), "hose blue_rgb"),
         shadow_rgb=_rgb8(raw.get("shadow_rgb"), "hose shadow_rgb"),
         shadow_offset_px=offset,
+        ignore_mask_dilation_px=dilation,
     )
 
 
@@ -366,11 +395,25 @@ def load_camera_appearance_profiles(
     )
     if any(value % 2 for value in deployment_resolution):
         raise CameraAppearanceError("YUV420 deployment dimensions must be even")
-    if str(deployment.get("pixel_format", "")).lower() != "yuv420p":
+    deployment_pixel_format = str(
+        deployment.get("pixel_format", "")
+    ).strip().lower()
+    if deployment_pixel_format != "yuv420p":
         raise CameraAppearanceError("deployment pixel format must be yuv420p")
     deployment_fps = _integer(deployment.get("fps"), "deployment fps")
     if deployment_fps <= 0:
         raise CameraAppearanceError("deployment fps must be positive")
+    codec_evidence = str(deployment.get("codec_evidence", "")).strip().lower()
+    if not codec_evidence:
+        raise CameraAppearanceError("deployment codec_evidence is required")
+    crf_evidence = _integer(deployment.get("crf_evidence"), "deployment crf_evidence")
+    if not 0 <= crf_evidence <= 63:
+        raise CameraAppearanceError("deployment crf_evidence must be in [0, 63]")
+    preview_approximation = str(
+        deployment.get("preview_approximation", "")
+    ).strip()
+    if not preview_approximation:
+        raise CameraAppearanceError("deployment preview_approximation is required")
     camera_raw = _mapping(raw.get("cameras"), "cameras")
     if set(camera_raw) != {"table", "side", "wrist"}:
         raise CameraAppearanceError("profiles must define table, side, and wrist")
@@ -444,7 +487,21 @@ def load_camera_appearance_profiles(
             hose_occlusion=_parse_hose(
                 entry.get("synthetic_hose_occlusion"), camera_id
             ),
+            fixed_training_rgb_gain=_bounded_rgb_gain(
+                entry.get("fixed_training_rgb_gain", (1.0, 1.0, 1.0)),
+                f"{camera_id} fixed_training_rgb_gain",
+            ),
+            fixed_training_gain_status=str(
+                entry.get(
+                    "fixed_training_gain_status",
+                    "identity fallback for a legacy profile without a fitted gain",
+                )
+            ).strip(),
         )
+        if not cameras[camera_id].fixed_training_gain_status:
+            raise CameraAppearanceError(
+                f"{camera_id} fixed_training_gain_status is required"
+            )
     try:
         source_path = source.relative_to(REPO_ROOT).as_posix()
     except ValueError:
@@ -460,6 +517,10 @@ def load_camera_appearance_profiles(
         deployment_resolution=deployment_resolution,
         deployment_fps=deployment_fps,
         cameras=cameras,
+        deployment_pixel_format=deployment_pixel_format,
+        codec_evidence=codec_evidence,
+        crf_evidence=crf_evidence,
+        preview_approximation=preview_approximation,
     )
 
 
@@ -468,6 +529,7 @@ class DeploymentPreviewResult:
     image_rgb: Any
     occluder_mask: Any
     processing: Mapping[str, Any]
+    ignore_mask: Any = None
 
 
 def camera_neutral_region_masks(
@@ -666,6 +728,35 @@ def _match_neutral_median(image_rgb, target_rgb_8bit, camera_id: str):
     }
 
 
+def _apply_fixed_profile_gain(image_rgb, profile: CameraAppearanceProfile):
+    """Apply one configured gain without conditioning on the current frame.
+
+    Unlike per-frame neutral matching, this preserves intentional exposure and
+    white-balance variation between synthetic training samples.  The gains are
+    deliberately bounded and their provisional evidence status travels with
+    every derived image.
+    """
+
+    import numpy as np
+
+    image = np.asarray(image_rgb)
+    gain = np.asarray(profile.fixed_training_rgb_gain, dtype=np.float32)
+    floating = image.astype(np.float32) * gain.reshape((1, 1, 3))
+    result = np.clip(np.rint(floating), 0.0, 255.0).astype(np.uint8)
+    return result, {
+        "applied": True,
+        "mode": "fixed_profile",
+        "applied_rgb_gain": gain.tolist(),
+        "gain_bounds": [2.0 / 3.0, 1.5],
+        "profile_status": profile.fixed_training_gain_status,
+        "frame_statistics_used": False,
+        "limitation": (
+            "Fixed display-RGB alignment only; this is not a physical camera "
+            "response, exposure, or material calibration."
+        ),
+    }
+
+
 def create_deployment_preview(
     image_rgb,
     profiles: CameraAppearanceProfiles,
@@ -675,14 +766,23 @@ def create_deployment_preview(
     frame_index: int,
     add_wrist_occlusion: bool = False,
     match_curated_neutral_median: bool = True,
+    photometric_mode: str | None = None,
+    compression_domain: str = "archive_yuv420",
 ) -> DeploymentPreviewResult:
     """Create a deterministic deployment-like view without changing raw RGB.
 
-    The returned mask covers the synthetic cable and shadow geometry before
-    chroma subsampling.  It is not an exact changed-pixel mask after the I420
-    round trip.  Callers must update visibility labels conservatively or mark
-    the view as unlabeled robustness imagery.  Table and side views never
-    receive this augmentation.
+    The returned ``occluder_mask`` covers the synthetic cable and shadow
+    geometry before chroma subsampling.  ``ignore_mask`` dilates that geometry
+    to conservatively include antialiasing and chroma spill.  Neither is an
+    exact changed-pixel mask after the I420 round trip.  Callers must update
+    visibility labels conservatively or mark the view as unlabeled robustness
+    imagery.  Table and side views never receive this augmentation.
+
+    ``photometric_mode=None`` preserves the legacy
+    ``match_curated_neutral_median`` switch.  Training collection should use
+    ``fixed_profile`` so sample-specific exposure/white-balance variation is
+    not normalized away.  ``archive_yuv420`` preserves the legacy I420 round
+    trip; ``uncompressed_preview`` retains resized display RGB.
     """
 
     import cv2
@@ -704,13 +804,31 @@ def create_deployment_preview(
         )
     width, height = profiles.deployment_resolution
     preview = cv2.resize(source, (width, height), interpolation=cv2.INTER_AREA)
-    if match_curated_neutral_median:
+    if photometric_mode is None:
+        selected_photometric_mode = (
+            "per_frame_neutral" if match_curated_neutral_median else "none"
+        )
+    else:
+        selected_photometric_mode = str(photometric_mode).strip().lower()
+    if selected_photometric_mode not in {
+        "per_frame_neutral",
+        "fixed_profile",
+        "none",
+    }:
+        raise CameraAppearanceError(
+            "photometric_mode must be per_frame_neutral, fixed_profile, or none"
+        )
+    if selected_photometric_mode == "per_frame_neutral":
         preview, photometric = _match_neutral_median(
             preview, profile.fit_neutral_rgb_median_8bit, profile.camera_id
         )
+        photometric = {"mode": "per_frame_neutral", **photometric}
+    elif selected_photometric_mode == "fixed_profile":
+        preview, photometric = _apply_fixed_profile_gain(preview, profile)
     else:
         photometric = {
             "applied": False,
+            "mode": "none",
             "reason": "disabled by caller",
         }
     mask = np.zeros((height, width), dtype=np.uint8)
@@ -735,15 +853,43 @@ def create_deployment_preview(
         preview, mask, hose_widths = _add_wrist_hoses(preview, hose, rng)
         hose_applied = True
 
+    ignore_mask = mask.copy()
+    if hose_applied and hose.ignore_mask_dilation_px > 0:
+        radius = hose.ignore_mask_dilation_px
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1)
+        )
+        ignore_mask = cv2.dilate(mask, kernel)
+
     # I420 is a planar 4:2:0 representation.  The round trip reproduces the
     # main chroma-resolution loss of the downloaded stream without pretending
     # to reproduce its AV1 encoder or rate control.
-    i420 = cv2.cvtColor(np.ascontiguousarray(preview), cv2.COLOR_RGB2YUV_I420)
-    preview = cv2.cvtColor(i420, cv2.COLOR_YUV2RGB_I420)
+    selected_compression_domain = str(compression_domain).strip().lower()
+    if selected_compression_domain not in {
+        "archive_yuv420",
+        "uncompressed_preview",
+    }:
+        raise CameraAppearanceError(
+            "compression_domain must be archive_yuv420 or uncompressed_preview"
+        )
+    if selected_compression_domain == "archive_yuv420":
+        i420 = cv2.cvtColor(np.ascontiguousarray(preview), cv2.COLOR_RGB2YUV_I420)
+        preview = cv2.cvtColor(i420, cv2.COLOR_YUV2RGB_I420)
+        chroma_approximation = "RGB -> planar I420 -> RGB"
+        compression_intended_use = (
+            "decoded archive-video robustness preview; not raw-camera training input"
+        )
+    else:
+        chroma_approximation = "disabled; resized display RGB retained"
+        compression_intended_use = (
+            "uncompressed resized preview; no archive compression approximation"
+        )
     coverage = float(np.count_nonzero(mask) / mask.size)
+    ignore_coverage = float(np.count_nonzero(ignore_mask) / ignore_mask.size)
     return DeploymentPreviewResult(
         image_rgb=preview,
         occluder_mask=mask,
+        ignore_mask=ignore_mask,
         processing={
             "camera_id": profile.camera_id,
             "profile_path": profiles.source_path,
@@ -755,17 +901,38 @@ def create_deployment_preview(
             "output": "deployment-like RGB preview",
             "output_resolution": list(profiles.deployment_resolution),
             "resize_interpolation": "cv2.INTER_AREA",
-            "chroma_approximation": "RGB -> planar I420 -> RGB",
+            "chroma_approximation": chroma_approximation,
             "curated_neutral_median_match": photometric,
+            "photometric_alignment": photometric,
+            "photometric_alignment_mode": selected_photometric_mode,
             "av1_bitstream_reproduced": False,
+            "compression_domain": {
+                "mode": selected_compression_domain,
+                "pixel_format": profiles.deployment_pixel_format,
+                "codec_evidence": profiles.codec_evidence,
+                "crf_evidence": profiles.crf_evidence,
+                "preview_approximation": profiles.preview_approximation,
+                "archive_codec_bitstream_reproduced": False,
+                "intended_use": compression_intended_use,
+            },
             "preview_seed": preview_seed,
             "synthetic_wrist_hose": {
                 "applied": hose_applied,
                 "widths_px": hose_widths,
                 "mask_nonzero_fraction": coverage,
+                "geometry_mask_nonzero_fraction": coverage,
+                "ignore_mask_nonzero_fraction": ignore_coverage,
+                "ignore_mask_dilation_px": (
+                    hose.ignore_mask_dilation_px if hose_applied else 0
+                ),
+                "ignore_mask_contains_geometry": bool(
+                    np.all((mask == 0) | (ignore_mask > 0))
+                ),
                 "label_rule": (
-                    "use returned mask to update visibility, or store this as "
-                    "unlabeled robustness imagery"
+                    "exclude the returned conservative ignore_mask from "
+                    "supervised pixel loss and recompute visibility from valid "
+                    "pixels, or store this as unlabeled robustness imagery; do "
+                    "not infer visible fraction from mask area alone"
                 ),
             },
         },
