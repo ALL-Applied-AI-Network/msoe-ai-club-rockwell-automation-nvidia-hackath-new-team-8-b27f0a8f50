@@ -61,18 +61,72 @@ free to reject a selected plan that violates backend limits.
 |---|---|---|---|
 | Vision contracts | `sorting_core/perception.py` | No backend dependencies | `CameraFrame`, `DepthEncoding`, `RobotState`, `PerceptionRequest`, `DetectedObject`, `SceneObservation`, `VisionProvider` |
 | Grasp contracts and default pipeline | `sorting_core/grasping.py` | Camera-derived legacy task scene, target, context | `PickPlacePlan` |
-| Select active team components | `sorting_core/team_integrations.py` | Configuration, calibration/projectors, optional checkpoint | Provider and grasp-pipeline factories |
+| Select active team components | `ROCKWELL_INTEGRATION_PROFILE` plus a strict JSON profile | Lightweight camera metadata and `module:factory` references | Provider and grasp-pipeline factories |
 | Existing cube detector | `sorting_core/vision.py::detect_coloured_cubes` | RGB, calibrated projector, config | Legacy `SceneDetections` |
 | Existing cube task adapter | `sorting_core/task_perception.py::cube_scene_from_observation` and `sorting_core/planner.py` | Generic scene plus configured cube/color task | Legacy cube scene and destination intent |
 | Isaac integration | `isaac_bridge/camera_sort.py::IsaacCameraSortAdapter` | Isaac frames plus selected integrations | Scene and selected plans |
 | Hardware integration | `hardware/fanuc_cell/policy.py::Policy` | Official observations plus selected integrations | Bounded official TCP action chunks |
 
-Implement model code in separate modules, for example
-`sorting_core/team_vision.py` and `sorting_core/grasping_team.py`. The vision
-and grasp teams own their respective modules; the integration lead owns
-`sorting_core/team_integrations.py`. That composition file is intentionally
-small but is a merge hot spot, so the two teams should not independently edit
-it. Do not scatter provider-selection conditionals through both backends.
+Implement model code below `team_plugins/computer_vision/` or
+`team_plugins/grasping/`, or in another importable package owned by that team.
+Add a new profile instead of editing `sorting_core/team_integrations.py`, the
+Isaac adapter, or the hardware policy. The nested `AGENTS.md` in each team
+directory is the canonical human-and-agent onboarding guide. Do not scatter
+provider-selection conditionals through the backends.
+
+## Drop-in activation
+
+An integration profile selects either team independently or both together:
+
+```json
+{
+  "schema_version": 1,
+  "profile_id": "my-team-integration-v1",
+  "vision": {
+    "factory": "team_plugins.computer_vision.my_provider:create",
+    "camera_ids": ["table"],
+    "depth_camera_ids": [],
+    "calibration_ids": {
+      "table": "sidclab-cameras.json:table"
+    },
+    "depth_calibration_ids": {},
+    "options": {}
+  },
+  "grasp": {
+    "factory": "team_plugins.grasping.my_pipeline:create",
+    "options": {}
+  }
+}
+```
+
+Set the profile before starting Python, because the official hardware client
+declares its requested cameras while importing `Policy`:
+
+```bash
+export ROCKWELL_INTEGRATION_PROFILE=team_plugins/profiles/my_integration.json
+```
+
+Relative paths resolve from the repository root. Restart the process after a
+profile change. With the variable unset, the original HSV cube provider and
+single top-down grasp remain active. Profile metadata is validated at import,
+but the selected model modules are imported lazily only when their factory is
+constructed. An explicitly selected profile fails closed on malformed JSON,
+missing dependencies, factory errors, or wrong return types; it never silently
+falls back and continues execution.
+
+Factories use one stable context argument:
+
+```python
+def create(context: VisionFactoryContext) -> VisionProvider: ...
+def create(context: GraspFactoryContext) -> GraspPlanningPipeline: ...
+```
+
+The context supplies existing runtime inputs, recursively frozen profile
+options, and the profile ID/path/SHA-256 for provenance. See
+`team_plugins/computer_vision/AGENTS.md` and
+`team_plugins/grasping/AGENTS.md` for every field and the required handoff
+tests. Plugin modules are trusted executable code; selection is explicit and
+there is no automatic directory scan.
 
 ### Exact integration signatures
 
@@ -201,9 +255,11 @@ class Policy:
 
 Direct constructor injection is intended for unit tests, offline replay, and
 development. The official hardware runner constructs `Policy(checkpoint)`
-itself, so deployed components must be selected through the two factories in
-`sorting_core/team_integrations.py`. Camera constants are read when the policy
-module is imported; restart the process after changing them.
+itself, so deployed components must be selected with an integration profile.
+`sorting_core/team_integrations.py` is the stable host and should not be edited
+by either team. Camera metadata is read from the selected profile when that
+module is imported; set the profile first and restart the process after
+changing it.
 
 ## Shared units, frames, and timestamps
 
@@ -326,20 +382,19 @@ Use `request.frame("table")` to retrieve a named frame. Calibrated pixel-to-base
 projectors are injected when the provider is created; they are not serialized
 inside the request.
 
-The camera requirements are declared once in
-`sorting_core/team_integrations.py`:
+The baseline camera requirements remain defined by the stable host. A selected
+vision plugin declares its own requirements in profile metadata, which the
+hardware client can read without importing a heavyweight model:
 
-```python
-PERCEPTION_CAMERA_IDS = ("table",)
-PERCEPTION_DEPTH_CAMERA_IDS = ()
-PERCEPTION_CALIBRATION_IDS = {
-    "table": "sidclab-cameras.json:table",
+```json
+{
+  "camera_ids": ["table"],
+  "depth_camera_ids": [],
+  "calibration_ids": {
+    "table": "sidclab-cameras.json:table"
+  },
+  "depth_calibration_ids": {}
 }
-PERCEPTION_DEPTH_CALIBRATION_IDS = {
-    "table": "sidclab-cameras.json:table_depth",
-    "wrist": "sidclab-cameras.json:wrist_depth",
-}
-CUBE_TASK_CLASS_IDS = ("cube",)
 ```
 
 Add a camera only when the provider consumes it and its calibration/timestamp
@@ -352,27 +407,31 @@ pixel-aligned to the differently sized RGB image. Isaac depth is commonly
 floating-point metres and must declare its own encoding instead of copying the
 hardware convention.
 
-`CUBE_TASK_CLASS_IDS` is the explicit compatibility mapping into today's cube
-planner. Add a catalog class there only after confirming that the current cube
-geometry, destination, and grasp assumptions apply. Other detected classes
-remain in `SceneObservation` and are returned as unsupported. The checked-in
-legacy checker/planner blocks execution when unsupported objects are present;
-do not resume motion until an object-aware feasibility checker or task adapter
-accounts for every such object.
+`CUBE_TASK_CLASS_IDS` remains integration-owned and is deliberately not a
+profile option. It is the explicit compatibility mapping into today's cube
+planner. Ask for a reviewed shared change only after confirming that a class
+has the same cube geometry, destination, and grasp assumptions. Other detected
+classes remain in `SceneObservation` and are returned as unsupported. The
+checked-in legacy checker/planner blocks execution when unsupported objects
+are present; do not resume motion until an object-aware feasibility checker or
+task adapter accounts for every such object.
 
-The checked-in factory receives a calibrated projector only for the table
-camera. A replacement that consumes the fixed side camera or moving wrist
-camera must load the corresponding pinned calibration, transform it correctly,
-and test it rather than assuming the table projector applies. Wrist geometry
-also requires joints from the same observation. The wrist RGB calibration is
-native 1280×720 while the current policy requests RGB at 1920×1080; scale the
-intrinsics consistently or add an explicitly validated native-resolution path.
-Depth streams have their own native sizes and invalid-pixel conventions.
-The existing `hardware/fanuc_cell/calibration/geometry.py::flange_pose()`
-helper expects raw joint **degrees**; do not pass
-`RobotState.arm_joints_rad` into it. Use an SI-native wrapper, or explicitly
-convert with `np.degrees()` at that legacy helper boundary and test the
-transform.
+The checked-in factory injects a calibrated projector only for the table
+camera. A profile can request fixed-side, moving-wrist, or depth streams, but
+that declaration does not create their projectors. Before one of those streams
+drives motion coordinates, the integration lead must expose a reviewed adapter
+that reuses the pinned calibration and existing geometry helper. A team plugin
+may consume that injected adapter; it must not create a second divergent
+calibration implementation merely to make a demo pass. Wrist geometry also
+requires joints from the same observation. The wrist RGB calibration is native
+1280×720 while the current policy requests RGB at 1920×1080; scale intrinsics
+consistently in the reviewed adapter or add an explicitly validated
+native-resolution path. Depth streams have their own native sizes and
+invalid-pixel conventions. The existing
+`hardware/fanuc_cell/calibration/geometry.py::flange_pose()` helper expects raw
+joint **degrees**; do not pass `RobotState.arm_joints_rad` into it. Use an
+SI-native wrapper, or explicitly convert with `np.degrees()` at that legacy
+helper boundary and test the transform.
 
 `PERCEPTION_CAMERA_IDS` and `PERCEPTION_DEPTH_CAMERA_IDS` are combined when
 building requests, so a depth-only camera may produce a `CameraFrame` with no
@@ -380,7 +439,10 @@ RGB. `IsaacCameraSortAdapter.observe_request()` is the provider-neutral
 perception seam for multi-camera Isaac inputs. Use
 `observe_request_and_plan()` to exercise that request through task projection
 and grasp selection end to end; the older `observe_generic(rgb, ...)` helper
-is the single-table-camera compatibility path.
+is the single-table-camera compatibility path. Strict depth-only profile
+parsing and camera declarations are tested, but depth-only operation through
+the official physical client is still unverified and must not be treated as a
+hardware-ready capability until an official-observation replay proves it.
 
 Official RGB payloads are `H x W x 3`, `uint8`, **RGB** channel order. OpenCV
 usually decodes BGR; the official client already converts once. A provider
@@ -424,8 +486,8 @@ class TeamVisionProvider:
             DetectedObject(
                 track_id=f"{request.scene_id}:example",
                 # The current adapter accepts "cube" by default. If the team
-                # adopts catalog IDs such as "cube_16mm", add them explicitly
-                # to CUBE_TASK_CLASS_IDS in team_integrations.py.
+                # adopts IDs such as "cube_16mm", request an integration-lead
+                # review of the cube-task compatibility mapping.
                 class_id="cube",
                 sort_label="red",
                 capture_time_s=request.capture_time_s,
@@ -450,36 +512,25 @@ class TeamVisionProvider:
         )
 ```
 
-Wire it in the one composition file. Preserve the factory signature because
-Isaac and hardware both call it:
+Place the provider and its factory in the vision team's plugin package. The
+stable host constructs it from `VisionFactoryContext`:
 
 ```python
-# sorting_core/team_integrations.py
-def create_vision_provider(
-    *,
-    config,
-    camera_projectors,
-    calibration_ids=None,
-    expected_cube_edge_m=None,
-    checkpoint=None,
-    detector=None,
-):
-    del config, expected_cube_edge_m, detector
+from sorting_core.integration_plugins import VisionFactoryContext
+
+
+def create(context: VisionFactoryContext):
     return TeamVisionProvider(
-        model=load_vision_model(checkpoint),
-        camera_projectors=camera_projectors,
-        calibration_ids=(
-            PERCEPTION_CALIBRATION_IDS
-            if calibration_ids is None
-            else calibration_ids
-        ),
+        model=load_vision_model(context.checkpoint, context.options),
+        camera_projectors=context.camera_projectors,
+        calibration_ids=context.calibration_ids,
     )
 ```
 
-The `None` check above is intentional. `None` means "use the checked-in default
-calibration mapping"; a caller-supplied empty mapping remains empty and must
-fail validation rather than silently falling back. Do not replace this with a
-truthiness expression such as `calibration_ids or PERCEPTION_CALIBRATION_IDS`.
+Reference this callable as `package.module:create` in the vision profile. The
+host distinguishes `None` (use declared defaults) from an explicitly empty
+runtime calibration map; plugins must not replace that distinction with a
+truthiness fallback.
 
 Unit-test this provider with saved frames and injected fake projectors. A basic
 provider test should not require Isaac or access to the physical cell.
@@ -601,10 +652,10 @@ class TeamSuccessScorer:
         )
 ```
 
-Wire it by constructing a complete `GraspPlanningPipeline` in the factory:
+Construct a complete `GraspPlanningPipeline` in the grasp team's plugin
+factory:
 
 ```python
-# sorting_core/team_integrations.py
 from sorting_core.grasping import (
     GraspPlanningPipeline,
     HighestSuccessSelector,
@@ -612,17 +663,24 @@ from sorting_core.grasping import (
     LegacyGeometricChecker,
     LegacyTopDownCubeGenerator,
 )
+from sorting_core.integration_plugins import GraspFactoryContext
 
 
-def create_grasp_pipeline(*, config, checkpoint=None):
+def create(context: GraspFactoryContext) -> GraspPlanningPipeline:
     return GraspPlanningPipeline(
         generator=LegacyTopDownCubeGenerator(),
         checker=LegacyGeometricChecker(
-            maximum_radial_reach_m=config.hardware.maximum_radial_reach_m,
-            minimum_centre_clearance_m=config.task.minimum_distinct_centres_m,
+            maximum_radial_reach_m=(
+                context.config.hardware.maximum_radial_reach_m
+            ),
+            minimum_centre_clearance_m=(
+                context.config.task.minimum_distinct_centres_m
+            ),
         ),
         feature_extractor=LegacyFeatureExtractor(),
-        scorer=TeamSuccessScorer(load_grasp_model(checkpoint)),
+        scorer=TeamSuccessScorer(
+            load_grasp_model(context.checkpoint, context.options)
+        ),
         selector=HighestSuccessSelector(),
     )
 ```
@@ -697,6 +755,8 @@ uv run --project hardware/fanuc_cell \
 For a quick team-contract loop before the full suite:
 
 ```bash
+uv run --project hardware/fanuc_cell \
+  python -m unittest discover -s tests -p 'test_integration_plugins.py' -v
 uv run --project hardware/fanuc_cell \
   python -m unittest discover -s tests -p 'test_perception_integration.py' -v
 uv run --project hardware/fanuc_cell \

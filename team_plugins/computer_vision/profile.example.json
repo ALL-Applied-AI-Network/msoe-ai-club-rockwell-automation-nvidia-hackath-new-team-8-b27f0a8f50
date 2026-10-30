@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "profile_id": "vision-baseline-example-v1",
+  "vision": {
+    "factory": "team_plugins.computer_vision.baseline_provider:create",
+    "camera_ids": ["table"],
+    "depth_camera_ids": [],
+    "calibration_ids": {
+      "table": "sidclab-cameras.json:table"
+    },
+    "depth_calibration_ids": {},
+    "options": {}
+  }
+}

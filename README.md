@@ -60,9 +60,12 @@ emergency stop.
 ## Team integration points
 
 Computer-vision and grasping work plugs into the shared pipeline through
-versioned contracts and one composition file; teammates should not need to
-rewrite the Isaac or FANUC state machines. See
-[`docs/TEAM_INTEGRATION.md`](docs/TEAM_INTEGRATION.md) for every intended
+versioned contracts and independently selectable plugins; teammates add files
+under [`team_plugins`](team_plugins) and select a strict JSON profile instead
+of editing the Isaac or FANUC state machines. Start with the vision team's
+[`AGENTS.md`](team_plugins/computer_vision/AGENTS.md) or the grasp team's
+[`AGENTS.md`](team_plugins/grasping/AGENTS.md). The shared
+[`docs/TEAM_INTEGRATION.md`](docs/TEAM_INTEGRATION.md) documents every intended
 extension point, exact inputs/outputs, minimal implementations, and contract
 tests.
 

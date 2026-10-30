@@ -18,6 +18,16 @@
 *.ckpt
 *.pt
 *.pth
+*.onnx
+*.engine
+*.plan
+*.tflite
+*.joblib
+*.pkl
+*.pickle
+**/checkpoints/
+**/weights/
+**/datasets/
 *.zip
 **/.request.json
 .env

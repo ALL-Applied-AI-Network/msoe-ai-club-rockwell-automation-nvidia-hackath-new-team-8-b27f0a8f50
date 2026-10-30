@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "profile_id": "team-baseline-plugins-v1",
+  "vision": {
+    "factory": "team_plugins.computer_vision.baseline_provider:create",
+    "camera_ids": ["table"],
+    "depth_camera_ids": [],
+    "calibration_ids": {
+      "table": "sidclab-cameras.json:table"
+    },
+    "depth_calibration_ids": {},
+    "options": {}
+  },
+  "grasp": {
+    "factory": "team_plugins.grasping.baseline_pipeline:create",
+    "options": {}
+  }
+}

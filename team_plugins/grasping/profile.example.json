@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "profile_id": "grasp-baseline-example-v1",
+  "grasp": {
+    "factory": "team_plugins.grasping.baseline_pipeline:create",
+    "options": {}
+  }
+}
