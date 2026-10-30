@@ -50,6 +50,19 @@ If Git conflicts, preserve both sides, identify the semantic owner, and ask the
 affected teammate. Do not use destructive reset/checkout or silently choose one
 implementation.
 
+For each independent or combined handoff, use the one-command gate in
+[`docs/TEAM_PLUGIN_CHECKER.md`](../../docs/TEAM_PLUGIN_CHECKER.md) and pass the
+exact versioned profile under review:
+
+```bash
+uv run --project hardware/fanuc_cell python scripts/check_team_plugin.py \
+  --profile team_plugins/profiles/combined.v1.json
+```
+
+CI is a smoke/profile-import gate; this explicit local command verifies that
+the intended versioned profile was selected for the CPU contract gate. A
+handoff run must be clean. `--allow-dirty` is for development only.
+
 ## Active architecture and objective
 
 The cross-team handoff is `SceneObservation`, not an informal string. JSON is

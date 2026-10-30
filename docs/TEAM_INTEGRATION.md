@@ -811,6 +811,23 @@ uv run --project hardware/fanuc_cell \
   python -m unittest discover -s tests -p 'test_grasping_integration.py' -v
 ```
 
+The required pre-handoff command packages those checks with profile/factory
+validation, golden serialized-scene replay, team-owned tests, a clean-tree
+check, and the full profile-unset CPU baseline:
+
+```bash
+uv run --project hardware/fanuc_cell python scripts/check_team_plugin.py \
+  --profile team_plugins/<team>/<versioned-profile>.json
+```
+
+Read [`TEAM_PLUGIN_CHECKER.md`](TEAM_PLUGIN_CHECKER.md) before using its
+development-only escape flags. The contract-shaped scenes and their exact
+coverage are documented in
+[`team_plugins/fixtures/README.md`](../team_plugins/fixtures/README.md).
+Held-out vision, ranking, grasp-retention, and timing evidence belongs in the
+versioned format described by [`EVALUATION_RESULTS.md`](EVALUATION_RESULTS.md),
+not in the golden fixtures.
+
 On the pinned Brev runtime, also run:
 
 ```bash

@@ -78,6 +78,18 @@ inference. Follow the repository-root `BREV_SETUP.md`; do not install packages
 ad hoc into Isaac. Put heavy/conflicting model dependencies in a pinned
 team-owned environment or bounded local service.
 
+Before handoff, run the one-command checker described in
+[`docs/TEAM_PLUGIN_CHECKER.md`](../../docs/TEAM_PLUGIN_CHECKER.md) with your
+actual versioned vision profile, not the example:
+
+```bash
+uv run --project hardware/fanuc_cell python scripts/check_team_plugin.py \
+  --profile team_plugins/computer_vision/my_profile.v1.json
+```
+
+The handoff run requires a clean tree. `--allow-dirty` is only for an
+in-progress development check.
+
 ## Cube and screw scope
 
 The cube contract is already implemented and is the first integration target.

@@ -71,6 +71,11 @@ branch:
 git push origin computer-vision
 ```
 
+Before handoff, run the repository's one-command profile, golden-fixture, and
+baseline gate described in
+[`docs/TEAM_PLUGIN_CHECKER.md`](../docs/TEAM_PLUGIN_CHECKER.md). Pass your
+actual versioned profile rather than the checked-in example.
+
 Team members never merge their own branch into `main`. The integration lead:
 
 1. reviews each team handoff and its tests;

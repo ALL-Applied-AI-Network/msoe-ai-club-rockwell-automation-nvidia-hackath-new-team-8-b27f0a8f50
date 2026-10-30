@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "evaluation_id": "fixture-cube-evaluation-v1",
+  "created_at_utc": "2026-10-30T18:00:00Z",
+  "split": "test",
+  "backend": "isaac",
+  "provenance": {
+    "project_commit": "0000000000000000000000000000000000000000",
+    "branch": "fixture",
+    "integration_profile": {
+      "profile_id": "fixture-combined-profile-v1",
+      "profile_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "object_catalog_version": "fixture-catalog-v1",
+    "calibration_ids": [
+      "fixture-table-calibration-v1"
+    ],
+    "components": [
+      {
+        "component": "vision",
+        "name": "fixture-vision",
+        "version": "v1",
+        "artifact_sha256": null
+      },
+      {
+        "component": "grasp",
+        "name": "fixture-grasp-scorer",
+        "version": "v1",
+        "artifact_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    ],
+    "source_run_ids": [
+      "public-fixture-cube-run"
+    ]
+  },
+  "vision": {
+    "frames_evaluated": 2,
+    "inference_latency_ms": [10.0, 12.0],
+    "per_class": [
+      {
+        "class_id": "cube",
+        "reference_instances": 2,
+        "true_positives": 2,
+        "false_positives": 1,
+        "dropouts": 0,
+        "pose_samples": [
+          {
+            "position_error_mm": 1.0,
+            "symmetry_aware_orientation_error_deg": 2.0,
+            "symmetry_id": "cube-yaw-mod-90-v1"
+          },
+          {
+            "position_error_mm": 3.0,
+            "symmetry_aware_orientation_error_deg": 4.0,
+            "symmetry_id": "cube-yaw-mod-90-v1"
+          }
+        ]
+      }
+    ]
+  },
+  "episodes": [
+    {
+      "episode_id": "cube-episode-success",
+      "condition_id": "cube-layout-1",
+      "scene_id": "cube-scene-1",
+      "target_track_id": "cube-red-1",
+      "target_class_id": "cube",
+      "grasp_attempt": {
+        "generated_candidate_ids": ["cube-yaw-0", "cube-yaw-90"],
+        "accepted_candidates": [
+          {
+            "candidate_id": "cube-yaw-0",
+            "predicted_success_probability": 0.8,
+            "scorer_id": "fixture-logistic-v1",
+            "model_version": "fixture-model-v1"
+          },
+          {
+            "candidate_id": "cube-yaw-90",
+            "predicted_success_probability": 0.6,
+            "scorer_id": "fixture-logistic-v1",
+            "model_version": "fixture-model-v1"
+          }
+        ],
+        "rejected_candidates": [],
+        "selected_candidate_id": "cube-yaw-0",
+        "selected_candidate_outcome_observed": true,
+        "selected_candidate_complete_grasp_success": true,
+        "ranking_correct": true,
+        "ranking_evidence_id": "fixture-cube-layout-1-counterfactuals"
+      },
+      "outcome": {
+        "status": "complete_relocation_success",
+        "contact_count": 0,
+        "operator_intervention_count": 0,
+        "retry_count": 0,
+        "verification": ["simulator_truth"]
+      },
+      "timing_s": {
+        "perception_s": 0.01,
+        "planning_s": 0.02,
+        "execution_s": 8.0,
+        "recovery_s": 0.0,
+        "total_episode_s": 8.03
+      }
+    },
+    {
+      "episode_id": "cube-episode-failed-lift",
+      "condition_id": "cube-layout-2",
+      "scene_id": "cube-scene-2",
+      "target_track_id": "cube-blue-1",
+      "target_class_id": "cube",
+      "grasp_attempt": {
+        "generated_candidate_ids": ["cube2-yaw-0", "cube2-yaw-90", "cube2-blocked"],
+        "accepted_candidates": [
+          {
+            "candidate_id": "cube2-yaw-0",
+            "predicted_success_probability": 0.5,
+            "scorer_id": "fixture-logistic-v1",
+            "model_version": "fixture-model-v1"
+          },
+          {
+            "candidate_id": "cube2-yaw-90",
+            "predicted_success_probability": 0.7,
+            "scorer_id": "fixture-logistic-v1",
+            "model_version": "fixture-model-v1"
+          }
+        ],
+        "rejected_candidates": [
+          {
+            "candidate_id": "cube2-blocked",
+            "reasons": ["approach_clearance"]
+          }
+        ],
+        "selected_candidate_id": "cube2-yaw-90",
+        "selected_candidate_outcome_observed": true,
+        "selected_candidate_complete_grasp_success": false,
+        "ranking_correct": false,
+        "ranking_evidence_id": "fixture-cube-layout-2-counterfactuals"
+      },
+      "outcome": {
+        "status": "failed_lift",
+        "contact_count": 1,
+        "operator_intervention_count": 0,
+        "retry_count": 1,
+        "verification": ["simulator_truth"]
+      },
+      "timing_s": {
+        "perception_s": 0.012,
+        "planning_s": 0.025,
+        "execution_s": 3.0,
+        "recovery_s": 0.5,
+        "total_episode_s": 3.537
+      }
+    }
+  ]
+}

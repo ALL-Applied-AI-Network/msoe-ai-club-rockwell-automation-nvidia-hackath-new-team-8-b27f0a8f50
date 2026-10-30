@@ -390,6 +390,19 @@ Every handoff records:
 - saved fixtures and metrics;
 - known failures, unsupported conditions and next action.
 
+Before handoff, run the one-command CPU contract gate with the exact profile
+being delivered (not only the checked-in example):
+
+  uv run --project hardware/fanuc_cell python scripts/check_team_plugin.py \
+    --profile team_plugins/<team>/<versioned-profile>.json
+
+The command and its branch/clean-tree prerequisites are explained in
+`docs/TEAM_PLUGIN_CHECKER.md`. The hand-authored, contract-shaped scenes in
+`team_plugins/fixtures/` give both teams the same tiny cube, screw, stale,
+occluded, and invalid inputs without requiring a model or Brev. They validate
+handoff behavior; they are not camera evidence, training data, or performance
+results.
+
 ===============================================================================
 10. TESTING LADDER
 ===============================================================================
@@ -411,6 +424,17 @@ Shared host loop from repository root in WSL:
 
   uv run --project hardware/fanuc_cell \
     python -m unittest discover -s tests -v
+
+Required team handoff gate with the team's actual versioned profile:
+
+  uv run --project hardware/fanuc_cell python scripts/check_team_plugin.py \
+    --profile team_plugins/<team>/<versioned-profile>.json
+
+For matched held-out experiments, write the versioned evaluation JSON defined
+in `docs/EVALUATION_RESULTS.md`, then use `scripts/summarize_evaluation.py`.
+Do not mix different commits, profiles, calibration, catalogs, components, or
+data splits into one headline result unless the explicit mixed-report option
+is used and its warning is reported.
 
 On a configured Brev runtime:
 
@@ -471,6 +495,10 @@ implement and measure within the hackathon.
 - Object axes/symmetry: `docs/OBJECT_CATALOG.md`
 - Synthetic data: `docs/SYNTHETIC_DATA.md`
 - Scene JSON schema: `docs/schemas/scene-observation.v1.schema.json`
+- Golden cross-team fixtures: `team_plugins/fixtures/README.md`
+- One-command handoff checker: `docs/TEAM_PLUGIN_CHECKER.md`
+- Evaluation records and summary: `docs/EVALUATION_RESULTS.md`
+- Evaluation JSON schema: `docs/schemas/evaluation-result.v1.schema.json`
 - Cube realistic-data command:
   `demos/scripted_colour_bucket_sort/README.md`
 - Screw physics demo: `demos/scripted_cube_screw_bucket_sort/README.md`

@@ -80,7 +80,13 @@ of editing the Isaac or FANUC state machines. Start with the vision team's
 [`team_plugins/lead/SETUP.md`](team_plugins/lead/SETUP.md). The shared
 [`docs/TEAM_INTEGRATION.md`](docs/TEAM_INTEGRATION.md) documents every intended
 extension point, exact inputs/outputs, minimal implementations, and contract
-tests. The active learned objective is the highest predicted probability of a
+tests. Before handing work to the lead, replay the checked-in
+[`golden fixtures`](team_plugins/fixtures/README.md) and run the
+[`one-command plugin check`](docs/TEAM_PLUGIN_CHECKER.md) with the exact
+versioned profile being delivered. Record held-out results with the shared
+[`evaluation format and summarizer`](docs/EVALUATION_RESULTS.md), which keeps
+missing evidence explicit instead of converting it to a passing score. The
+active learned objective is the highest predicted probability of a
 **complete relocation**—acquire, retain through transport, and release on
 command—among candidates that already pass deterministic checks. Elapsed and
 recovery times remain evaluation telemetry; they do not rank grasps.

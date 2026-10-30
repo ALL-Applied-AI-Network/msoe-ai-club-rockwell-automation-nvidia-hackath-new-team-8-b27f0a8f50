@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "scene_id": "golden-invalid-quaternion-001",
+  "capture_time_s": 1000.0,
+  "coordinate_frame": "robot_base",
+  "objects": [
+    {
+      "track_id": "cube-red-invalid-001",
+      "class_id": "cube",
+      "sort_label": "red",
+      "capture_time_s": 1000.0,
+      "pose": {
+        "position_base_m": [0.44, -0.19, -0.0001],
+        "orientation_xyzw": [0.0, 0.0, 0.0, 2.0]
+      },
+      "dimensions_m": [0.01, 0.01, 0.01],
+      "confidence": 0.95,
+      "pose_quality": 0.9,
+      "visibility": 0.95,
+      "source_camera_ids": ["table"],
+      "attributes": {
+        "fixture_note": "deliberate parser rejection: quaternion norm is two"
+      }
+    }
+  ],
+  "provider_name": "golden-fixture-provider",
+  "provider_version": "scene-v1",
+  "calibration_ids": ["golden-table-calibration-v1"]
+}

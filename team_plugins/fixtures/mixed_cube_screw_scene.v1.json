@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "scene_id": "golden-mixed-cube-screw-001",
+  "capture_time_s": 1000.0,
+  "coordinate_frame": "robot_base",
+  "objects": [
+    {
+      "track_id": "cube-red-mixed-001",
+      "class_id": "cube",
+      "sort_label": "red",
+      "capture_time_s": 1000.0,
+      "pose": {
+        "position_base_m": [0.44, -0.19, -0.0001],
+        "orientation_xyzw": [0.0, 0.0, 0.0, 1.0]
+      },
+      "dimensions_m": [0.01, 0.01, 0.01],
+      "confidence": 0.96,
+      "pose_quality": 0.92,
+      "visibility": 0.98,
+      "source_camera_ids": ["table"],
+      "attributes": {
+        "fixture_note": "hand-authored supported cube record"
+      }
+    },
+    {
+      "track_id": "screw-mixed-001",
+      "class_id": "screw_iso10642_m6x30",
+      "sort_label": "red",
+      "capture_time_s": 1000.0,
+      "pose": {
+        "position_base_m": [0.43, -0.08, 0.0014],
+        "orientation_xyzw": [0.0, -0.7071067811865475, 0.0, 0.7071067811865476]
+      },
+      "dimensions_m": [0.012, 0.01199627, 0.03],
+      "confidence": 0.9,
+      "pose_quality": 0.82,
+      "visibility": 0.94,
+      "source_camera_ids": ["table"],
+      "attributes": {
+        "catalog_id": "screw_iso10642_m6x30",
+        "shaft_axis_local": [0.0, 0.0, -1.0],
+        "fixture_note": "hand-authored unsupported class record; must not become clear space"
+      }
+    }
+  ],
+  "provider_name": "golden-fixture-provider",
+  "provider_version": "scene-v1",
+  "calibration_ids": ["golden-table-calibration-v1"]
+}

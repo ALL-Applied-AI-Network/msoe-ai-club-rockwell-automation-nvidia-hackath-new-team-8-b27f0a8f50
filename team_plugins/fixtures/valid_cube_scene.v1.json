@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "scene_id": "golden-cubes-001",
+  "capture_time_s": 1000.0,
+  "coordinate_frame": "robot_base",
+  "objects": [
+    {
+      "track_id": "cube-red-001",
+      "class_id": "cube",
+      "sort_label": "red",
+      "capture_time_s": 1000.0,
+      "pose": {
+        "position_base_m": [0.44, -0.19, -0.0001],
+        "orientation_xyzw": [0.0, 0.0, 0.0, 1.0]
+      },
+      "dimensions_m": [0.01, 0.01, 0.01],
+      "confidence": 0.96,
+      "pose_quality": 0.92,
+      "visibility": 0.98,
+      "source_camera_ids": ["table"],
+      "attributes": {
+        "pixel_center_uv": [825.0, 510.0],
+        "mask_area_px": 144.0,
+        "fixture_note": "hand-authored contract shape; not camera inference or simulator truth"
+      }
+    },
+    {
+      "track_id": "cube-yellow-001",
+      "class_id": "cube",
+      "sort_label": "yellow",
+      "capture_time_s": 1000.0,
+      "pose": {
+        "position_base_m": [0.44, 0.0, -0.0001],
+        "orientation_xyzw": [0.0, 0.0, 0.0, 1.0]
+      },
+      "dimensions_m": [0.01, 0.01, 0.01],
+      "confidence": 0.94,
+      "pose_quality": 0.9,
+      "visibility": 0.97,
+      "source_camera_ids": ["table"],
+      "attributes": {
+        "pixel_center_uv": [960.0, 510.0],
+        "mask_area_px": 142.0,
+        "fixture_note": "hand-authored contract shape; not camera inference or simulator truth"
+      }
+    },
+    {
+      "track_id": "cube-blue-001",
+      "class_id": "cube",
+      "sort_label": "blue",
+      "capture_time_s": 1000.0,
+      "pose": {
+        "position_base_m": [0.44, 0.19, -0.0001],
+        "orientation_xyzw": [0.0, 0.0, 0.0, 1.0]
+      },
+      "dimensions_m": [0.01, 0.01, 0.01],
+      "confidence": 0.95,
+      "pose_quality": 0.91,
+      "visibility": 0.96,
+      "source_camera_ids": ["table"],
+      "attributes": {
+        "pixel_center_uv": [1095.0, 510.0],
+        "mask_area_px": 143.0,
+        "fixture_note": "hand-authored contract shape; not camera inference or simulator truth"
+      }
+    }
+  ],
+  "provider_name": "golden-fixture-provider",
+  "provider_version": "scene-v1",
+  "calibration_ids": ["golden-table-calibration-v1"]
+}

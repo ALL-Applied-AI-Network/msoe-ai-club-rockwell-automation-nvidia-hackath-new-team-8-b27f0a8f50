@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "scene_id": "golden-screw-001",
+  "capture_time_s": 1000.0,
+  "coordinate_frame": "robot_base",
+  "objects": [
+    {
+      "track_id": "screw-iso10642-m6x30-001",
+      "class_id": "screw_iso10642_m6x30",
+      "sort_label": "red",
+      "capture_time_s": 1000.0,
+      "pose": {
+        "position_base_m": [0.43, -0.08, 0.0014],
+        "orientation_xyzw": [0.0, -0.7071067811865475, 0.0, 0.7071067811865476]
+      },
+      "dimensions_m": [0.012, 0.01199627, 0.03],
+      "confidence": 0.9,
+      "pose_quality": 0.82,
+      "visibility": 0.94,
+      "source_camera_ids": ["table"],
+      "attributes": {
+        "catalog_id": "screw_iso10642_m6x30",
+        "shaft_axis_local": [0.0, 0.0, -1.0],
+        "head_tip_polarity_observed": true,
+        "fixture_note": "contract example only; current cube task cannot execute this object"
+      }
+    }
+  ],
+  "provider_name": "golden-fixture-provider",
+  "provider_version": "scene-v1",
+  "calibration_ids": ["golden-table-calibration-v1"]
+}

@@ -86,6 +86,18 @@ the vision model, Isaac or the physical robot. Use Brev only for a test that
 requires Isaac physics/rendering, following root `BREV_SETUP.md`. Keep weights,
 datasets and generated runs outside Git.
 
+Before handoff, run the one-command checker described in
+[`docs/TEAM_PLUGIN_CHECKER.md`](../../docs/TEAM_PLUGIN_CHECKER.md) with your
+actual versioned grasp profile, not the example:
+
+```bash
+uv run --project hardware/fanuc_cell python scripts/check_team_plugin.py \
+  --profile team_plugins/grasping/my_profile.v1.json
+```
+
+The handoff run requires a clean tree. `--allow-dirty` is only for an
+in-progress development check.
+
 ## Cube and screw scope
 
 Start with the existing cube path to prove plugin wiring. Then add the supplied

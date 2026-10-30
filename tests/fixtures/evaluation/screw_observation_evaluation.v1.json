@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "evaluation_id": "fixture-screw-observation-evaluation-v1",
+  "created_at_utc": "2026-10-30T18:05:00Z",
+  "split": "test",
+  "backend": "offline_replay",
+  "provenance": {
+    "project_commit": "0000000000000000000000000000000000000000",
+    "branch": "fixture",
+    "integration_profile": null,
+    "object_catalog_version": "fixture-catalog-v1",
+    "calibration_ids": [
+      "fixture-table-calibration-v1"
+    ],
+    "components": [
+      {
+        "component": "vision",
+        "name": "fixture-screw-detector",
+        "version": "v1",
+        "artifact_sha256": null
+      }
+    ],
+    "source_run_ids": [
+      "public-fixture-screw-replay"
+    ]
+  },
+  "vision": {
+    "frames_evaluated": 1,
+    "inference_latency_ms": [15.0],
+    "per_class": [
+      {
+        "class_id": "screw_iso10642_m6x30",
+        "reference_instances": 1,
+        "true_positives": 0,
+        "false_positives": 0,
+        "dropouts": 1,
+        "pose_samples": []
+      }
+    ]
+  },
+  "episodes": [
+    {
+      "episode_id": "screw-observation-only",
+      "condition_id": "isolated-screw-layout-1",
+      "scene_id": "screw-scene-1",
+      "target_track_id": null,
+      "target_class_id": "screw_iso10642_m6x30",
+      "grasp_attempt": null,
+      "outcome": {
+        "status": "not_executed",
+        "contact_count": 0,
+        "operator_intervention_count": 0,
+        "retry_count": 0,
+        "verification": ["operator"]
+      },
+      "timing_s": {
+        "perception_s": 0.015
+      }
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "scene_id": "golden-occluded-001",
+  "capture_time_s": 1000.0,
+  "coordinate_frame": "robot_base",
+  "objects": [
+    {
+      "track_id": "cube-red-visible-001",
+      "class_id": "cube",
+      "sort_label": "red",
+      "capture_time_s": 1000.0,
+      "pose": {
+        "position_base_m": [0.44, -0.19, -0.0001],
+        "orientation_xyzw": [0.0, 0.0, 0.0, 1.0]
+      },
+      "dimensions_m": [0.01, 0.01, 0.01],
+      "confidence": 0.95,
+      "pose_quality": 0.9,
+      "visibility": 0.97,
+      "source_camera_ids": ["table"],
+      "attributes": {
+        "fixture_note": "visible target next to unresolved occlusion"
+      }
+    },
+    {
+      "track_id": "occluded-region-001",
+      "class_id": "unresolved_occluded_object",
+      "sort_label": null,
+      "capture_time_s": 1000.0,
+      "pose": {
+        "position_base_m": [0.42, -0.15, 0.0],
+        "orientation_xyzw": [0.0, 0.0, 0.0, 1.0]
+      },
+      "dimensions_m": [0.04, 0.04, 0.04],
+      "confidence": 0.42,
+      "pose_quality": 0.12,
+      "visibility": 0.18,
+      "source_camera_ids": ["table"],
+      "attributes": {
+        "observation_status": "ambiguous_occlusion",
+        "region_status": "unknown_not_clear",
+        "uncertainty_radius_m": 0.03,
+        "fixture_note": "must remain visible to planning; never reinterpret as free space"
+      }
+    }
+  ],
+  "provider_name": "golden-fixture-provider",
+  "provider_version": "scene-v1",
+  "calibration_ids": ["golden-table-calibration-v1"]
+}

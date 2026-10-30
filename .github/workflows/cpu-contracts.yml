@@ -1,0 +1,93 @@
+name: CPU contract checks
+
+on:
+  push:
+    branches:
+      - main
+      - computer-vision
+      - grasping
+  pull_request:
+    branches:
+      - main
+      - computer-vision
+      - grasping
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cpu-contracts-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  team-plugin-contracts:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: brev/uv-requirements.lock.txt
+
+      - name: Install the pinned uv bootstrap
+        run: python -m pip install --disable-pip-version-check -r brev/uv-requirements.lock.txt
+
+      - name: Synchronize the CPU test environment
+        run: uv sync --project hardware/fanuc_cell --frozen
+
+      - name: Require team pushes to contain current main
+        if: >-
+          github.event_name == 'push' &&
+          (github.ref_name == 'computer-vision' || github.ref_name == 'grasping')
+        shell: bash
+        run: |
+          git show-ref --verify --quiet refs/remotes/origin/main
+          if ! git merge-base --is-ancestor origin/main HEAD; then
+            echo "${GITHUB_REF_NAME} is behind origin/main. Merge origin/main and push again."
+            exit 1
+          fi
+
+      - name: Select the branch smoke-test profile
+        id: profile
+        shell: bash
+        run: |
+          head_branch="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"
+          base_branch="${GITHUB_BASE_REF:-}"
+          case "$head_branch" in
+            computer-vision)
+              profile="team_plugins/computer_vision/profile.example.json"
+              ;;
+            grasping)
+              profile="team_plugins/grasping/profile.example.json"
+              ;;
+            *)
+              case "$base_branch" in
+                computer-vision)
+                  profile="team_plugins/computer_vision/profile.example.json"
+                  ;;
+                grasping)
+                  profile="team_plugins/grasping/profile.example.json"
+                  ;;
+                *)
+                  profile="team_plugins/profiles/baseline_plugins.json"
+                  ;;
+              esac
+              ;;
+          esac
+          echo "profile=$profile" >> "$GITHUB_OUTPUT"
+
+      - name: Validate profile, focused contracts, fixtures, and baseline
+        run: >-
+          uv run --project hardware/fanuc_cell --frozen python
+          scripts/check_team_plugin.py
+          --profile "${{ steps.profile.outputs.profile }}"
+          --skip-branch-sync
