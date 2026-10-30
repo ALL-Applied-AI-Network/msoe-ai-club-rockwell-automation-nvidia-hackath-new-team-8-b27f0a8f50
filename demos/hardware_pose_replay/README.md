@@ -33,7 +33,7 @@ Then, on the configured Brev instance, load the disposable runtime and run:
 source "/workspace/rockwell-runtime/$(git rev-parse HEAD)/env.sh"
 cd "$ROCKWELL_TWIN_RUNTIME"
 "$ISAAC/python.sh" \
-  "$ROCKWELL_REPO_ROOT/demos/hardware_pose_replay/render_pose_replay.py" \
+  /workspace/rockwell-hackathon/demos/hardware_pose_replay/render_pose_replay.py \
   --replay /workspace/runs/hardware-replay-input.json \
   --run /workspace/runs/hardware-pose-replay-01 \
   --camera-matched-appearance
@@ -42,7 +42,9 @@ cd "$ROCKWELL_TWIN_RUNTIME"
 Each selected hardware row produces native lossless PNGs and 640x360
 deployment previews for all three cameras. `replay_report.json` records camera
 transforms per frame; this is particularly important for the moving wrist
-camera. The derived previews use the camera-specific curated neutral targets
+camera. The renderer also fails if an arm joint differs from its requested
+measured pose by more than 0.02°; the 12-pose L40S smoke run reached 0.0093°
+maximum. The derived previews use the camera-specific curated neutral targets
 and an I420 chroma round trip; raw renders remain untouched. Add
 `--wrist-hose-stress` only for an explicitly unlabeled occlusion stress set.
 Its conservative cable-and-shadow geometry masks are saved beside the previews;

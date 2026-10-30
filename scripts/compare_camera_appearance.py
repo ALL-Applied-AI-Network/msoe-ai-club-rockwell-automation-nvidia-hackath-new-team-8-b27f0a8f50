@@ -70,9 +70,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--sim-domain",
-        choices=("raw", "sensor"),
+        choices=("raw", "sensor", "deployment-preview"),
         required=True,
-        help="Records whether input images are raw Isaac RGB or derived sensor RGB.",
+        help=(
+            "Records whether input images are raw Isaac RGB, derived sensor RGB, "
+            "or the 640x360 camera-matched deployment preview."
+        ),
     )
     return parser.parse_args()
 

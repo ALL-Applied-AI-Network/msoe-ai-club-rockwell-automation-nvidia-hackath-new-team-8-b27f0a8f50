@@ -73,7 +73,7 @@ def _args() -> argparse.Namespace:
     parser.add_argument(
         "--maximum-set-pose-error-deg",
         type=float,
-        default=0.05,
+        default=0.02,
         help="fail if any measured arm joint differs from its rendered pose",
     )
     return parser.parse_args()
@@ -297,6 +297,7 @@ def main() -> None:
             "replay_kind": "measured_state_shadow_replay",
             "physical_robot_commands_permitted": False,
             "source": source_document.get("source"),
+            "source_validation": source_document.get("validation"),
             "action_audit": source_document.get("action_audit"),
             "camera_matched_appearance": appearance_evidence,
             "camera_profiles": {

@@ -62,4 +62,3 @@ and side views never receive that synthetic hose.
 The simulator already contains geometric blue/orange/black cables. Image-space
 augmentation represents the observed variability that fixed curve geometry
 cannot reproduce; it is not flexible-body physics and must remain opt-in.
-
