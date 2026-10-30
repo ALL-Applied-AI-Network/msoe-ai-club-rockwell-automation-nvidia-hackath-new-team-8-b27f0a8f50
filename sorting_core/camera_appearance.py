@@ -289,17 +289,6 @@ class CameraAppearanceProfile:
     hose_occlusion: HoseOcclusionProfile
     fixed_training_rgb_gain: tuple[float, float, float] = (1.0, 1.0, 1.0)
     fixed_training_gain_status: str = "identity fallback"
-    fixed_neutral_luma_source_p05_median_p95_8bit: tuple[int, int, int] = (
-        1,
-        128,
-        254,
-    )
-    fixed_neutral_luma_target_p05_median_p95_8bit: tuple[int, int, int] = (
-        1,
-        128,
-        254,
-    )
-    fixed_neutral_tone_curve_status: str = "identity fallback"
 
 
 @dataclass(frozen=True)
@@ -379,15 +368,6 @@ def _minimum_hose_ignore_dilation_px(defocus_sigma_px: float) -> int:
 
     shadow_sigma = float(defocus_sigma_px) * 1.65
     return int(math.ceil(3.0 * shadow_sigma)) + 1
-
-
-def _strict_u8_triplet(value: Any, name: str) -> tuple[int, int, int]:
-    result = _rgb8(value, name)
-    if not (0 < result[0] < result[1] < result[2] < 255):
-        raise CameraAppearanceError(
-            f"{name} must be three strictly increasing values inside (0, 255)"
-        )
-    return result
 
 
 def _parse_hose(value: Any, camera_id: str) -> HoseOcclusionProfile:
@@ -580,38 +560,10 @@ def load_camera_appearance_profiles(
                     "identity fallback for a legacy profile without a fitted gain",
                 )
             ).strip(),
-            fixed_neutral_luma_source_p05_median_p95_8bit=(
-                _strict_u8_triplet(
-                    entry.get(
-                        "fixed_neutral_luma_source_p05_median_p95_8bit",
-                        (1, 128, 254),
-                    ),
-                    f"{camera_id} fixed_neutral_luma_source_p05_median_p95_8bit",
-                )
-            ),
-            fixed_neutral_luma_target_p05_median_p95_8bit=(
-                _strict_u8_triplet(
-                    entry.get(
-                        "fixed_neutral_luma_target_p05_median_p95_8bit",
-                        (1, 128, 254),
-                    ),
-                    f"{camera_id} fixed_neutral_luma_target_p05_median_p95_8bit",
-                )
-            ),
-            fixed_neutral_tone_curve_status=str(
-                entry.get(
-                    "fixed_neutral_tone_curve_status",
-                    "identity fallback for a legacy profile without a fitted curve",
-                )
-            ).strip(),
         )
         if not cameras[camera_id].fixed_training_gain_status:
             raise CameraAppearanceError(
                 f"{camera_id} fixed_training_gain_status is required"
-            )
-        if not cameras[camera_id].fixed_neutral_tone_curve_status:
-            raise CameraAppearanceError(
-                f"{camera_id} fixed_neutral_tone_curve_status is required"
             )
     try:
         source_path = source.relative_to(REPO_ROOT).as_posix()
@@ -986,55 +938,6 @@ def _apply_fixed_profile_gain(image_rgb, profile: CameraAppearanceProfile):
     }
 
 
-def _apply_fixed_luma_tone_curve(image_rgb, profile: CameraAppearanceProfile):
-    """Apply one aggregate camera contrast curve without per-frame fitting.
-
-    Source knots were measured once from the aggregate synthetic reference
-    replay and target knots from curated real archive frames.  A shared luma
-    ratio preserves channel relationships instead of independently warping
-    object colours.
-    """
-
-    import numpy as np
-
-    image = np.asarray(image_rgb)
-    source = np.asarray(
-        (0, *profile.fixed_neutral_luma_source_p05_median_p95_8bit, 255),
-        dtype=np.float32,
-    )
-    target = np.asarray(
-        (0, *profile.fixed_neutral_luma_target_p05_median_p95_8bit, 255),
-        dtype=np.float32,
-    )
-    floating = image.astype(np.float32)
-    luma = (
-        54.0 * floating[..., 0]
-        + 183.0 * floating[..., 1]
-        + 19.0 * floating[..., 2]
-    ) / 256.0
-    mapped = np.interp(luma, source, target).astype(np.float32)
-    ratio = np.ones_like(luma, dtype=np.float32)
-    valid = luma >= 1.0
-    ratio[valid] = mapped[valid] / luma[valid]
-    result = np.clip(
-        np.rint(floating * ratio[..., None]), 0.0, 255.0
-    ).astype(np.uint8)
-    return result, {
-        "applied": True,
-        "mode": "fixed_three_knot_luma",
-        "source_neutral_luma_p05_median_p95_8bit": source[1:4].tolist(),
-        "target_neutral_luma_p05_median_p95_8bit": target[1:4].tolist(),
-        "endpoints_8bit": [[0, 0], [255, 255]],
-        "per_frame_statistics_used": False,
-        "channel_rule": "one Rec.709-like luma ratio applied to all RGB channels",
-        "profile_status": profile.fixed_neutral_tone_curve_status,
-        "limitation": (
-            "Fixed decoded-display contrast fit only; not a measured native "
-            "camera response curve."
-        ),
-    }
-
-
 def create_deployment_preview(
     image_rgb,
     profiles: CameraAppearanceProfiles,
@@ -1046,7 +949,6 @@ def create_deployment_preview(
     match_curated_neutral_median: bool = True,
     photometric_mode: str | None = None,
     compression_domain: str = "archive_yuv420",
-    apply_fixed_tone_curve: bool = True,
 ) -> DeploymentPreviewResult:
     """Create a deterministic deployment-like view without changing raw RGB.
 
@@ -1061,8 +963,7 @@ def create_deployment_preview(
     ``match_curated_neutral_median`` switch.  Training collection should use
     ``fixed_profile`` so sample-specific exposure/white-balance variation is
     not normalized away.  ``archive_yuv420`` preserves the legacy I420 round
-    trip; ``uncompressed_preview`` retains resized display RGB.  The fixed
-    tone curve uses aggregate profile knots and never refits the current frame.
+    trip; ``uncompressed_preview`` retains resized display RGB.
     """
 
     import cv2
@@ -1110,17 +1011,6 @@ def create_deployment_preview(
             "applied": False,
             "mode": "none",
             "reason": "disabled by caller",
-        }
-    if not isinstance(apply_fixed_tone_curve, bool):
-        raise CameraAppearanceError("apply_fixed_tone_curve must be a boolean")
-    if apply_fixed_tone_curve:
-        preview, tone_curve = _apply_fixed_luma_tone_curve(preview, profile)
-    else:
-        tone_curve = {
-            "applied": False,
-            "mode": "disabled",
-            "reason": "disabled by caller",
-            "per_frame_statistics_used": False,
         }
     mask = np.zeros((height, width), dtype=np.uint8)
     digest = hashlib.sha256(
@@ -1199,7 +1089,6 @@ def create_deployment_preview(
             "curated_neutral_median_match": photometric,
             "photometric_alignment": photometric,
             "photometric_alignment_mode": selected_photometric_mode,
-            "fixed_neutral_tone_curve": tone_curve,
             "av1_bitstream_reproduced": False,
             "compression_domain": {
                 "mode": selected_compression_domain,

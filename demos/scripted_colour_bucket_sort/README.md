@@ -162,12 +162,12 @@ flat; side/wrist use subdirectories). Every camera gets its own checked-in
 radial calibration, deterministic noise seed, exposure/white-balance, gamma,
 vignette, blur, and JPEG robustness transform. Separate 640x360 archive-like
 previews live under `deployment_frames/<camera>/`. Those previews use a fixed,
-recorded camera gain so they do not normalize away randomized exposure, then a
-fixed, logged three-knot luma curve fitted from aggregate reference/real
-neutral percentiles and an I420 chroma round trip. No curve is estimated from
-the current frame. They approximate the decoded archive domain; they do not
-reproduce the AV1 bitstream or constitute a native photometric calibration.
-Raw renders are never overwritten.
+recorded camera gain so they do not normalize away randomized exposure, then
+apply an I420 chroma round trip. A tested global neutral-luma curve is not
+applied: in the matched seed-7 audit it moved every measured cube/container
+patch farther from the physical targets. The previews approximate the decoded
+archive domain; they do not reproduce the AV1 bitstream or constitute a native
+photometric calibration. Raw renders are never overwritten.
 
 Training mode also adds three seeded neutral visual distractors by default,
 outside the active pickup region. Override the count with

@@ -52,12 +52,12 @@ postprocess adds each selected camera's measured one-term radial distortion
 (`k1`) to its pinhole render and applies replayable, camera-separated exposure,
 white balance, gamma, noise, blur, vignette, and JPEG effects. These display-RGB
 effects are robustness approximations, not a physical camera model. A separate
-archive preview applies fixed per-camera gains, then a fixed three-knot luma
-curve fitted from aggregate synthetic and curated real neutral-pixel
-percentiles, followed by an I420 round trip. The curve is logged and never
-refitted from the current frame, so it preserves episode exposure variation.
-It remains a decoded-display contrast fit and does not claim to reproduce a
-native camera response or the downloaded AV1 bitstream.
+archive preview applies fixed per-camera gains and an I420 round trip. A global
+neutral-luma curve was tested and rejected: on the matched seed-7 render it
+moved every audited cube/container patch farther from the two-frame physical
+targets. Revisit contrast fitting only with better camera-response evidence;
+the current preview does not claim to reproduce a native camera response or
+the downloaded AV1 bitstream.
 
 Training mode also enables the checked-in scan of the real work surface,
 `reference-assets/table/manipbench-table-surface.png`, and removes the pristine

@@ -102,14 +102,6 @@ class CameraProfileTests(unittest.TestCase):
             self.profiles.camera("side").heldout_neutral_rgb_median_8bit,
             (166, 157, 152),
         )
-        self.assertEqual(
-            self.profiles.camera("table").fixed_neutral_luma_source_p05_median_p95_8bit,
-            (88, 140, 147),
-        )
-        self.assertEqual(
-            self.profiles.camera("table").fixed_neutral_luma_target_p05_median_p95_8bit,
-            (60, 141, 167),
-        )
 
     @staticmethod
     def _pattern(width: int, height: int) -> np.ndarray:
@@ -299,7 +291,6 @@ class CameraProfileTests(unittest.TestCase):
             camera_id="table",
             episode_seed=3,
             frame_index=4,
-            apply_fixed_tone_curve=False,
         )
         resized = cv2.resize(source, (640, 360), interpolation=cv2.INTER_AREA)
         self.assertFalse(np.array_equal(result.image_rgb, resized))
@@ -322,44 +313,12 @@ class CameraProfileTests(unittest.TestCase):
             episode_seed=3,
             frame_index=4,
             compression_domain="uncompressed_preview",
-            apply_fixed_tone_curve=False,
         )
         np.testing.assert_array_equal(uncompressed.image_rgb, resized)
         self.assertEqual(
             uncompressed.processing["compression_domain"]["mode"],
             "uncompressed_preview",
         )
-
-    def test_fixed_tone_curves_map_configured_knots_without_frame_fit(self):
-        for camera_id in ("table", "side", "wrist"):
-            with self.subTest(camera=camera_id):
-                profile = self.profiles.camera(camera_id)
-                width, height = profile.native_resolution
-                for source_value, target_value in zip(
-                    profile.fixed_neutral_luma_source_p05_median_p95_8bit,
-                    profile.fixed_neutral_luma_target_p05_median_p95_8bit,
-                    strict=True,
-                ):
-                    source = np.full(
-                        (height, width, 3), source_value, dtype=np.uint8
-                    )
-                    result = create_deployment_preview(
-                        source,
-                        self.profiles,
-                        camera_id=camera_id,
-                        episode_seed=23,
-                        frame_index=0,
-                        photometric_mode="none",
-                        compression_domain="uncompressed_preview",
-                    )
-                    np.testing.assert_array_equal(
-                        result.image_rgb[0, 0],
-                        np.asarray([target_value] * 3, dtype=np.uint8),
-                    )
-                    evidence = result.processing["fixed_neutral_tone_curve"]
-                    self.assertTrue(evidence["applied"])
-                    self.assertFalse(evidence["per_frame_statistics_used"])
-                    self.assertEqual(evidence["mode"], "fixed_three_knot_luma")
 
     def test_curated_neutral_median_is_applied_only_to_preview(self):
         source = np.full((1080, 1920, 3), (90, 100, 110), dtype=np.uint8)
@@ -453,15 +412,6 @@ class CameraProfileTests(unittest.TestCase):
                 episode_seed=1,
                 frame_index=0,
                 compression_domain="av1",
-            )
-        with self.assertRaisesRegex(CameraAppearanceError, "apply_fixed_tone_curve"):
-            create_deployment_preview(
-                source,
-                self.profiles,
-                camera_id="wrist",
-                episode_seed=1,
-                frame_index=0,
-                apply_fixed_tone_curve=1,
             )
 
 
