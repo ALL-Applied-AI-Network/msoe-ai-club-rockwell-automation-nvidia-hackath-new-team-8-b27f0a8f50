@@ -271,6 +271,18 @@ over-segmentation; semantic classification, calibrated geometry, GPU latency,
 runtime compatibility, and AGPL/Enterprise licensing remain blockers. Do not
 promote this branch into the runtime provider from this evidence.
 
+## Cube aspect-ratio ablation
+
+The persistent yellow-C miss in a clean hardware frame is caused by the
+baseline's 1.5 component-aspect gate, but simply widening that gate is not the
+right fix. The matched sweep in [`CUBE_ASPECT_EXPERIMENT.md`](CUBE_ASPECT_EXPERIMENT.md)
+found no setting that improved confidence-eligible recall without worsening
+false-target evidence. At 2.0, the missed cube finally clears the downstream
+0.2 confidence threshold, but clean-frame false positives rise from one to
+three and the 192-frame replay emits 24.8% more raw cube candidates. Keep 1.5
+in the production profile; the aspect-1.8 profile is reproducible rejected
+evidence, not a hardware recommendation.
+
 ## Pose semantics
 
 ### Cube
