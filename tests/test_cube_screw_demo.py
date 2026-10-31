@@ -69,6 +69,21 @@ class CubeScrewScenarioTests(unittest.TestCase):
         )
         self.assertIsNone(demo_module._take_deferred_simulation_app())
 
+    def test_embedded_failed_verification_remains_a_collectible_negative(self):
+        demo_module._enforce_standalone_success(
+            False,
+            defer_shutdown=True,
+        )
+        demo_module._enforce_standalone_success(
+            True,
+            defer_shutdown=False,
+        )
+        with self.assertRaisesRegex(RuntimeError, "verification failed"):
+            demo_module._enforce_standalone_success(
+                False,
+                defer_shutdown=False,
+            )
+
     def test_scene_inherits_three_cubes_and_adds_two_unique_red_screws(self):
         items = build_sort_items(self.config)
         self.assertEqual(len(items), 5)

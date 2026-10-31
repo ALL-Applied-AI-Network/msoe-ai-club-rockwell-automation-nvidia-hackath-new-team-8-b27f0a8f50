@@ -101,6 +101,17 @@ def _take_deferred_simulation_app():
     return app
 
 
+def _enforce_standalone_success(
+    task_complete: bool,
+    *,
+    defer_shutdown: bool,
+) -> None:
+    if not task_complete and not defer_shutdown:
+        raise RuntimeError(
+            "Cube-and-screw verification failed; inspect execution_report.json"
+        )
+
+
 def _reference_model(value: str | None, filename: str) -> Path:
     if value:
         path = Path(value).expanduser().resolve()
@@ -1084,10 +1095,10 @@ def main() -> None:
             f"{report['completion_summary']} frames={frame_number}",
             flush=True,
         )
-        if not report["task_complete"]:
-            raise RuntimeError(
-                "Cube-and-screw verification failed; inspect execution_report.json"
-            )
+        _enforce_standalone_success(
+            report["task_complete"],
+            defer_shutdown=args.defer_shutdown,
+        )
     except Exception:
         import traceback
 
