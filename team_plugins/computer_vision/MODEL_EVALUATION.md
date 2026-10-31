@@ -271,6 +271,62 @@ over-segmentation; semantic classification, calibrated geometry, GPU latency,
 runtime compatibility, and AGPL/Enterprise licensing remain blockers. Do not
 promote this branch into the runtime provider from this evidence.
 
+## Clean archived cube pilot and wrist-view audit
+
+The strongest current hand-free table-camera pilot uses source frames 3800 and
+3820 from hardware rollout `r20261029-88a87b`. It contains nine physical cubes
+in one static layout, observed twice. The provisional, unreviewed labels report
+14/18 true-positive reference rows, four dropouts, and one scored false
+positive: 77.8% row-level recall and 93.3% scored precision. A declared
+lower-right staging region excludes nine unresolved predictions, so this is a
+pickup-task/ROI-conditioned result, not whole-image precision. One yellow cube
+is missed in both frames; two other cubes flicker. There is still no independent
+base-pose truth.
+
+An offline wrist-view audit used the same frames, archived joint state, checked-
+in FK and `T_flange_cam`, the unchanged known-size HSV detector, and the 16 mm
+observation profile. The wrist detector returned all six labeled cubes visible
+in its field of view in both frames, including the persistent table-camera
+yellow-cube miss at confidence 0.509 and 0.519. A provisional class/presence
+union covers 17/18 rows (94.4%) and all 8/8 clearly in-pickup repeated rows.
+This is two correlated frames, not a standardized multi-camera accuracy result.
+
+Corresponding wrist/table base-XY estimates disagree by about 6.5--10.8 mm
+(about 8.6 mm mean), and the dataset has nominally aligned row indices rather
+than measured per-camera exposure timestamps. Therefore:
+
+- keep table RGB as the global pose source;
+- use a settled wrist view only as presence/coverage evidence and to trigger
+  reobservation;
+- do not average or command a wrist-only grasp pose; and
+- validate wrist extrinsics, exposure/joint timing, and end-to-end base error
+  against independently taught/measured points before coordinate fusion.
+
+Reproducible evidence is outside Git under
+`HardwareResults/VisionExperiments/wrist-active-perception-audit/` and is
+hash-indexed by `ARTIFACTS.sha256`.
+
+## Cube aspect-gate ablation — rejected
+
+The persistent yellow miss has an approximately 18x30-pixel mask in the
+1920x1080 annotation image, so the baseline 1.5 component-aspect gate rejects
+it. The isolated branch `vision/cube-recall-aspect` at `9e74555` swept limits
+1.50--2.00 behind an explicit experimental profile; defaults remained
+unchanged.
+
+- Baseline: 14 TP / 1 FP and 1,562 cube candidates over 192 replay frames.
+- Aspect 1.8: raw 16 TP / 3 FP, but confidence-eligible (>=0.2) remains
+  14 TP / 2 FP; 1,910 candidates (+22.3%).
+- Aspect 2.0: confidence-eligible 16 TP / 3 FP; 1,949 candidates (+24.8%).
+- On the seven-frame progression pilot, 1.8 keeps 17/17 recall but increases
+  confidence-eligible false positives from 15 to 18.
+
+No tested limit improves operational recall without materially worsening
+false-target evidence. Reject the aspect-only change and do not select the
+experimental profile for hardware. Prefer calibrated stop-and-look multi-view
+coverage or a shape/instance method that beats the same held-out labels and
+clutter cases.
+
 ## Pose semantics
 
 ### Cube

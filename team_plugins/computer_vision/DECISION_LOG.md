@@ -209,3 +209,32 @@
   existing VM blindly because reset persistence is path-limited.
 - Next experiment: retry only after Brev service recovers or organizer support
   confirms instance state.
+
+## 2026-10-31 — Clean cube pilot and wrist-assisted coverage
+
+- Hypothesis: a deliberately different wrist viewpoint can recover a persistent
+  table-camera miss without weakening the table detector.
+- Setup: hand-free hardware frames 3800/3820 from one static nine-cube layout;
+  table/wrist RGB at archived 640x360; provisional table labels; recorded
+  joints; checked-in FK and wrist calibration; unchanged 16 mm HSV detector.
+- Table result: 14/18 reference rows, one scored false positive. One yellow
+  cube is missed twice.
+- Wrist result: all six labeled cubes in the wrist FOV are detected in both
+  frames, including the table dropout. Provisional table+wrist presence union
+  is 17/18 and covers 8/8 clearly in-pickup repeated rows.
+- Blocker: corresponding wrist/table base XY differs by 6.5--10.8 mm and there
+  are no independent pose truths or per-camera exposure timestamps.
+- Decision: continue stop-and-look wrist **presence/coverage** experiments; do
+  not use wrist coordinates for grasping or average camera poses until an
+  independently measured calibration/timing test passes.
+
+## 2026-10-31 — Cube aspect-only recovery rejected
+
+- Hypothesis: widening the 1.5 color-component aspect gate can recover the
+  persistent yellow miss without materially increasing false targets.
+- Result: aspect 1.8 recovers the raw contour but it remains below the 0.2
+  downstream confidence threshold; full-replay candidates rise 22.3% and
+  confidence-eligible false positives worsen. Aspect 2.0 clears the missed
+  cube but triples clean-frame false positives and raises candidates 24.8%.
+- Decision: do not promote the experiment. Keep the selected 1.5 profile and
+  the rejected ablation isolated on `vision/cube-recall-aspect`.
