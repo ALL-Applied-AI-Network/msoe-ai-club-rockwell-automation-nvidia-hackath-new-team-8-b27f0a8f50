@@ -125,9 +125,10 @@ The tests cover:
 - non-monotonic time and non-fabrication of occlusion on disappearance; and
 - preservation of the cube path.
 
-The provider has 26 focused tests, the annotation evaluator has 12, replay and
-overlay/provenance handling has 9, the live diagnostic has 14, and the
-annotation-bundle tool has 9, for 70 computer-vision-team tests total.
+The provider has 26 focused tests, the annotation evaluator has 15, replay and
+overlay/provenance handling has 9, the live diagnostic has 14, the
+annotation-bundle tool has 14, and the realistic-sensor evaluator has 3, for
+81 computer-vision-team tests total.
 Run the annotation evaluator tests directly with:
 
 ```bash
@@ -138,6 +139,58 @@ uv run --project hardware/fanuc_cell python -m unittest \
 See `ANNOTATION_EVALUATION.md` for the strict, hash-pinned manual annotation
 format and symmetry-aware evaluation workflow needed to turn native hardware
 captures into honest accuracy measurements.
+
+## Score realistic Isaac sensor frames
+
+`evaluate_synthetic_runs.py` measures the selected hybrid profile on the
+native, sensor-randomized **table** image from each realistic Isaac run. It
+uses the fixed checked-in physical camera calibration and the explicit 10 mm
+cube profile. The provider receives only `sensor_frames/f00000.png`; the tool
+does not open `frame_labels/f00000.json` evaluator truth until inference has
+returned.
+
+```bash
+uv run --project hardware/fanuc_cell python -m \
+  team_plugins.computer_vision.evaluate_synthetic_runs \
+  /path/to/vision_training_seed_101 \
+  /path/to/vision_training_seed_211 \
+  --output /path/outside-git/synthetic-vision-evaluation.json
+```
+
+The report includes cube precision/recall, extra and missing detections, XY
+and 3D position error, square-symmetry yaw error, inference latency, exact
+input/label hashes, profile/calibration/tool/Git provenance, and separate
+counts of screw or unknown outputs. Detection matching uses the logical cube
+colour and nearest XY; a large pose error remains visible rather than being
+silently converted into a detection miss.
+
+To avoid survivorship bias when Isaac fails before writing frames, pass a
+batch-status manifest as well as (or instead of) positional directories:
+
+```json
+{
+  "schema_version": 1,
+  "runs": [
+    {"seed": 101, "status": "success", "run_dir": "vision_training_seed_101"},
+    {"seed": 211, "status": "failed", "returncode": 1,
+     "error": "Isaac exited before capture"}
+  ]
+}
+```
+
+```bash
+uv run --project hardware/fanuc_cell python -m \
+  team_plugins.computer_vision.evaluate_synthetic_runs \
+  --batch-status /path/to/batch-status.json \
+  --output /path/outside-git/synthetic-vision-evaluation.json
+```
+
+Only `f00000` is accepted. Later frames have no measured visibility fraction
+or occlusion state, so treating every later absent cube as a false negative
+would be dishonest. Side and wrist images are likewise excluded from the
+quantitative score because they do not yet have equivalent evaluator labels.
+The current realistic scene has no screws; it can reveal screw false positives
+but cannot measure screw recall.
 
 ## Run a no-motion real-video replay
 
@@ -291,6 +344,8 @@ policy changes.
   and tracking.
 - `profile.hybrid-geometry.v1.json`: exact opt-in integration profile.
 - `replay_camera.py`: offline no-motion replay/overlay tool.
+- `evaluate_synthetic_runs.py`: first-frame realistic-sensor evaluator with
+  failed-seed accounting and evaluator-truth isolation.
 - `live_no_motion_diagnostic.py`: bounded live perception capture while the
   official policy returns its measured-pose hold.
 - `prepare_annotation_bundle.py`: exact-frame, lossless, provenance-pinned
