@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import cv2
 import numpy as np
@@ -21,6 +22,9 @@ from team_plugins.computer_vision.yoloe_experiment import (
 )
 from team_plugins.computer_vision.yoloe_visual_prompt_experiment import (
     ManifestError,
+    _git_environment,
+    _git_value,
+    _worktree_dirty,
     load_manifest,
 )
 
@@ -296,6 +300,33 @@ class ManifestTests(unittest.TestCase):
             manifest.write_text(json.dumps(raw), encoding="utf-8")
             with self.assertRaisesRegex(ManifestError, "letters, numbers"):
                 load_manifest(manifest)
+
+
+class GitProvenanceTests(unittest.TestCase):
+    def test_current_cross_os_worktree_provenance_is_readable(self):
+        repository = Path(__file__).resolve().parents[3]
+        environment = _git_environment(repository)
+        self.assertIsInstance(environment, dict)
+        self.assertRegex(
+            _git_value(repository, "rev-parse", "HEAD"), r"^[0-9a-f]{40}$"
+        )
+        self.assertTrue(_git_value(repository, "branch", "--show-current"))
+        self.assertIsInstance(_worktree_dirty(repository), bool)
+
+    def test_git_failures_are_not_misreported_as_clean(self):
+        repository = Path(__file__).resolve().parents[3]
+        failed = mock.Mock(returncode=1, stdout="", stderr="synthetic git failure")
+        with mock.patch(
+            "team_plugins.computer_vision.yoloe_visual_prompt_experiment._git_environment",
+            return_value={},
+        ), mock.patch(
+            "team_plugins.computer_vision.yoloe_visual_prompt_experiment.subprocess.run",
+            return_value=failed,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "synthetic git failure"):
+                _git_value(repository, "rev-parse", "HEAD")
+            with self.assertRaisesRegex(RuntimeError, "synthetic git failure"):
+                _worktree_dirty(repository)
 
 
 if __name__ == "__main__":
