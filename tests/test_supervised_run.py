@@ -30,6 +30,7 @@ class SupervisedRunTests(unittest.TestCase):
                 supervised_run.GRASP_FIT_ENV: "1",
                 supervised_run.MAX_ACTIONS_ENV: "8",
                 supervised_run.STABLE_OBSERVATIONS_ENV: "1",
+                supervised_run.MOTION_PROFILE_ENV: "conservative",
                 supervised_run._POLICY_TUNING_ENVIRONMENT[0]: "999",
             },
             clear=False,
@@ -48,9 +49,23 @@ class SupervisedRunTests(unittest.TestCase):
             self.assertEqual(os.environ[supervised_run.CUBE_EDGE_ENV], "10")
             self.assertNotIn(supervised_run.GRASP_FIT_ENV, os.environ)
             self.assertEqual(os.environ[supervised_run.MAX_ACTIONS_ENV], "32")
+            self.assertEqual(
+                os.environ[supervised_run.MOTION_PROFILE_ENV], "smooth"
+            )
             self.assertEqual(os.environ[supervised_run.STABLE_OBSERVATIONS_ENV], "3")
             for name in supervised_run._POLICY_TUNING_ENVIRONMENT:
                 self.assertNotIn(name, os.environ)
+        self.assertEqual(calls, [[]])
+
+    def test_conservative_motion_profile_remains_an_explicit_fallback(self):
+        calls: list[list[str]] = []
+        supervised_run.main(
+            ["hover", "--cube-mm", "10", "--motion-profile", "conservative"],
+            delegate=lambda a: calls.append(list(a)),
+        )
+        self.assertEqual(
+            os.environ[supervised_run.MOTION_PROFILE_ENV], "conservative"
+        )
         self.assertEqual(calls, [[]])
 
     def test_hover_requires_explicit_cube_profile_and_never_enables_descent(self):
@@ -123,6 +138,8 @@ class SupervisedRunTests(unittest.TestCase):
         summary = json.loads(output.getvalue())
         self.assertEqual(summary["cube_edge_mm"], 16)
         self.assertTrue(summary["descent_enabled"])
+        self.assertEqual(summary["motion_profile"], "smooth")
+        self.assertEqual(summary["nominal_linear_speed_mm_s"], 100.0)
         self.assertIn("--confirm-grasp-fit", summary["missing_required_inputs"])
 
     def test_mock_arguments_are_forwarded_without_raw_environment_exports(self):

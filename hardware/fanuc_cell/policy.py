@@ -144,6 +144,15 @@ class Policy:
     DESTINATION_MODE_ENV = "ROCKWELL_DESTINATION_MODE"
     CONFIRM_GRASP_FIT_ENV = "ROCKWELL_CONFIRM_CUBE_GRASP_FIT"
     STABLE_OBSERVATIONS_ENV = "ROCKWELL_INITIAL_STABLE_OBSERVATIONS"
+    MOTION_PROFILE_ENV = "ROCKWELL_HARDWARE_MOTION_PROFILE"
+    MOTION_PROFILES = {
+        "conservative": (5.0, 5.0),
+        # Hardware-only: 10 mm / 0.1 s is 100 mm/s. This stays below the
+        # current service limits while making every recorded motion phase fit
+        # in the launcher's 32-row chunk. Isaac continues to use its shared
+        # 5 mm trajectory configuration.
+        "smooth": (10.0, 8.0),
+    }
     MAX_ACTIONS_PER_CALL = 100
     ABSOLUTE_MAX_MOTION_CALLS_PER_PHASE = 200
     MAX_NO_PROGRESS_CALLS = 4
@@ -258,6 +267,20 @@ class Policy:
                 )
             self._max_actions_per_call = parsed
 
+        self._motion_profile = os.environ.get(
+            self.MOTION_PROFILE_ENV, "conservative"
+        ).strip().lower()
+        try:
+            (
+                self._max_linear_step_mm,
+                self._max_angular_step_deg,
+            ) = self.MOTION_PROFILES[self._motion_profile]
+        except KeyError as exc:
+            choices = ", ".join(sorted(self.MOTION_PROFILES))
+            raise ValueError(
+                f"{self.MOTION_PROFILE_ENV} must be one of: {choices}"
+            ) from exc
+
         self._maximum_observation_age_s = _finite_environment_float(
             "ROCKWELL_MAX_OBSERVATION_AGE_S", 3.0, minimum=0.1
         )
@@ -321,6 +344,10 @@ class Policy:
             hardware_vision_cube_edge_mm=self._vision_cube_edge_m * 1000.0,
             hardware_destination_mode=self._destination_mode,
             initial_stable_observations=self._stable_observations_required,
+            hardware_motion_profile=self._motion_profile,
+            maximum_linear_step_mm=self._max_linear_step_mm,
+            maximum_angular_step_deg=self._max_angular_step_deg,
+            nominal_linear_speed_mm_s=self._max_linear_step_mm / self.DT,
             tcp_beyond_fingertips_mm=self.config.frames.tcp_beyond_fingertips_mm,
             motion_interlock_env=self.MOTION_INTERLOCK_ENV,
             descent_interlock_env=self.DESCENT_INTERLOCK_ENV,
@@ -391,6 +418,10 @@ class Policy:
             physical_descent_enabled=self._descent_enabled,
             hardware_vision_cube_edge_mm=self._vision_cube_edge_m * 1000.0,
             hardware_destination_mode=self._destination_mode,
+            hardware_motion_profile=self._motion_profile,
+            maximum_linear_step_mm=self._max_linear_step_mm,
+            maximum_angular_step_deg=self._max_angular_step_deg,
+            nominal_linear_speed_mm_s=self._max_linear_step_mm / self.DT,
             grasp_fit_explicitly_confirmed=self._grasp_fit_confirmed,
             active_assumption=(
                 "UTOOL1 TCP at fingertips (0 mm extra); cube size is an "
@@ -466,86 +497,96 @@ class Policy:
                         "observations",
                     )
 
-            phase = self._phases[self._phase_index]
-            if phase.requires_reobservation_before:
-                scenes = self._detect_scene_views(obs)
-                try:
-                    self._revalidate_before_descent(
-                        scenes.pickable,
-                        generic_scene=scenes.observation,
-                        unsupported_objects=scenes.unsupported_objects,
-                    )
-                    revalidated_this_call = True
-                except PlanningError as exc:
-                    message = str(exc)
-                    retryable = (
-                        " target is missing" in message
-                        or " target is ambiguous" in message
-                    )
-                    if (
-                        retryable
-                        and self._revalidation_visibility_failures
-                        < self.MAX_REVALIDATION_VISIBILITY_RETRIES
-                    ):
-                        self._revalidation_visibility_failures += 1
-                        self._emit(
-                            "pre_descent_visibility_retry",
-                            attempt=self._revalidation_visibility_failures,
-                            maximum_attempts=self.MAX_REVALIDATION_VISIBILITY_RETRIES,
-                            reason=message,
-                        )
-                        return self._hold_action(
-                            obs,
-                            "inspection view temporarily incomplete; waiting for "
-                            "a fresh table-camera frame",
-                        )
-                    raise
+            # A measured zero-dwell waypoint can hand directly to the next
+            # semantic phase in this same act() call. The loop never crosses
+            # the explicit camera-reobservation gate and remains bounded by
+            # the finite phase list.
+            for _ in range(len(self._phases) + 1):
                 phase = self._phases[self._phase_index]
+                if phase.requires_reobservation_before:
+                    scenes = self._detect_scene_views(obs)
+                    try:
+                        self._revalidate_before_descent(
+                            scenes.pickable,
+                            generic_scene=scenes.observation,
+                            unsupported_objects=scenes.unsupported_objects,
+                        )
+                        revalidated_this_call = True
+                    except PlanningError as exc:
+                        message = str(exc)
+                        retryable = (
+                            " target is missing" in message
+                            or " target is ambiguous" in message
+                        )
+                        if (
+                            retryable
+                            and self._revalidation_visibility_failures
+                            < self.MAX_REVALIDATION_VISIBILITY_RETRIES
+                        ):
+                            self._revalidation_visibility_failures += 1
+                            self._emit(
+                                "pre_descent_visibility_retry",
+                                attempt=self._revalidation_visibility_failures,
+                                maximum_attempts=(
+                                    self.MAX_REVALIDATION_VISIBILITY_RETRIES
+                                ),
+                                reason=message,
+                            )
+                            return self._hold_action(
+                                obs,
+                                "inspection view temporarily incomplete; waiting "
+                                "for a fresh table-camera frame",
+                            )
+                        raise
+                    phase = self._phases[self._phase_index]
 
-            processing_age_s = self._relative_observation_age_s(obs)
-            if processing_age_s > self._maximum_observation_age_s:
-                reason = (
-                    "camera observation expired during perception/planning: "
-                    f"{processing_age_s:.2f} s > "
-                    f"{self._maximum_observation_age_s:.2f} s"
-                )
-                self._emit(
-                    "planning_deadline_missed",
-                    **self._plan_evidence_fields(self._active_plan),
-                    attempt_id=self._active_attempt_id,
-                    observation_age_s=processing_age_s,
-                    maximum_observation_age_s=(
-                        self._maximum_observation_age_s
-                    ),
-                    forward_motion_emitted=False,
-                )
-                if not started_with_active_plan:
-                    self._cancel_unexecuted_plan(reason)
-                elif revalidated_this_call:
-                    self._phase_index = next(
-                        index
-                        for index, candidate_phase in enumerate(self._phases)
-                        if candidate_phase.requires_reobservation_before
+                processing_age_s = self._relative_observation_age_s(obs)
+                if processing_age_s > self._maximum_observation_age_s:
+                    reason = (
+                        "camera observation expired during perception/planning: "
+                        f"{processing_age_s:.2f} s > "
+                        f"{self._maximum_observation_age_s:.2f} s"
                     )
-                    self._reset_phase_watchdog()
-                else:
-                    self._block(reason)
-                return self._hold_action(obs, reason)
+                    self._emit(
+                        "planning_deadline_missed",
+                        **self._plan_evidence_fields(self._active_plan),
+                        attempt_id=self._active_attempt_id,
+                        observation_age_s=processing_age_s,
+                        maximum_observation_age_s=(
+                            self._maximum_observation_age_s
+                        ),
+                        forward_motion_emitted=False,
+                    )
+                    if not started_with_active_plan:
+                        self._cancel_unexecuted_plan(reason)
+                    elif revalidated_this_call:
+                        self._phase_index = next(
+                            index
+                            for index, candidate_phase in enumerate(self._phases)
+                            if candidate_phase.requires_reobservation_before
+                        )
+                        self._reset_phase_watchdog()
+                    else:
+                        self._block(reason)
+                    return self._hold_action(obs, reason)
 
-            # Revalidation is performed from a laterally offset inspection
-            # pose. Align over the refreshed target first, then apply the
-            # descent interlock; never ask the table camera to see through the
-            # gripper at the direct-overhead pose.
-            if phase.name == "descend_pick" and not self._descent_enabled:
-                return self._hold_action(
-                    obs,
-                    "physical descent interlock is closed; holding at hover. "
-                    f"Set {self.DESCENT_INTERLOCK_ENV}=1 only after supervised "
-                    f"{self._vision_cube_edge_m * 1000.0:g} mm cube, grasp-fit, "
-                    "and fingertip-TCP verification",
-                )
+                # Revalidation is performed from a laterally offset inspection
+                # pose. Align over the refreshed target first, then apply the
+                # descent interlock; never ask the table camera to see through
+                # the gripper at the direct-overhead pose.
+                if phase.name == "descend_pick" and not self._descent_enabled:
+                    return self._hold_action(
+                        obs,
+                        "physical descent interlock is closed; holding at hover. "
+                        f"Set {self.DESCENT_INTERLOCK_ENV}=1 only after supervised "
+                        f"{self._vision_cube_edge_m * 1000.0:g} mm cube, grasp-fit, "
+                        "and fingertip-TCP verification",
+                    )
 
-            return self._execute_phase(obs, phase)
+                chunk = self._execute_phase(obs, phase)
+                if chunk is not None:
+                    return chunk
+            raise PlanningError("phase transition loop exceeded the finite plan")
         except (ActionValidationError, PlanningError, VisionError, ValueError) as exc:
             if (
                 self._active_plan is not None
@@ -1285,7 +1326,13 @@ class Policy:
         )
 
         if not at_target:
-            all_rows = interpolate_tcp_rows(current, target, self.config)
+            all_rows = interpolate_tcp_rows(
+                current,
+                target,
+                self.config,
+                max_linear_step_mm=self._max_linear_step_mm,
+                max_angular_step_deg=self._max_angular_step_deg,
+            )
             if self._phase_motion_call_limit is None:
                 expected_calls = math.ceil(
                     len(all_rows) / self._max_actions_per_call
@@ -1339,6 +1386,27 @@ class Policy:
             )
             self._last_commanded_gripper = float(rows[-1, 6])
             return rows.tolist()
+
+        next_phase_index = self._phase_index + 1
+        can_stream_next_phase = (
+            phase.dwell_s <= 0.0
+            and self._phase_index < len(self._phases)
+            and self._phases[self._phase_index] is phase
+            and next_phase_index < len(self._phases)
+            and not self._phases[next_phase_index].requires_reobservation_before
+        )
+        if can_stream_next_phase:
+            self._emit(
+                "phase_complete",
+                phase=phase.name,
+                target_reached=True,
+                next_phase=self._phases[next_phase_index].name,
+                transition="same_observation",
+            )
+            self._phase_index = next_phase_index
+            self._phase_dwell_rows_remaining = None
+            self._reset_phase_watchdog()
+            return None
 
         if self._phase_dwell_rows_remaining is None:
             self._phase_dwell_rows_remaining = max(

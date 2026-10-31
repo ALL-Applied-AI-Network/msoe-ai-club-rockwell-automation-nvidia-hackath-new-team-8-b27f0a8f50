@@ -226,19 +226,22 @@ For a measured 10 mm cube, use `--cube-mm 10`; the special fit flag is required
 only for 16 mm contact. For physical bins, select `--destination bins` only
 when the approved submission and actual scene contain those bins.
 
-The default action chunk is 32 rows. `--max-actions 100` is available if a
-measured connection still starves the queue. Increasing the chunk does not
-change the configured 5 mm row step or 0.1 second timestep; it reduces pauses
-but also increases the interval before the next policy observation.
+The default action chunk is 32 rows. The supervised launcher now selects its
+hardware-only `smooth` profile: 10 mm per 0.1-second row and 8 degrees per row,
+or a nominal 100 mm/s Cartesian rate. That covers every recorded rollout-5
+phase in one chunk while remaining below the current service limits. Shared
+Isaac trajectories remain unchanged. Add `--motion-profile conservative` to
+restore the former 5 mm / 5-degree hardware profile.
 
 ## Current service limits versus archived text
 
 The live hackathon page is authoritative. On October 30, 2026 it listed
 **150 mm/s**, **15 mm per row**, **60 mm queued ahead**, and **10 degrees per
 row**. The historical site snapshot preserved in `scilabDocumentation.txt`
-contains older values of 100 mm/s, 12 mm, 40 mm, and 8 degrees. Do not tune to
-the larger live limits merely because they are available: this project remains
-conservative at a 5 mm Cartesian step and a nominal 50 mm/s.
+contains older values of 100 mm/s, 12 mm, 40 mm, and 8 degrees. The selected
+hardware `smooth` profile intentionally uses the common lower envelope:
+100 mm/s, 10 mm rows and 8-degree rows. It does not use the live service's
+maximum 150 mm/s setting.
 
 Other protocol bounds are enforced by the current official mock and server.
 Recheck the live page and mock before each new request rather than copying old

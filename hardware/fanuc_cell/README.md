@@ -166,8 +166,9 @@ your runs should stay off it.
 The live event site is authoritative for service limits. As of October 30,
 2026 it lists 150 mm/s, 15 mm per row, 60 mm queued ahead, and 10 degrees per
 row. An archived site snapshot in `scilabDocumentation.txt` contains older
-100/12/40/8 values. This project intentionally stays more conservative at a
-5 mm Cartesian row step and nominal 50 mm/s.
+100/12/40/8 values. Shared trajectories stay at 5 mm. The supervised hardware
+launcher defaults to a `smooth` profile using 10 mm rows, 8-degree rows and a
+nominal 100 mm/s; `--motion-profile conservative` restores 5 mm / 50 mm/s.
 
 ---
 

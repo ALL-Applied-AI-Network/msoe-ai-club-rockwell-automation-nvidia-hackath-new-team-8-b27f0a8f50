@@ -33,6 +33,7 @@ CUBE_EDGE_ENV = "ROCKWELL_VISION_CUBE_EDGE_MM"
 GRASP_FIT_ENV = "ROCKWELL_CONFIRM_CUBE_GRASP_FIT"
 MAX_ACTIONS_ENV = "ROCKWELL_MAX_ACTIONS_PER_ACT"
 STABLE_OBSERVATIONS_ENV = "ROCKWELL_INITIAL_STABLE_OBSERVATIONS"
+MOTION_PROFILE_ENV = "ROCKWELL_HARDWARE_MOTION_PROFILE"
 INTEGRATION_PROFILE_ENV = "ROCKWELL_INTEGRATION_PROFILE"
 VISION_CHECKPOINT_ENV = "ROCKWELL_VISION_CHECKPOINT"
 YOLO11N_PROFILE_PATH = (
@@ -57,6 +58,7 @@ _CONTROLLED_ENVIRONMENT = (
     GRASP_FIT_ENV,
     MAX_ACTIONS_ENV,
     STABLE_OBSERVATIONS_ENV,
+    MOTION_PROFILE_ENV,
     *_POLICY_TUNING_ENVIRONMENT,
 )
 
@@ -69,6 +71,7 @@ class LaunchSettings:
     destination: str
     cube_edge_mm: int
     max_actions_per_act: int
+    motion_profile: str
     vision: str | None = None
     vision_checkpoint: str | None = None
 
@@ -85,6 +88,7 @@ class LaunchSettings:
             DESTINATION_ENV: self.destination,
             CUBE_EDGE_ENV: str(self.cube_edge_mm),
             MAX_ACTIONS_ENV: str(self.max_actions_per_act),
+            MOTION_PROFILE_ENV: self.motion_profile,
             # Do not let an old debugging export weaken the live default.
             STABLE_OBSERVATIONS_ENV: "3",
         }
@@ -104,6 +108,10 @@ class LaunchSettings:
             "destination_mode": self.destination,
             "cube_edge_mm": self.cube_edge_mm,
             "max_actions_per_act": self.max_actions_per_act,
+            "motion_profile": self.motion_profile,
+            "nominal_linear_speed_mm_s": (
+                100.0 if self.motion_profile == "smooth" else 50.0
+            ),
             "vision": self.vision or "unchanged",
             "vision_checkpoint_configured": self.vision_checkpoint is not None,
             "scope": "process-local; inherited ROCKWELL_* arming flags cleared",
@@ -156,6 +164,16 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--motion-profile",
+        choices=("smooth", "conservative"),
+        default="smooth",
+        help=(
+            "smooth (default): hardware-only 10 mm / 0.1 s rows and 8-degree "
+            "angular rows; conservative: the prior 5 mm / 5-degree profile. "
+            "Neither option changes Isaac trajectories"
+        ),
+    )
+    parser.add_argument(
         "--vision",
         choices=("baseline", "yolo11n"),
         help=(
@@ -205,6 +223,7 @@ def _settings(args: argparse.Namespace) -> LaunchSettings:
         destination=args.destination,
         cube_edge_mm=args.cube_mm if args.cube_mm is not None else 10,
         max_actions_per_act=args.max_actions,
+        motion_profile=args.motion_profile,
         vision=args.vision,
         vision_checkpoint=args.vision_checkpoint,
     )

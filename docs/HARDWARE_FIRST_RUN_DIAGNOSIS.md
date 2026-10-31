@@ -76,10 +76,17 @@ placed cube or have the operator identify it before choosing 10 or 16 mm.
   transient missing/ambiguous view gets at most three fresh-frame retries;
   the former stale-target timestamp workaround was removed. The shared Isaac
   phase plan is unchanged.
-- The official client's adaptive prefetch is enabled. The launcher now
-  defaults to 32 rows per call and permits the protocol maximum of 100, while
-  retaining the same 5 mm per row and 0.1 s timestep. This removes queue
-  starvation between chunks without increasing commanded speed.
+- The official client's adaptive prefetch is enabled. The launcher defaults to
+  32 rows per call and permits the protocol maximum of 100. Its hardware-only
+  `smooth` profile now uses 10 mm per 0.1-second row (nominally 100 mm/s) and
+  8-degree angular rows, so every phase distance seen in rollout 5 fits in one
+  32-row call. Shared Isaac trajectories remain at 5 mm. Select
+  `--motion-profile conservative` to restore the former 5 mm / 50 mm/s hardware
+  behavior.
+- Once measured feedback says a zero-dwell waypoint was reached, the hardware
+  state machine can issue the next compatible phase from that same observation
+  instead of sending a redundant one-row hold. It still stops at the explicit
+  pre-descent camera recheck and retains grasp/release dwell phases.
 
 No HSV thresholds were changed, because the recorded cube colors already pass.
 
@@ -144,11 +151,12 @@ safety controller.
      --confirm-grasp-fit
    ```
 
-   The default 32-row chunks use adaptive prefetch and should remain
-   continuous within a motion phase. `--max-actions 100` is available if the
-   measured connection still starves the queue; it does not change the 5 mm
-   step or 50 mm/s nominal Cartesian rate. Deliberate grasp/release dwell and
-   measured phase transitions remain.
+   The default `smooth` profile uses 32-row chunks, adaptive prefetch and a
+   nominal 100 mm/s Cartesian rate. `--max-actions 100` remains available, but
+   it should not be needed for the distances in rollout 5. Deliberate camera
+   revalidation and grasp/release dwell remain. If the operator wants the old
+   speed as an immediate comparison or fallback, add
+   `--motion-profile conservative`.
 
 The current policy expects exactly one red, yellow, and blue cube in the
 configured pickup region for three stable observations. Cube positions may

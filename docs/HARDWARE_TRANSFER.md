@@ -176,10 +176,12 @@ limit—another reason to keep it provisional and centrally visible.
 The live hackathon site is authoritative for service motion limits. As of
 October 30, 2026 it lists 150 mm/s, 15 mm per row, 60 mm queued ahead, and 10°
 per row. The archived snapshot in `scilabDocumentation.txt` contains older
-100 mm/s, 12 mm, 40 mm, and 8° values. This project deliberately remains more
-conservative at a 5 mm Cartesian row step and nominal 50 mm/s. Recheck the live
-site and current mock before each request rather than increasing project limits
-to whatever maximum is advertised.
+100 mm/s, 12 mm, 40 mm, and 8° values. Shared trajectories remain at 5 mm, while
+the supervised hardware launcher's `smooth` profile uses the common lower
+envelope of 100 mm/s, 10 mm rows and 8° rows. The explicit
+`--motion-profile conservative` fallback restores 5 mm / 50 mm/s. Recheck the
+live site and current mock before each request rather than increasing project
+limits to whatever maximum is advertised.
 
 Passing the mock is necessary but not sufficient. The mock does not implement
 kinematics, collision checking, object motion, contact, or grasp success. The

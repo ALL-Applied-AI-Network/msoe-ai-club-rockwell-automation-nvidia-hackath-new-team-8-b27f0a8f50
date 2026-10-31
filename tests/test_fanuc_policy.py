@@ -30,6 +30,8 @@ from sorting_core import (  # noqa: E402
     SceneDetections,
     TipPoseBase,
     VisionError,
+    base_tip_pose_to_uf0_tcp,
+    uf0_tcp_to_base_tip,
 )
 
 
@@ -111,7 +113,14 @@ class FanucPolicyTests(unittest.TestCase):
         # a dedicated regression below exercises the real default of three
         # temporally consistent observations before any motion starts.
         patcher = mock.patch.dict(
-            os.environ, {Policy.STABLE_OBSERVATIONS_ENV: "1"}
+            os.environ,
+            {
+                Policy.STABLE_OBSERVATIONS_ENV: "1",
+                Policy.MOTION_INTERLOCK_ENV: "0",
+                Policy.DESCENT_INTERLOCK_ENV: "0",
+                Policy.DESTINATION_MODE_ENV: "bins",
+                Policy.MOTION_PROFILE_ENV: "conservative",
+            },
         )
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -451,6 +460,79 @@ class FanucPolicyTests(unittest.TestCase):
 
         self.assertLess(policy._phase_best_angle_error_deg, 160.0)
         self.assertLess(policy._phase_no_progress_calls, policy.MAX_NO_PROGRESS_CALLS)
+
+    def test_smooth_hardware_profile_doubles_nominal_linear_rate(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_PROFILE_ENV: "smooth",
+                "ROCKWELL_MAX_ACTIONS_PER_ACT": "32",
+            },
+        ):
+            policy = Policy()
+        current = np.asarray(policy._scan_tcp, dtype=float)
+        target = current.copy()
+        target[2] -= 130.0
+        phase = MotionPhase(
+            "smooth-test",
+            uf0_tcp_to_base_tip(target, policy.config),
+            policy.config.gripper.open_command,
+        )
+        obs = _observation(current[:6], trial_id="real-rollout")
+        chunk = np.asarray(policy._execute_phase(obs, phase), dtype=float)
+
+        self.assertEqual(policy._max_linear_step_mm, 10.0)
+        self.assertEqual(policy._max_angular_step_deg, 8.0)
+        self.assertEqual(len(chunk), 13)
+        deltas = np.linalg.norm(
+            np.diff(np.vstack([current[:3], chunk[:, :3]]), axis=0), axis=1
+        )
+        self.assertLessEqual(float(deltas.max()), 10.0 + 1e-9)
+
+    def test_zero_dwell_waypoint_streams_without_repeated_target_row(self):
+        policy = Policy()
+        target = TipPoseBase((0.40, 0.0, 0.12), 0.0)
+        first = MotionPhase(
+            "lift", target, policy.config.gripper.closed_command
+        )
+        second = MotionPhase(
+            "carry",
+            TipPoseBase((0.30, 0.0, 0.12), 0.0),
+            policy.config.gripper.closed_command,
+        )
+        policy._phases = (first, second)
+        policy._phase_index = 0
+        row = base_tip_pose_to_uf0_tcp(
+            target, policy.config.gripper.closed_command, policy.config
+        )
+        obs = _observation(row[:6], trial_id="real-rollout")
+        obs["joints"][-1] = policy.config.gripper.closed_command
+
+        self.assertIsNone(policy._execute_phase(obs, first))
+        self.assertEqual(policy._phase_index, 1)
+
+    def test_zero_dwell_waypoint_does_not_cross_reobservation_gate(self):
+        policy = Policy()
+        target = TipPoseBase((0.40, 0.0, 0.12), 0.0)
+        approach = MotionPhase(
+            "approach_inspection", target, policy.config.gripper.open_command
+        )
+        gate = MotionPhase(
+            "revalidate_before_descent",
+            None,
+            policy.config.gripper.open_command,
+            requires_reobservation_before=True,
+        )
+        policy._phases = (approach, gate)
+        policy._phase_index = 0
+        row = base_tip_pose_to_uf0_tcp(
+            target, policy.config.gripper.open_command, policy.config
+        )
+        obs = _observation(row[:6], trial_id="real-rollout")
+
+        chunk = np.asarray(policy._execute_phase(obs, approach), dtype=float)
+        self.assertEqual(chunk.shape, (1, 7))
+        self.assertEqual(policy._phase_index, 1)
 
     def test_equivalent_tool_down_angle_does_not_command_a_360_degree_jump(self):
         with mock.patch.dict(
@@ -1199,20 +1281,25 @@ class FanucPolicyTests(unittest.TestCase):
 
         policy._detect_scene_views = detected_views
         obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
-        phases_seen: set[str] = set()
-        for _ in range(500):
-            obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
-            chunk = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
-            self.assertGreaterEqual(len(chunk), 1)
-            self.assertLessEqual(len(chunk), 8)
-            obs["tcp_pose"] = chunk[-1, :6].tolist()
-            obs["joints"][-1] = chunk[-1, 6]
-            if policy._active_plan is not None:
-                phases_seen.add(policy._phases[policy._phase_index].name)
-            if len(policy._completed_colours) == 3:
-                break
-        else:
-            self.fail("three-colour virtual-table state machine did not complete")
+        with mock.patch.object(policy, "_emit", wraps=policy._emit) as emit:
+            for _ in range(500):
+                obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+                chunk = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+                self.assertGreaterEqual(len(chunk), 1)
+                self.assertLessEqual(len(chunk), 8)
+                obs["tcp_pose"] = chunk[-1, :6].tolist()
+                obs["joints"][-1] = chunk[-1, 6]
+                if len(policy._completed_colours) == 3:
+                    break
+            else:
+                self.fail("three-colour virtual-table state machine did not complete")
+        phases_seen = {
+            call.kwargs["phase"]
+            for call in emit.call_args_list
+            if call.args
+            and call.args[0] in {"phase_action", "phase_complete"}
+            and "phase" in call.kwargs
+        }
 
         self.assertIsNone(policy._blocked_reason)
         self.assertEqual(policy._completed_colours, {"red", "yellow", "blue"})
