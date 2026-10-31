@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "experiment_id": "fastsam-native-table-pilot-v1",
+  "license_context": "evaluation-only-agpl-review",
+  "model": {
+    "path": "/external/model-cache/FastSAM-s.pt",
+    "sha256": "c9f78716a81c7aff0d608ccc73e1b82ab3aaad86005049f6a92106a0be6d0844",
+    "ultralytics_version": "8.4.194"
+  },
+  "expected_image_size": [1920, 1080],
+  "roi_xyxy": [0, 0, 1920, 1080],
+  "tile_size": [1024, 1024],
+  "overlap_fraction": 0.25,
+  "merge_iou_threshold": 0.5,
+  "minimum_reference_bbox_iou": 0.1,
+  "inference": {
+    "device": "cpu",
+    "imgsz": 1024,
+    "confidence": 0.25,
+    "iou": 0.9,
+    "minimum_mask_area_px": 8
+  },
+  "inputs": [
+    {
+      "input_id": "native-table-0001",
+      "image": {
+        "path": "/external/captures/native-table-0001.png",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "annotation_path": "/external/annotations/native-table-0001.json"
+    }
+  ]
+}
