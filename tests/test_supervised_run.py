@@ -170,6 +170,131 @@ class SupervisedRunTests(unittest.TestCase):
             ]],
         )
 
+    def test_yolo11n_selection_sets_component_profile_before_delegating(self):
+        observed: dict[str, str | None] = {}
+
+        def delegate(arguments):
+            observed["profile"] = os.environ.get(
+                supervised_run.INTEGRATION_PROFILE_ENV
+            )
+            observed["checkpoint"] = os.environ.get(
+                supervised_run.VISION_CHECKPOINT_ENV
+            )
+            observed["arguments"] = list(arguments)
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                supervised_run.INTEGRATION_PROFILE_ENV: "stale-profile.json",
+                supervised_run.VISION_CHECKPOINT_ENV: "stale-checkpoint.pt",
+            },
+            clear=False,
+        ):
+            supervised_run.main(
+                [
+                    "hover",
+                    "--cube-mm",
+                    "16",
+                    "--vision",
+                    "yolo11n",
+                    "--vision-checkpoint",
+                    "seed55-best.pt",
+                ],
+                delegate=delegate,
+            )
+
+        self.assertEqual(
+            observed["profile"], str(supervised_run.YOLO11N_PROFILE_PATH)
+        )
+        self.assertEqual(observed["checkpoint"], "seed55-best.pt")
+        self.assertEqual(observed["arguments"], [])
+
+    def test_yolo11n_requires_its_component_checkpoint(self):
+        with self.assertRaises(SystemExit):
+            supervised_run.main(
+                ["hover", "--cube-mm", "16", "--vision", "yolo11n"],
+                delegate=lambda _: None,
+            )
+        with self.assertRaises(SystemExit):
+            supervised_run.main(
+                ["--vision-checkpoint", "seed55-best.pt"],
+                delegate=lambda _: None,
+            )
+
+    def test_explicit_baseline_clears_inherited_vision_selection(self):
+        calls: list[list[str]] = []
+        with mock.patch.dict(
+            os.environ,
+            {
+                supervised_run.INTEGRATION_PROFILE_ENV: "stale-profile.json",
+                supervised_run.VISION_CHECKPOINT_ENV: "stale-checkpoint.pt",
+            },
+            clear=False,
+        ):
+            supervised_run.main(
+                ["--vision", "baseline"],
+                delegate=lambda args: calls.append(list(args)),
+            )
+            self.assertNotIn(supervised_run.INTEGRATION_PROFILE_ENV, os.environ)
+            self.assertNotIn(supervised_run.VISION_CHECKPOINT_ENV, os.environ)
+        self.assertEqual(calls, [[]])
+
+    def test_no_vision_option_preserves_inherited_profile_workflow(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                supervised_run.INTEGRATION_PROFILE_ENV: "existing-profile.json",
+                supervised_run.VISION_CHECKPOINT_ENV: "existing-checkpoint.pt",
+            },
+            clear=False,
+        ):
+            supervised_run.main([], delegate=lambda _: None)
+            self.assertEqual(
+                os.environ[supervised_run.INTEGRATION_PROFILE_ENV],
+                "existing-profile.json",
+            )
+            self.assertEqual(
+                os.environ[supervised_run.VISION_CHECKPOINT_ENV],
+                "existing-checkpoint.pt",
+            )
+
+    def test_yolo11n_dry_run_does_not_mutate_environment_or_delegate(self):
+        called = False
+
+        def delegate(_):
+            nonlocal called
+            called = True
+
+        output = io.StringIO()
+        with mock.patch.dict(
+            os.environ,
+            {supervised_run.INTEGRATION_PROFILE_ENV: "sentinel"},
+            clear=False,
+        ):
+            with contextlib.redirect_stdout(output):
+                result = supervised_run.main(
+                    [
+                        "hover",
+                        "--cube-mm",
+                        "16",
+                        "--vision",
+                        "yolo11n",
+                        "--vision-checkpoint",
+                        "seed55-best.pt",
+                        "--dry-run",
+                    ],
+                    delegate=delegate,
+                )
+            self.assertEqual(
+                os.environ[supervised_run.INTEGRATION_PROFILE_ENV], "sentinel"
+            )
+        self.assertEqual(result, 0)
+        self.assertFalse(called)
+        summary = json.loads(output.getvalue())
+        self.assertEqual(summary["vision"], "yolo11n")
+        self.assertTrue(summary["vision_checkpoint_configured"])
+        self.assertNotIn("seed55-best.pt", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

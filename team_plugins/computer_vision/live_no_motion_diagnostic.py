@@ -1,7 +1,7 @@
 """Run the selected vision provider on live cell RGB without planning motion.
 
 This is a deliberately narrow adapter around the official SIDC Lab client.  It
-selects the checked-in hybrid profile *before* importing ``Policy``, clears the
+selects the requested checked-in vision profile *before* importing ``Policy``, clears the
 physical-motion/descent interlocks, lets the normal policy construct its strict
 measured-pose hold row, and only then calls the existing private perception
 boundary.  It never calls ``_start_next_plan`` or a motion phase.
@@ -36,10 +36,15 @@ from sorting_core.perception import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 HARDWARE_DIR = REPOSITORY_ROOT / "hardware" / "fanuc_cell"
-PROFILE_PATH = Path(__file__).with_name("profile.hybrid-geometry.v1.json")
+HYBRID_PROFILE_PATH = Path(__file__).with_name("profile.hybrid-geometry.v1.json")
+YOLO11N_PROFILE_PATH = Path(__file__).with_name("profile.yolo11n-cube.v1.json")
+# Backward-compatible name used by existing callers/tests. The default remains
+# the exact profile that this diagnostic selected before YOLO support existed.
+PROFILE_PATH = HYBRID_PROFILE_PATH
 CALIBRATION_PATH = HARDWARE_DIR / "calibration" / "cameras.json"
 
 PROFILE_ENV = "ROCKWELL_INTEGRATION_PROFILE"
+VISION_CHECKPOINT_ENV = "ROCKWELL_VISION_CHECKPOINT"
 CUBE_EDGE_ENV = "ROCKWELL_VISION_CUBE_EDGE_MM"
 DESTINATION_ENV = "ROCKWELL_DESTINATION_MODE"
 MOTION_ENV = "ROCKWELL_ENABLE_PHYSICAL_MOTION"
@@ -72,7 +77,7 @@ def _git_value(*arguments: str) -> str | None:
     return value or None
 
 
-def _repository_provenance() -> dict[str, Any]:
+def _repository_provenance(profile_path: Path = PROFILE_PATH) -> dict[str, Any]:
     status_process = subprocess.run(
         ("git", "status", "--porcelain"),
         cwd=REPOSITORY_ROOT,
@@ -89,26 +94,39 @@ def _repository_provenance() -> dict[str, Any]:
         "commit": _git_value("rev-parse", "HEAD"),
         "branch": _git_value("branch", "--show-current"),
         "worktree_dirty": worktree_dirty,
-        "profile_name": PROFILE_PATH.name,
-        "profile_sha256": _sha256_file(PROFILE_PATH),
+        "profile_name": profile_path.name,
+        "profile_sha256": _sha256_file(profile_path),
         "calibration_path": CALIBRATION_PATH.relative_to(REPOSITORY_ROOT).as_posix(),
         "calibration_sha256": _sha256_file(CALIBRATION_PATH),
         "diagnostic_tool_sha256": _sha256_file(Path(__file__).resolve()),
     }
 
 
-def configure_no_motion_environment(cube_edge_mm: int) -> dict[str, Any]:
+def configure_no_motion_environment(
+    cube_edge_mm: int,
+    *,
+    profile_path: Path = PROFILE_PATH,
+    vision_checkpoint: str | None = None,
+) -> dict[str, Any]:
     """Select the provider and remove every inherited motion-enabling flag."""
 
     if cube_edge_mm not in {10, 16}:
         raise ValueError("cube_edge_mm must be 10 or 16")
     for name in _INTERLOCK_ENVIRONMENT:
         os.environ.pop(name, None)
-    os.environ[PROFILE_ENV] = str(PROFILE_PATH.resolve())
+    selected_profile = profile_path.resolve()
+    if not selected_profile.is_file():
+        raise ValueError(f"vision profile does not exist: {selected_profile}")
+    os.environ[PROFILE_ENV] = str(selected_profile)
+    if vision_checkpoint is None:
+        os.environ.pop(VISION_CHECKPOINT_ENV, None)
+    else:
+        os.environ[VISION_CHECKPOINT_ENV] = vision_checkpoint
     os.environ[CUBE_EDGE_ENV] = str(cube_edge_mm)
     os.environ[DESTINATION_ENV] = "virtual-table"
     return {
-        "integration_profile": str(PROFILE_PATH.resolve()),
+        "integration_profile": str(selected_profile),
+        "vision_checkpoint_configured": vision_checkpoint is not None,
         "cube_edge_mm": cube_edge_mm,
         "destination_mode": "virtual-table",
         "physical_motion_enabled": False,
@@ -454,7 +472,11 @@ def diagnostic_policy_class(base_policy_class: type, recorder: SnapshotRecorder)
     return LiveNoMotionDiagnosticPolicy
 
 
-def _validate_loaded_profile(team_integrations: ModuleType, official_run: ModuleType) -> None:
+def _validate_loaded_profile(
+    team_integrations: ModuleType,
+    official_run: ModuleType,
+    expected_profile_path: Path = PROFILE_PATH,
+) -> None:
     profile = getattr(team_integrations, "ACTIVE_INTEGRATION_PROFILE", None)
     if profile is None:
         raise RuntimeError(
@@ -462,12 +484,12 @@ def _validate_loaded_profile(team_integrations: ModuleType, official_run: Module
             "Python process"
         )
     loaded_path = Path(str(getattr(profile, "source_path", ""))).resolve()
-    if loaded_path != PROFILE_PATH.resolve():
+    if loaded_path != expected_profile_path.resolve():
         raise RuntimeError(
             "a different integration profile was already imported; start this "
             f"diagnostic in a fresh Python process (loaded {loaded_path})"
         )
-    expected_hash = _sha256_file(PROFILE_PATH)
+    expected_hash = _sha256_file(expected_profile_path)
     if str(getattr(profile, "source_sha256", "")) != expected_hash:
         raise RuntimeError("loaded integration profile bytes do not match disk")
     cameras = tuple(getattr(official_run.Policy, "CAMERAS", ()))
@@ -477,7 +499,7 @@ def _validate_loaded_profile(team_integrations: ModuleType, official_run: Module
         )
 
 
-def _load_official_run() -> ModuleType:
+def _load_official_run(expected_profile_path: Path = PROFILE_PATH) -> ModuleType:
     hardware_path = str(HARDWARE_DIR)
     if hardware_path not in sys.path:
         sys.path.insert(0, hardware_path)
@@ -490,7 +512,9 @@ def _load_official_run() -> ModuleType:
     else:
         official_run = importlib.import_module("run")
     team_integrations = importlib.import_module("sorting_core.team_integrations")
-    _validate_loaded_profile(team_integrations, official_run)
+    _validate_loaded_profile(
+        team_integrations, official_run, expected_profile_path
+    )
     return official_run
 
 
@@ -507,6 +531,19 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cube-mm", required=True, type=int, choices=(10, 16))
     parser.add_argument(
+        "--vision",
+        choices=("hybrid-geometry", "yolo11n"),
+        default="hybrid-geometry",
+        help=(
+            "vision provider to exercise (default: hybrid-geometry); yolo11n "
+            "requires --vision-checkpoint"
+        ),
+    )
+    parser.add_argument(
+        "--vision-checkpoint",
+        help="external fine-tuned YOLO11n checkpoint; not stored in Git",
+    )
+    parser.add_argument(
         "--max-snapshots",
         type=int,
         choices=range(1, _MAXIMUM_SNAPSHOTS + 1),
@@ -515,7 +552,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--url", help="forward a non-default cell URL")
     parser.add_argument("--token", help=argparse.SUPPRESS)
-    parser.add_argument("--checkpoint", help="forward the vision checkpoint path")
+    parser.add_argument(
+        "--checkpoint",
+        help=(
+            "forward the official client's legacy policy checkpoint; do not "
+            "use this for YOLO11n (use --vision-checkpoint instead)"
+        ),
+    )
     parser.add_argument("--ca", help="forward a CA certificate path")
     parser.add_argument(
         "--dry-run",
@@ -541,16 +584,30 @@ def _forwarded_arguments(args: argparse.Namespace) -> list[str]:
 def main(
     argv: Sequence[str] | None = None,
     *,
-    official_run_loader: Callable[[], ModuleType] = _load_official_run,
+    official_run_loader: Callable[[], ModuleType] | None = None,
 ) -> int:
-    args = _parser().parse_args(argv)
-    environment_summary = configure_no_motion_environment(args.cube_mm)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.vision == "yolo11n":
+        if args.vision_checkpoint is None:
+            parser.error("--vision yolo11n requires --vision-checkpoint PATH")
+        profile_path = YOLO11N_PROFILE_PATH
+    else:
+        if args.vision_checkpoint is not None:
+            parser.error("--vision-checkpoint requires --vision yolo11n")
+        profile_path = HYBRID_PROFILE_PATH
+    environment_summary = configure_no_motion_environment(
+        args.cube_mm,
+        profile_path=profile_path,
+        vision_checkpoint=args.vision_checkpoint,
+    )
     if args.dry_run:
         print(
             json.dumps(
                 {
                     "event": "vision_diagnostic_dry_run",
                     **environment_summary,
+                    "vision": args.vision,
                     "maximum_snapshots": args.max_snapshots,
                     "output_dir": str(args.output_dir.expanduser().resolve()),
                 },
@@ -563,8 +620,13 @@ def main(
         args.output_dir,
         maximum_snapshots=args.max_snapshots,
         cube_edge_mm=args.cube_mm,
+        provenance=_repository_provenance(profile_path),
     )
-    official_run = official_run_loader()
+    official_run = (
+        _load_official_run(profile_path)
+        if official_run_loader is None
+        else official_run_loader()
+    )
     original_policy = official_run.Policy
     official_run.Policy = diagnostic_policy_class(original_policy, recorder)
     previous_argv = sys.argv

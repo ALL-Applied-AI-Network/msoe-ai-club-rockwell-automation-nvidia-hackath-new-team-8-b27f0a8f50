@@ -293,3 +293,29 @@
   cube but triples clean-frame false positives and raises candidates 24.8%.
 - Decision: do not promote the experiment. Keep the selected 1.5 profile and
   the rejected ablation isolated on `vision/cube-recall-aspect`.
+
+## 2026-10-31 — Opt-in YOLO11n hardware evidence seam
+
+- Hypothesis: the validation-selected seed-55 detector can be exercised by the
+  physical client without replacing calibrated cube pose geometry or changing
+  the profile-unset baseline.
+- Implementation: add a pinned, external-checkpoint YOLO11n profile and a
+  component-specific `--vision yolo11n --vision-checkpoint PATH` launcher
+  option. Inside the 1000x650 crop, YOLO and full-frame calibrated geometry
+  must agree one-to-one; disagreement and screw predictions abstain.
+- Verification: 43 focused integration tests and all 263 profile-unset tests
+  pass. The repository profile validator passes. The exact checkpoint loads
+  through the real hardware `Policy`; both motion flags remain false when not
+  explicitly armed.
+- Local runtime measurement: WSL CPU, CUDA unavailable; checkpoint load about
+  1.1 s, cold inference 11.8 s, then 150 ms and 128 ms. One warm-up pass still
+  left the first real-frame replay at 2.48 s, so the provider now runs three
+  passes during policy construction. A later construction took 7.25 s and its
+  first reconstructed real-frame observation took 591 ms.
+- Held-out integration result: reconstructed full-frame replay 003800
+  abstained in 2.77 s because one YOLO box had no matching calibrated geometry
+  detection. The official mock also returned no action because its synthetic
+  image contains none of the required real cubes; that is not an accuracy gate.
+- Decision: retain the option for live no-motion evidence collection. Do not
+  proceed to hover/contact motion until native live records show complete,
+  stable one-to-one detections and calibrated poses within the grasp budget.

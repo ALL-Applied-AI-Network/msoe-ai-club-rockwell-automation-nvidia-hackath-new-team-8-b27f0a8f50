@@ -1,7 +1,8 @@
 # YOLO11n closed-set detector pilot
 
-Status: completed offline benchmark, **not** a runtime provider and **not**
-hardware-ready pose estimation.
+Status: completed offline benchmark plus an explicit experimental runtime
+profile. It is **not** hardware-validated pose estimation and is not the
+default physical-motion provider.
 
 ## Question
 
@@ -60,12 +61,35 @@ emitted a nondeterminism warning. Preserve the reported checkpoints and do not
 rerun against the same final set until the score looks better. A future
 pre-registered experiment should use disk/no cache before viewing test results.
 
+## Experimental runtime integration
+
+`profile.yolo11n-cube.v1.json` selects the exact seed-55 artifact by SHA-256.
+The provider uses YOLO only for 2D proposals; the existing calibrated
+HSV/known-size geometry still supplies color, robot-base position, and cube yaw.
+Inside the neural crop the two methods must agree one-to-one. Disagreement,
+unvalidated screw predictions, or incomplete pick-region crop coverage causes
+an explicit abstention. The profile is opt-in through
+`supervised_run.py --vision yolo11n --vision-checkpoint PATH`; profile-unset
+behavior remains unchanged.
+
+On the project laptop's WSL CPU, the exact checkpoint loaded in about 1.1 s.
+One cold inference took 11.8 s; two subsequent passes took 150 ms and 128 ms.
+The provider now runs three warm-up passes during `Policy` construction before
+receiving a live frame. A measured three-pass construction took 7.25 s and the
+first reconstructed real-frame observation then took 591 ms. The reconstructed
+full-frame replay of held-out frame 003800 still abstained because YOLO
+produced one box with no matching
+calibrated geometry detection. That is the intended fail-closed behavior and
+also evidence that this profile must begin with the live no-motion diagnostic,
+not hover or contact motion. See `HARDWARE_VALIDATION.md`.
+
 ## Decision
 
 This detector transfers much better than the tested YOLOE visual prompts and is
-fast enough to remain a candidate. It does not yet beat the complete calibrated
-runtime pipeline, and it cannot supply rotation or robot-base position by
-itself. Do not wire it into physical motion from this evidence.
+fast enough to remain a candidate. The experimental runtime deliberately
+combines it with the calibrated pipeline; it cannot supply rotation or
+robot-base position by itself. Do not use the new option for physical motion
+from this evidence alone.
 
 Advance only after a new native-resolution, human-reviewed capture provides:
 

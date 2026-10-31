@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -141,6 +143,91 @@ class LiveNoMotionDiagnosticTests(unittest.TestCase):
             )
             self.assertFalse(summary["physical_motion_enabled"])
             self.assertFalse(summary["physical_descent_enabled"])
+
+    def test_yolo_environment_selects_profile_and_component_checkpoint(self):
+        with patch.dict(
+            os.environ,
+            {diagnostic.VISION_CHECKPOINT_ENV: "stale.pt"},
+            clear=True,
+        ):
+            summary = diagnostic.configure_no_motion_environment(
+                16,
+                profile_path=diagnostic.YOLO11N_PROFILE_PATH,
+                vision_checkpoint="seed55-best.pt",
+            )
+            self.assertEqual(
+                Path(os.environ[diagnostic.PROFILE_ENV]).resolve(),
+                diagnostic.YOLO11N_PROFILE_PATH.resolve(),
+            )
+            self.assertEqual(
+                os.environ[diagnostic.VISION_CHECKPOINT_ENV], "seed55-best.pt"
+            )
+            self.assertTrue(summary["vision_checkpoint_configured"])
+
+    def test_yolo_diagnostic_requires_checkpoint_before_loading_client(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            loader_called = False
+
+            def forbidden_loader():
+                nonlocal loader_called
+                loader_called = True
+                raise AssertionError("client must not load")
+
+            with self.assertRaises(SystemExit):
+                diagnostic.main(
+                    [
+                        "--output-dir",
+                        temporary,
+                        "--cube-mm",
+                        "16",
+                        "--vision",
+                        "yolo11n",
+                    ],
+                    official_run_loader=forbidden_loader,
+                )
+            self.assertFalse(loader_called)
+
+    def test_yolo_diagnostic_dry_run_selects_profile_without_loading_client(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            loader_called = False
+
+            def forbidden_loader():
+                nonlocal loader_called
+                loader_called = True
+                raise AssertionError("client must not load")
+
+            output = io.StringIO()
+            with patch.dict(os.environ, {}, clear=True):
+                with contextlib.redirect_stdout(output):
+                    result = diagnostic.main(
+                        [
+                            "--output-dir",
+                            temporary,
+                            "--cube-mm",
+                            "16",
+                            "--vision",
+                            "yolo11n",
+                            "--vision-checkpoint",
+                            "seed55-best.pt",
+                            "--dry-run",
+                        ],
+                        official_run_loader=forbidden_loader,
+                    )
+                self.assertEqual(
+                    Path(os.environ[diagnostic.PROFILE_ENV]).resolve(),
+                    diagnostic.YOLO11N_PROFILE_PATH.resolve(),
+                )
+                self.assertEqual(
+                    os.environ[diagnostic.VISION_CHECKPOINT_ENV],
+                    "seed55-best.pt",
+                )
+
+            self.assertEqual(result, 0)
+            self.assertFalse(loader_called)
+            summary = json.loads(output.getvalue())
+            self.assertEqual(summary["vision"], "yolo11n")
+            self.assertTrue(summary["vision_checkpoint_configured"])
+            self.assertNotIn("seed55-best.pt", output.getvalue())
 
     def test_policy_returns_exact_hold_and_saves_native_scene_evidence(self):
         with tempfile.TemporaryDirectory() as temporary:

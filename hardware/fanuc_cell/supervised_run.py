@@ -21,6 +21,7 @@ import argparse
 from dataclasses import dataclass
 import json
 import os
+from pathlib import Path
 import sys
 from typing import Callable, Sequence
 
@@ -32,6 +33,14 @@ CUBE_EDGE_ENV = "ROCKWELL_VISION_CUBE_EDGE_MM"
 GRASP_FIT_ENV = "ROCKWELL_CONFIRM_CUBE_GRASP_FIT"
 MAX_ACTIONS_ENV = "ROCKWELL_MAX_ACTIONS_PER_ACT"
 STABLE_OBSERVATIONS_ENV = "ROCKWELL_INITIAL_STABLE_OBSERVATIONS"
+INTEGRATION_PROFILE_ENV = "ROCKWELL_INTEGRATION_PROFILE"
+VISION_CHECKPOINT_ENV = "ROCKWELL_VISION_CHECKPOINT"
+YOLO11N_PROFILE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "team_plugins"
+    / "computer_vision"
+    / "profile.yolo11n-cube.v1.json"
+)
 _POLICY_TUNING_ENVIRONMENT = (
     "ROCKWELL_MAX_OBSERVATION_AGE_S",
     "ROCKWELL_MAX_TARGET_MOTION_M",
@@ -60,6 +69,8 @@ class LaunchSettings:
     destination: str
     cube_edge_mm: int
     max_actions_per_act: int
+    vision: str | None = None
+    vision_checkpoint: str | None = None
 
     @property
     def motion_enabled(self) -> bool:
@@ -93,6 +104,8 @@ class LaunchSettings:
             "destination_mode": self.destination,
             "cube_edge_mm": self.cube_edge_mm,
             "max_actions_per_act": self.max_actions_per_act,
+            "vision": self.vision or "unchanged",
+            "vision_checkpoint_configured": self.vision_checkpoint is not None,
             "scope": "process-local; inherited ROCKWELL_* arming flags cleared",
         }
 
@@ -143,6 +156,23 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--vision",
+        choices=("baseline", "yolo11n"),
+        help=(
+            "select the hardware vision provider for this process: baseline "
+            "explicitly selects the existing HSV/geometry path; yolo11n uses "
+            "the checked-in neural-proposal profile. With no option, preserve "
+            "the existing ROCKWELL_INTEGRATION_PROFILE behavior"
+        ),
+    )
+    parser.add_argument(
+        "--vision-checkpoint",
+        help=(
+            "external YOLO11n .pt checkpoint; required with --vision yolo11n "
+            "and never forwarded to the grasp provider"
+        ),
+    )
+    parser.add_argument(
         "--confirm-grasp-fit",
         action="store_true",
         help=(
@@ -175,6 +205,8 @@ def _settings(args: argparse.Namespace) -> LaunchSettings:
         destination=args.destination,
         cube_edge_mm=args.cube_mm if args.cube_mm is not None else 10,
         max_actions_per_act=args.max_actions,
+        vision=args.vision,
+        vision_checkpoint=args.vision_checkpoint,
     )
 
 
@@ -189,6 +221,10 @@ def _required_inputs(args: argparse.Namespace) -> list[str]:
         missing.append("mode hover (the official mock has no initial TCP pose)")
     if not args.mock and (args.trials is not None or args.trial_s is not None):
         missing.append("--mock (required with --trials/--trial-s)")
+    if args.vision == "yolo11n" and args.vision_checkpoint is None:
+        missing.append("--vision-checkpoint PATH")
+    if args.vision != "yolo11n" and args.vision_checkpoint is not None:
+        missing.append("--vision yolo11n (required with --vision-checkpoint)")
     return missing
 
 
@@ -202,6 +238,18 @@ def _apply_environment(
     os.environ.update(
         settings.environment(grasp_fit_confirmed=grasp_fit_confirmed)
     )
+    # Vision selection is deliberately separate from the physical-motion
+    # interlocks. With no --vision option, retain the established profile-env
+    # workflow byte-for-byte. Explicit baseline/yolo11n selections are scoped
+    # to this child process and happen before run.py imports Policy.
+    if settings.vision == "baseline":
+        os.environ.pop(INTEGRATION_PROFILE_ENV, None)
+        os.environ.pop(VISION_CHECKPOINT_ENV, None)
+    elif settings.vision == "yolo11n":
+        if settings.vision_checkpoint is None:  # guarded by _required_inputs
+            raise ValueError("YOLO11n vision requires a checkpoint")
+        os.environ[INTEGRATION_PROFILE_ENV] = str(YOLO11N_PROFILE_PATH)
+        os.environ[VISION_CHECKPOINT_ENV] = settings.vision_checkpoint
 
 
 def _forwarded_arguments(args: argparse.Namespace) -> list[str]:

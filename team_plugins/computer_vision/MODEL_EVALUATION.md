@@ -74,6 +74,12 @@ registered depth and should not be treated as the default.
   averaged about 7.02 ms per 1000x650 crop. The test contains 35 cube boxes and
   no screws, so this does not measure screw recall, orientation, robot-base
   position, or grasp readiness.
+- The seed-55 checkpoint now has an opt-in, fail-closed hardware evidence
+  profile that retains calibrated geometry for pose. Local WSL CPU smoke tests
+  measured 11.8 s cold initialization and then 150/128 ms inference. A
+  reconstructed held-out full-frame replay abstained because one YOLO box had
+  no matching geometry detection. This validates the integration and its
+  failure behavior, not physical pose accuracy or permission for motion.
 
 - Before this experiment, rollout-4 compressed replay under the 16 mm cube
   profile found exactly one pickable cube of each color on 121/123 sampled
@@ -177,7 +183,7 @@ experiment are still required.
 | YOLOE-26s segmentation + calibrated geometry | Native tiled RGB; text or visual prompts; GPU preferred | Pretrained instance masks under appearance variation; could bootstrap labels | Severe measured sim-to-real dropout; eight-tile latency; AGPL/enterprise licensing | Rejected for runtime: 27/27 synthetic but at most 1/17 provisional real references |
 | FoundationPose | RGB, RGB-aligned metric depth, intrinsics, per-instance mask, and either CAD mesh or model-free RGB-D-mask references; NVIDIA GPU stack | Register/track object-to-camera pose plus model score | No archived depth; small/reflective screw; upstream mask source still required; current runtime compatibility unverified | Blocked pending depth/runtime audit |
 | FastSAM mask proposals | RGB plus optional box/point/text prompt; GPU preferred | High-coverage class-agnostic mask proposals; possible unknown-object or label bootstrap | No catalog identity or pose; 160 unmatched proposals at the 16/17-coverage setting; license ambiguity/Ultralytics terms | Separate experiment only; measured filter does not beat control |
-| Fine-tuned YOLO11n detector + calibrated geometry | Grouped reviewed boxes, pretrained checkpoint, GPU for training; ordinary geometry downstream | Fast closed-set cube/screw boxes; strongest tested neural transfer | 74.3% mean cube recall on provisional test; screw recall and pose unmeasured; AGPL/Enterprise gate | Promising offline pilot; do not select as runtime provider yet |
+| Fine-tuned YOLO11n detector + calibrated geometry | Grouped reviewed boxes, pretrained checkpoint, GPU for training; ordinary geometry downstream | Fast closed-set cube/screw boxes; strongest tested neural transfer | 74.3% mean cube recall on provisional test; screw recall and physical pose unmeasured; strict corroboration can abstain on false boxes; AGPL/Enterprise gate | Experimental opt-in no-motion evidence profile; baseline remains default and motion is not yet justified |
 | GigaPose RGB+CAD | Detection/mask/ROI, CAD templates, older pinned stack | RGB-only novel-object pose | Still needs detection; unnecessary unique 6D pose; integration burden | No branch before planar model fails |
 
 ## FoundationPose: verified prerequisite gate

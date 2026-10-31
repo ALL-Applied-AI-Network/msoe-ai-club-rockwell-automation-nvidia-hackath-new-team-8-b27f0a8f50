@@ -38,6 +38,77 @@ uv run --project hardware/fanuc_cell python -m \
   --cube-mm 16 --max-snapshots 10
 ```
 
+### Opt-in YOLO11n hardware evidence
+
+The default command above remains the HSV/geometry hybrid. To exercise the
+fine-tuned YOLO11n proposal model, use its isolated runtime and external
+checkpoint explicitly:
+
+```bash
+UV_PROJECT_ENVIRONMENT=/tmp/rockwell-yolo11n-runtime \
+  uv sync --project team_plugins/computer_vision/yolo11n_runtime --frozen
+
+UV_PROJECT_ENVIRONMENT=/tmp/rockwell-yolo11n-runtime \
+  uv run --project team_plugins/computer_vision/yolo11n_runtime python -m \
+  team_plugins.computer_vision.live_no_motion_diagnostic \
+  --vision yolo11n \
+  --vision-checkpoint <absolute-path-to-seed55-best.pt> \
+  --output-dir /mnt/c/path/outside-the-repository/live-yolo11n-01 \
+  --cube-mm 16 --max-snapshots 10
+```
+
+This is the first real-hardware test, not permission to descend. YOLO11n emits
+2D class/box proposals only. The provider still requires the checked-in table
+camera calibration and deterministic cube geometry to produce robot-base
+position and square-symmetry yaw. The checkpoint is accepted only when its
+SHA-256 is
+`010bb71b1b07fc77490a2bc2bd774102205640bdf9ba07d6fa8b3bd758788fbb`.
+Keep the `.pt` file and captured evidence outside Git.
+
+The YOLO11n profile intentionally abstains instead of guessing if it sees an
+above-threshold screw prediction, if a YOLO cube box and calibrated cube
+geometry do not agree one-to-one inside the crop, or if calibrated geometry
+finds a pick-eligible cube outside neural crop coverage. Expect those cases to
+produce a visible provider error and a hold, not a partial scene for motion.
+
+The provider performs three blank-image inferences while `Policy` is constructed,
+before the first live observation, so cold Torch/Ultralytics initialization is
+not charged against a camera frame's freshness budget. On the project laptop's
+WSL CPU on October 31, 2026, the exact seed-55 checkpoint loaded in about
+1.1 s, the cold initialization/inference took about 11.8 s, and the next two
+1000x650 passes took 150 ms and 128 ms. CUDA was unavailable in that test.
+Re-measure on the machine used for the cell session; those three measurements
+are a runtime smoke test, not a latency guarantee or pose-accuracy result.
+In a later three-pass-warm-up replay, construction took 7.25 s, the warm-up
+passes took 2.66 s, 116 ms, and 155 ms, and the first reconstructed real-frame
+observation took 591 ms. The timings vary, which is why live records must retain
+per-observation latency instead of assuming the best warm measurement.
+
+After the no-motion records show the correct objects and stable calibrated
+poses, dry-run the normal hardware wrapper:
+
+```bash
+UV_PROJECT_ENVIRONMENT=/tmp/rockwell-yolo11n-runtime \
+  uv run --project team_plugins/computer_vision/yolo11n_runtime python \
+  hardware/fanuc_cell/supervised_run.py hover \
+  --vision yolo11n \
+  --vision-checkpoint <absolute-path-to-seed55-best.pt> \
+  --cube-mm 16 --dry-run
+```
+
+The explicit `/tmp` environment keeps the roughly 5 GB Torch/CUDA dependency
+tree on WSL's Linux filesystem instead of slowly copying thousands of files
+into the Windows-mounted repository. It is intentionally disposable and must
+be recreated after `/tmp` is cleared or WSL is reset. The lockfile, not that
+temporary environment, is the reproducible artifact.
+
+Remove `--dry-run` only for the already established operator-supervised hover
+stage. Do not start with `sort`: the held-out real-video result for this
+checkpoint was 85.3% precision and 82.9% recall on 35 provisionally labeled
+cube instances, and screw performance was not evaluated because the held-out
+set contained no screws. These are development measurements, not guarantees of
+calibrated pose accuracy.
+
 Choose `10` or `16` only after measuring the actual cubes. Start with
 `--dry-run` to inspect the non-secret effective settings. The directory must be
 new or empty and must remain outside Git. The tool clears motion/descent flags,
@@ -212,11 +283,12 @@ part. Then require:
   clearance-derived threshold;
 - no executable false target on any negative case;
 - repeated-frame jitter inside the same threshold;
-- no stale/mismatched timestamp or calibration accepted (the provider now
-  enforces exact calibration ID, a 0.15 s maximum frame age, monotonic
-  camera-frame time for tracking/confirmation, and request-boundary validation;
-  three calls on one frozen frame do not count as three observations). The
-  current official adapter copies
+- no stale/mismatched timestamp or calibration accepted (both opt-in providers
+  enforce exact calibration ID, a 0.15 s maximum declared frame age, and
+  request-boundary validation. The hybrid screw tracker additionally enforces
+  monotonic camera-frame time for confirmation, so three calls on one frozen
+  frame do not count as three screw observations. YOLO11n has no cross-call
+  tracker). The current official adapter copies
   one observation timestamp into each `CameraFrame`, so this validates metadata
   consistency but does **not** measure real camera-exposure-to-robot skew;
 - inference plus capture/service latency below the policy's separate gained-age
