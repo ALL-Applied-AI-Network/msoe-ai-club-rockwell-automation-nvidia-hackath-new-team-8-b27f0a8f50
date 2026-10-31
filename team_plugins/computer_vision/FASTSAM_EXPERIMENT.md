@@ -60,6 +60,38 @@ at the inspected image point near `(206, 300)` had confidence `0.512`, box
 including several much larger masks.  These results pass only the narrow
 "can it produce a tiny candidate mask?" gate.
 
+## Held-out L40S result
+
+The pinned harness was later run on a dedicated Brev L40S against the same
+held-out sets used for the YOLOE comparison. Synthetic references came from
+nine realistic-simulator frames (27 cubes). The real transfer set contains
+seven hand-free table-camera frames and 17 provisional cube boxes; its
+compressed/upscaled images and unreviewed labels limit the claim to exploratory
+2D proposal coverage.
+
+| Set / confidence | References covered | Proposals | Unmatched proposals | Mean matched box IoU |
+| --- | ---: | ---: | ---: | ---: |
+| Synthetic / 0.25 | 27/27 | 27 | 0 | 0.875 |
+| Synthetic / 0.10 | 27/27 | 27 | 0 | 0.875 |
+| Real / 0.25 | 14/17 | 68 | 54 | 0.697 |
+| Real / 0.10 | 16/17 | 176 | 160 | 0.747 |
+| Real / 0.05 | 16/17 | 328 | 312 | 0.767 |
+
+A frozen deterministic HSV/shape post-filter converted those proposals into:
+
+| Confidence | TP | FP | FN | Precision | Recall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 0.25 | 12 | 5 | 5 | 70.6% | 70.6% |
+| 0.10 | 15 | 9 | 2 | 62.5% | 88.2% |
+| 0.05 | 16 | 12 | 1 | 57.1% | 94.1% |
+
+Synthetic hybrid evaluation scored 27 TP / 0 FP at all three thresholds. Warm
+L40S model calls were about 11 ms median, while cold startup was about 2.1
+seconds and raised the small-set aggregate mean to roughly 0.31 seconds per
+frame. The result shows materially better transfer coverage than YOLOE but
+also severe proposal noise. It remains an offline candidate generator, not a
+motion-ready `SceneObservation` provider.
+
 ### Practical comparison
 
 | Approach | Archived-frame observation | Practical conclusion |
@@ -104,11 +136,11 @@ The evaluated checkpoint had SHA-256
 `c9f78716a81c7aff0d608ccc73e1b82ab3aaad86005049f6a92106a0be6d0844`.
 Do not silently reuse that hash for a newly downloaded file; verify the bytes.
 
-The checked-in lock currently resolves CUDA 13.2 runtime packages as PyTorch
-dependencies even when the manifest selects CPU.  GPU compatibility with the
-current Brev driver has **not** been tested.  Keep the example on CPU until
-`torch.cuda.is_available()` and one pinned GPU inference smoke both pass; then
-record the driver, CUDA, GPU, and measured latency in the external report.
+The checked-in lock resolves CUDA 13.2 runtime packages as PyTorch dependencies
+even when the manifest selects CPU. The pinned environment has now passed a
+CUDA smoke and held-out inference on an NVIDIA L40S. A different Brev image,
+driver, or GPU still requires its own smoke; record the driver, CUDA, GPU, and
+measured latency in every external report.
 
 Copy `fastsam_manifest.example.json` outside the repository and replace its
 placeholder paths, image hash, image size, ROI, device, and annotation path.

@@ -163,6 +163,34 @@ current synchronous robot loop; any usefulness test must use a GPU and include
 tiling, service transfer, calibrated pose conversion, and serialization in the
 end-to-end timing.
 
+## Held-out L40S result
+
+The branch was subsequently tested in its pinned environment on a dedicated
+Brev L40S. The synthetic set used nine held-out realistic-simulator frames,
+three cubes per frame, and exact simulator-derived boxes. The real set used
+seven hand-free table-camera frames with 17 provisional cube boxes. Those real
+labels are unreviewed and the source was compressed 640x360 video upscaled to
+1920x1080, so they support exploratory 2D transfer metrics only.
+
+| Prompt source / set / confidence | TP | FP | FN | Precision | Recall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Synthetic prompt / synthetic / 0.25 | 12 | 0 | 15 | 100% | 44.4% |
+| Synthetic prompt / synthetic / 0.10 | 23 | 0 | 4 | 100% | 85.2% |
+| Synthetic prompt / synthetic / 0.05 | 26 | 0 | 1 | 100% | 96.3% |
+| Synthetic prompt / synthetic / 0.01 | 27 | 0 | 0 | 100% | 100% |
+| Synthetic prompt / real / 0.01 | 0 | 1 | 17 | 0% | 0% |
+| One real prompt frame / real / 0.01 | 1 | 1 | 16 | 50% | 5.9% |
+
+At confidence 0.25, 0.10, and 0.05, both real-transfer conditions returned
+zero true positives. Synthetic mean matched box IoU at confidence 0.01 was
+0.916. One-tile synthetic warm calls were roughly 0.32--0.59 seconds; the
+eight-tile real frames averaged roughly 2.9--3.1 seconds and reached about five
+seconds in the slowest frame.
+
+This falsifies the tested zero/few-shot transfer approach. It is valuable
+judge-facing evidence of an honest sim-to-real test, but it must not be presented
+as the deployed detector. Do not tune on the provisional final real frames.
+
 ## Stop/continue gates
 
 Continue toward a mask-provider adapter only if a frozen, reviewed native set

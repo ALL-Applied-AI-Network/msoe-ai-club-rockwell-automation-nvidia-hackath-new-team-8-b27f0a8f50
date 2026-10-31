@@ -11,6 +11,33 @@
 - Next experiment: native measured cube placements, including lighting and
   cable/hand negatives.
 
+## 2026-10-31 — Held-out L40S neural comparison
+
+- Hypothesis: a pretrained neural segmenter can replace or materially improve
+  the deterministic cube detector without task-specific training.
+- Setup: isolated Ultralytics 8.4.194 environments on one dedicated Brev L40S;
+  nine held-out realistic-simulator frames (27 exact cube boxes) and seven
+  provisional, unreviewed real-camera frames (17 cube boxes). The real frames
+  are compressed 640x360 video decoded and nearest-neighbour-upscaled, so this
+  is an exploratory 2D detection test, not robot-base pose validation.
+- YOLOE result: with synthetic visual prompts and confidence 0.01, it scored
+  27/27 synthetic true positives and no false positives (mean matched box IoU
+  0.916), but 0/17 on real frames plus one false positive. Giving it one real
+  visual-prompt frame produced only 1/17 true positives plus one false positive.
+- FastSAM result: at confidence 0.10 its class-agnostic proposals covered 27/27
+  synthetic boxes and 16/17 real boxes, but the real set contained 176 proposals
+  of which 160 were unmatched. The fixed HSV/shape post-filter scored 15 TP,
+  9 FP, and 2 FN (62.5% precision, 88.2% recall).
+- Conclusion: YOLOE's excellent simulator score did not transfer to the camera.
+  FastSAM transfers better as a proposal generator, but the tested filter does
+  not beat the calibrated geometry control and is not safe to promote into the
+  robot loop. Preserve both as reproducible negative/ablation evidence.
+- Next experiment: fine-tune a small pretrained two-class detector on grouped
+  synthetic plus independent archived data, select its threshold only on
+  synthetic validation, and evaluate the untouched hardware capture once.
+- License: both harnesses use Ultralytics, so AGPL-3.0/Enterprise deployment
+  terms remain a factory-deployment gate.
+
 ## 2026-10-31 — FoundationPose prerequisite audit
 
 - Hypothesis: FoundationPose can directly replace current perception from RGB.
@@ -198,17 +225,18 @@
 - Limitation: the starter manifest has no human references or independent pose
   truth. It cannot produce accuracy until those are added and reviewed.
 
-## 2026-10-31 — Brev availability
+## 2026-10-31 — Initial Brev outage (superseded)
 
 - Hypothesis: a fresh L40S launchable can run the GPU experiments.
 - Setup: non-destructive restart of `isaac-launchable-9ff01e`; new AWS
   `g6e.4xlarge` and Crusoe `l40s-48gb.1x` launch attempts.
 - Result: existing instance stayed `FAILURE / NOT READY`; both new provisions
   returned Brev `Internal Server Error`.
-- Conclusion: external compute blocker, not a model result. Do not reset the
-  existing VM blindly because reset persistence is path-limited.
-- Next experiment: retry only after Brev service recovers or organizer support
-  confirms instance state.
+- Conclusion at that time: external compute blocker, not a model result. Do not
+  reset the existing VM blindly because reset persistence is path-limited.
+- Later resolution: dedicated instance `isaac-realism-eval-1031` reached
+  `RUNNING / READY` with one L40S and produced the held-out YOLOE and FastSAM
+  results recorded above. The failed instance was not repaired or reset.
 
 ## 2026-10-31 — Clean cube pilot and wrist-assisted coverage
 

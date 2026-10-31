@@ -20,8 +20,10 @@ Touching/stacked screws abstain. General occlusion is not estimated. Bucket
 detection and general unknown-object or unknown-region segmentation are not
 implemented.
 
-Keep the completed `vision/yoloe-visual-prompt` branch as an offline experiment;
-it has not passed the usefulness gate.
+Keep the YOLOE and FastSAM work as offline comparison experiments. YOLOE
+passed the synthetic set but failed the provisional real-camera transfer set;
+FastSAM covered most real references but emitted too many unmatched proposals.
+Neither has passed the usefulness gate or changed runtime behavior.
 Do not replace geometric coordinate conversion, symmetry handling, or catalog
 validation with a neural model. FoundationPose is gated on representative
 registered depth and should not be treated as the default.
@@ -48,6 +50,22 @@ registered depth and should not be treated as the default.
   still not been measured. Keep the size explicit.
 
 ### Measured software results
+
+- A held-out Brev L40S comparison used nine realistic-simulator frames with 27
+  exact cube boxes and seven provisional real-camera frames with 17 cube boxes.
+  YOLOE with synthetic visual prompts scored 27 TP / 0 FP synthetically at
+  confidence 0.01, but 0 TP / 1 FP on real frames. A one-real-frame visual
+  prompt reached only 1 TP / 1 FP / 16 FN. This is direct evidence of
+  sim-to-real failure in the tested zero/few-shot configuration.
+- FastSAM proposals at confidence 0.10 covered 27/27 synthetic references and
+  16/17 provisional real references, but produced 176 real proposals, 160 of
+  them unmatched. Adding the frozen HSV/shape post-filter yielded 15 TP / 9 FP
+  / 2 FN (62.5% precision, 88.2% recall). It is a promising proposal source,
+  not a target provider and not an improvement over the existing control.
+- Warm L40S model calls were roughly 0.32--0.59 s per one-tile YOLOE synthetic
+  frame and about 11 ms median for FastSAM. Full eight-tile YOLOE real frames
+  averaged roughly 2.9--3.1 s. These exclude calibrated pose conversion,
+  service transfer, tracking, and robot-loop overhead.
 
 - Before this experiment, rollout-4 compressed replay under the 16 mm cube
   profile found exactly one pickable cube of each color on 121/123 sampled
@@ -148,9 +166,9 @@ experiment are still required.
 | Approach | Required inputs | What it can contribute | Main risk/cost | Current decision |
 | --- | --- | --- | --- | --- |
 | HSV cube + screw silhouette/width profile | Native RGB, fixed table calibration, known catalog geometry | Cube XY/yaw; approximate screw head origin and directed shaft axis; explicit geometric rejection | Dark lookalikes; black/silver finish changes; planar-projection bias; no general 6D pose | Leading offline control; opt-in profile |
-| YOLOE-26s segmentation + calibrated geometry | Native tiled RGB; text or visual prompts; GPU preferred | Pretrained instance masks under appearance variation; could bootstrap labels | Tiny targets; AGPL/enterprise licensing; large runtime; zero-shot masks unverified | Offline branch/harness complete; usefulness not demonstrated |
+| YOLOE-26s segmentation + calibrated geometry | Native tiled RGB; text or visual prompts; GPU preferred | Pretrained instance masks under appearance variation; could bootstrap labels | Severe measured sim-to-real dropout; eight-tile latency; AGPL/enterprise licensing | Rejected for runtime: 27/27 synthetic but at most 1/17 provisional real references |
 | FoundationPose | RGB, RGB-aligned metric depth, intrinsics, per-instance mask, and either CAD mesh or model-free RGB-D-mask references; NVIDIA GPU stack | Register/track object-to-camera pose plus model score | No archived depth; small/reflective screw; upstream mask source still required; current runtime compatibility unverified | Blocked pending depth/runtime audit |
-| FastSAM mask proposals | RGB plus optional box/point/text prompt; GPU preferred | Class-agnostic/single-class instance-mask proposals; possible unknown-object or mask bootstrap | No catalog identity or pose; tiny-object behavior unverified; license ambiguity/Ultralytics terms | Separate experiment only; not a target provider by itself |
+| FastSAM mask proposals | RGB plus optional box/point/text prompt; GPU preferred | High-coverage class-agnostic mask proposals; possible unknown-object or label bootstrap | No catalog identity or pose; 160 unmatched proposals at the 16/17-coverage setting; license ambiguity/Ultralytics terms | Separate experiment only; measured filter does not beat control |
 | Closed-set segmenter/keypoint model | Human-reviewed masks/keypoints, episode-level split, training GPU | Likely strongest eventual screw mask/head-tip model for the fixed cell | Requires reliable labels and held-out data; overfit risk | Only after label pilot/learning curve |
 | GigaPose RGB+CAD | Detection/mask/ROI, CAD templates, older pinned stack | RGB-only novel-object pose | Still needs detection; unnecessary unique 6D pose; integration burden | No branch before planar model fails |
 
