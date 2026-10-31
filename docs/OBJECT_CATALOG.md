@@ -76,10 +76,13 @@ feasibility checks described below exist.
 
 ### Unverified physical facts and required integration
 
-- The current HSV/silhouette provider cannot detect this screw, and the screw
-  demo has no camera or training-data mode. Required evidence includes a
-  calibrated camera-derived pose, visibility/occlusion quality, held-out real
-  replay, and a documented failure threshold.
+- The profile-unset HSV cube provider cannot detect this screw. The opt-in
+  hybrid vision profile can emit a restricted experimental observation for an
+  isolated, lying, dark screw on the bright table, but its pose is not yet
+  physically validated and the shared executor cannot act on it. The scripted
+  screw demo still has no camera or training-data mode. Required evidence
+  includes a calibrated camera-derived pose, visibility/occlusion quality,
+  held-out real replay, and a documented failure threshold.
 - The real screw's exact finish, mass, dimensions/tolerances, available poses,
   and match to this CAD have not been measured. CAD truth may label simulation
   but may not repair a real camera result.

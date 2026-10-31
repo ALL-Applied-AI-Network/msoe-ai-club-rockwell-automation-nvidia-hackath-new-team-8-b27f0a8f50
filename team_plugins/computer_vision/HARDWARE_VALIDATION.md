@@ -47,6 +47,13 @@ still returns the official measured-pose hold row, which is not an emergency
 stop and can produce a small controller correction. The assigned operator and
 controller remain responsible for stopping.
 
+`--max-snapshots` limits provider calls and saved evidence only. It does not
+terminate the approved rollout; after reaching the limit, the policy continues
+returning fresh measured-pose holds until the cell run ends or the operator
+stops it. A downstream cube-task partition error cannot erase an already
+validated provider scene, and an evidence-write failure is reported without
+replacing the already-constructed hold row.
+
 Keep the robot/controller stationary and do not jog while this tool is active.
 The hold row is constructed first, but synchronous perception and file writes
 delay its return to the client. Records separate hold-construction time,

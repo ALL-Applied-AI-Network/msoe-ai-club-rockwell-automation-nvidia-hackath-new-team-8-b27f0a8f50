@@ -1,10 +1,11 @@
 # Real-camera evidence for synthetic appearance
 
 The downloaded hardware archives are useful evidence, not ready-made training
-data. They contain synchronized 640x360 table, side, and wrist video plus robot
-state, but they also contain setup activity and occasional hands, laptops, and
-phones. They do not contain object masks, object poses, camera exposure values,
-or grasp-success labels.
+data. They contain row/frame-aligned 640x360 table, side, and wrist video at
+10 Hz plus robot state, but no per-camera exposure timestamps prove that the
+three images were captured simultaneously. They also contain setup activity
+and occasional hands, laptops, and phones. They do not contain object masks,
+object poses, camera exposure values, or grasp-success labels.
 
 `config/hardware_frame_curation.json` is therefore **default-deny**. Only frames
 inside its explicit `appearance_fit` split may be used to fit simulator

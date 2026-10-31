@@ -48,6 +48,29 @@ class _FakePolicy:
         )
 
 
+class _ProviderThenPartitionFailurePolicy(_FakePolicy):
+    class _Provider:
+        def observe(self, request):
+            return SceneObservation(
+                scene_id="provider-scene-before-task-partition",
+                capture_time_s=12.5,
+                provider_name="captured-provider",
+                provider_version="1",
+                calibration_ids=("test-calibration",),
+            )
+
+    def __init__(self):
+        super().__init__()
+        self._perception_provider = self._Provider()
+
+    def _detect_scene_views(self, obs):
+        self.perception_calls += 1
+        # The recorder wraps this provider call and validates/captures its
+        # output before this synthetic downstream task failure occurs.
+        self._perception_provider.observe(object())
+        raise ValueError("synthetic cube-task partition failure")
+
+
 def _observation() -> dict:
     rgb = np.zeros((6, 8, 3), dtype=np.uint8)
     rgb[..., 0] = 255
@@ -191,6 +214,56 @@ class LiveNoMotionDiagnosticTests(unittest.TestCase):
             self.assertEqual(record["status"], "error")
             self.assertEqual(record["error"]["type"], "ValueError")
             self.assertIn("synthetic provider failure", record["error"]["message"])
+            self.assertEqual(
+                record["error"]["stage"], "provider_or_request_boundary"
+            )
+
+    def test_valid_provider_scene_survives_downstream_task_partition_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            recorder = _recorder(Path(temporary))
+            policy_class = diagnostic.diagnostic_policy_class(
+                _ProviderThenPartitionFailurePolicy, recorder
+            )
+            policy = policy_class()
+
+            with patch.object(
+                diagnostic,
+                "validate_scene_for_request",
+                side_effect=lambda _request, result: result,
+            ):
+                result = policy.act(_observation())
+
+            self.assertIs(result, policy.hold_action)
+            self.assertIsInstance(policy._perception_provider, policy._Provider)
+            self.assertEqual(recorder.failures, 1)
+            scene = json.loads(
+                (Path(temporary) / "snapshot-000-scene.json").read_text()
+            )
+            record = json.loads(
+                (Path(temporary) / "snapshot-000-record.json").read_text()
+            )
+            self.assertEqual(
+                scene["scene_id"], "provider-scene-before-task-partition"
+            )
+            self.assertEqual(
+                record["error"]["stage"],
+                "task_partition_after_valid_provider_scene",
+            )
+            self.assertEqual(record["provider_name"], "captured-provider")
+
+    def test_recording_failure_preserves_already_constructed_hold(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            recorder = _recorder(Path(temporary))
+            policy_class = diagnostic.diagnostic_policy_class(_FakePolicy, recorder)
+            policy = policy_class()
+
+            with patch.object(
+                recorder, "capture", side_effect=OSError("synthetic disk failure")
+            ):
+                result = policy.act(_observation())
+
+            self.assertIs(result, policy.hold_action)
+            self.assertEqual(recorder.failures, 1)
 
     def test_snapshot_limit_bounds_provider_calls_and_files(self):
         with tempfile.TemporaryDirectory() as temporary:

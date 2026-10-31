@@ -328,7 +328,8 @@ still need:
 - table/cube/finger and cube/bin friction plus finger compliance;
 - pneumatic close/open delay and effective grasp force;
 - controller/network latency, interpolation, and tracking error; and
-- confirmation of the active **10 mm cube** and fingertip TCP convention.
+- a physical measurement and recorded runtime choice for the active cube edge
+  (**10 mm versus 16 mm**) plus the fingertip TCP convention.
 
 The pinned client/mock labels its action point as the fingertip. Separately, an
 organizer clarified on October 26, 2026 that the standard fingers touch the

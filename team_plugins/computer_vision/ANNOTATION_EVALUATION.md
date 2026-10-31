@@ -99,15 +99,50 @@ unknown timestamps occur between them.
 From the repository root in WSL:
 
 ```bash
+# Prepare exact clean frames and prefilled provider predictions from a clean
+# replay. frames.txt contains one strictly increasing source-frame index per
+# line; every index must exist in the replay's scenes.jsonl.
+uv run --project hardware/fanuc_cell --with av python -m \
+  team_plugins.computer_vision.prepare_annotation_bundle \
+  /external/path/capture.mp4 \
+  --replay-dir /external/path/clean-replay \
+  --frame-indices-file /external/path/frames.txt \
+  --output-dir /external/path/annotation-bundle \
+  --annotation-id pilot-layout-01 \
+  --dataset-id hardware-pilot \
+  --source-run-id rollout-05 \
+  --layout-id static-layout-01 \
+  --annotator-id teammate-name
+
 uv run --project hardware/fanuc_cell python -m \
   team_plugins.computer_vision.evaluate_annotations \
-  /external/path/annotations.json \
+  /external/path/annotation-bundle/annotation-manifest.reviewed.json \
   --evaluation-out /external/path/evaluation-result.v1.json \
   --diagnostics-out /external/path/diagnostics.v1.json
 
 uv run --project hardware/fanuc_cell python scripts/summarize_evaluation.py \
   /external/path/evaluation-result.v1.json
 ```
+
+The bundle contains lossless decoded-source PNGs, lossless native-calibration
+annotation PNGs, and separate prediction previews. Annotate only the clean
+`annotation/` images; `preview/` overlays are non-authoritative review aids and
+are explicitly marked as not ground truth. The starter manifest already
+contains the frozen provider predictions but deliberately has empty
+`references` and `regions` and is not score-ready. Preserve it unchanged, copy
+it to `annotation-manifest.reviewed.json`, add human references/regions there,
+and set review provenance only after a second person checks the labels. Run one
+bundle per physical layout so repeated frames stay grouped by `layout_id`.
+
+The tool rejects a dirty checkout, stale/mismatched replay artifacts, a capture
+or calibration hash mismatch, missing frame indices, nonempty output, and any
+output path inside the repository. Its bundle report pins the bundle-tool bytes,
+current Git commit/branch/dirty state, and all replay inputs. It also requires
+each re-decoded/upscaled RGB array to match the per-frame hash recorded by the
+replay, so a decoder/backend difference cannot silently change annotation
+pixels. It never imports the cell client or sends a robot command. An old replay may need to be
+regenerated after a provider, profile, replay tool, calibration, or
+object-catalog change; do not bypass that provenance gate for reported results.
 
 Keep private recordings, annotations containing personal data, generated
 reports, and overlays outside Git. Commit only the schema, evaluator, tests,
@@ -117,8 +152,9 @@ and small synthetic fixtures.
 
 Use the following deterministic 47-timestamp set only as a `pilot` split. It is
 not final held-out evidence because development has already inspected these
-recordings. Score table-camera targets; use synchronized side/wrist images only
-for diagnostic visibility until their extrinsics and timing are revalidated.
+recordings. Score table-camera targets; use the row/frame-aligned side/wrist
+images only for diagnostic visibility until their extrinsics and exposure
+timing are revalidated. Row alignment at 10 Hz is not exposure synchronization.
 
 - `r20261029-88a87b`, episode 0: `43, 348, 653, 958, 1263, 1568,
   1874, 2179, 2484, 2789, 3094, 3399`;

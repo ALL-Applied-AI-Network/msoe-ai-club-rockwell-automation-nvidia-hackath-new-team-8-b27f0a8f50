@@ -53,8 +53,8 @@ registered depth and should not be treated as the default.
   profile found exactly one pickable cube of each color on 121/123 sampled
   frames. That is a stability statistic, not recall or millimetre accuracy.
 - Twenty-six hybrid-provider, twelve annotation-evaluator, nine replay-tool,
-  and twelve bounded-live-diagnostic tests pass (59 computer-vision-team tests
-  total).
+  fourteen bounded-live-diagnostic, and seven annotation-bundle tests pass (68
+  computer-vision-team tests total).
 - A 199-frame sampled compressed replay completed with no inference exceptions.
   Before the colored-context guard it produced 278 screw observations and 46
   ambiguous obstacles; these are observations, not true positives.
@@ -78,9 +78,16 @@ registered depth and should not be treated as the default.
   selected frame indices, and a schema-valid evaluation result. The source was
   `HardwareResults/HardwareResultVideos/table.mp4`, SHA-256
   `0aa1940f3ed93a8f9cef11386946677f0b1216fbe8010c5d55fc0b68505d3d58`.
-  Because that run used a dirty development tree, the tool correctly withheld
-  the standardized evaluation artifact; a clean-commit replay is required for
-  the final versioned result.
+  The historical dirty-tree run correctly withheld the standardized artifact.
+- A clean replay at commit `85be0d0` sampled the same 199 frames and emitted a
+  schema-valid evaluation artifact. It produced 2,071 raw cube observations,
+  126 screw-candidate observations, and 217 explicit unknown obstacles. CPU
+  latency was mean 278.12 ms, median 276.08 ms, p95 387.29 ms, and maximum
+  490.17 ms. All 199 structured scene records were semantically identical to
+  the preceding clean provider replay after excluding runtime-only latency.
+  These are reproducibility/output counts, not precision, recall, or pose
+  accuracy: the compressed recording still has no reviewed reference labels or
+  independently measured pose truth.
 - The longest accepted screw track spanned 111 sampled frames (source frames
   560--1660) and had a maximum projected XY deviation of 2.23 mm from its own
   mean. This is compressed-video repeatability only: identity and physical
@@ -99,6 +106,13 @@ registered depth and should not be treated as the default.
 - A separate cube-only hand/tool window (frames 3640--3800 at every frame)
   produced zero screws but also no general unknown obstacles, demonstrating the
   remaining hand/unknown-segmentation gap.
+- An HSV largest-blue-region proxy sampled episode 6 and held-out episode 10 at
+  1 Hz. Wrist median area was 9.77%/9.03% and exceeded 2% in 100%/60.47% of
+  frames; table and side medians stayed below 0.4% and never exceeded 2%.
+  This is not a semantic cable mask—blue objects or hardware can contribute—and
+  does not validate multi-camera fusion. It supports keeping the table camera
+  as the coordinate source and reobserving from an arm-clear pose until
+  side/wrist calibration and exposure timing are measured.
 - As a coverage signal, `table.mp4` frames 550--700 at every frame produced one
   screw-like accepted track from frames 562--700, 133 screw observations, and
   210 unknown obstacles. Latency was mean 406.22 ms, median 387.40, p95 530.95,

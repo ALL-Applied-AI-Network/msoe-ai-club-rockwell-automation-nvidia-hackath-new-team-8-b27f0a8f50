@@ -27,7 +27,11 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
-from sorting_core.perception import SceneObservation, scene_observation_to_dict
+from sorting_core.perception import (
+    SceneObservation,
+    scene_observation_to_dict,
+    validate_scene_for_request,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -259,6 +263,27 @@ class SnapshotRecorder:
         started = time.perf_counter()
         scene: SceneObservation | None = None
         failure: Exception | None = None
+        failure_stage: str | None = None
+        provider = getattr(policy, "_perception_provider", None)
+        proxy = None
+        if provider is not None:
+            class _CapturingProvider:
+                """Preserve a validated provider scene before task partitioning."""
+
+                def __init__(self, delegate: Any) -> None:
+                    self.delegate = delegate
+                    self.scene: SceneObservation | None = None
+
+                def observe(self, request: Any) -> Any:
+                    result = self.delegate.observe(request)
+                    self.scene = validate_scene_for_request(request, result)
+                    return result
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(self.delegate, name)
+
+            proxy = _CapturingProvider(provider)
+            policy._perception_provider = proxy
         try:
             # This is the narrow private integration described in the module
             # docstring. It builds/validates the provider request *and* applies
@@ -270,7 +295,20 @@ class SnapshotRecorder:
                 raise TypeError("policy perception boundary returned no SceneObservation")
         except Exception as exc:  # explicit evidence plus nonzero process exit
             failure = exc
+            if proxy is not None and proxy.scene is not None:
+                # The provider result itself passed the strict request boundary;
+                # retain it even when the legacy cube-task partition rejects the
+                # scene afterward (for example because a task-specific colour
+                # condition is absent). This distinction is essential when the
+                # purpose of the run is vision evidence rather than execution.
+                scene = proxy.scene
+                failure_stage = "task_partition_after_valid_provider_scene"
+            else:
+                failure_stage = "provider_or_request_boundary"
             self.failures += 1
+        finally:
+            if proxy is not None:
+                policy._perception_provider = provider
         latency_ms = (time.perf_counter() - started) * 1000.0
 
         trial = obs.get("trial")
@@ -322,6 +360,7 @@ class SnapshotRecorder:
             record["error"] = {
                 "type": type(failure).__name__,
                 "message": str(failure),
+                "stage": failure_stage,
             }
         action_delay_lower_bound_ms = (time.perf_counter() - act_started_s) * 1000.0
         record["timing"] = {
@@ -381,12 +420,33 @@ def diagnostic_policy_class(base_policy_class: type, recorder: SnapshotRecorder)
             act_started_s = time.perf_counter()
             hold_action = super().act(obs)
             hold_ready_s = time.perf_counter()
-            recorder.capture(
-                self,
-                obs,
-                act_started_s=act_started_s,
-                hold_ready_s=hold_ready_s,
-            )
+            failures_before_capture = recorder.failures
+            try:
+                recorder.capture(
+                    self,
+                    obs,
+                    act_started_s=act_started_s,
+                    hold_ready_s=hold_ready_s,
+                )
+            except Exception as exc:
+                # The hold row already exists. A disk/encoding/provenance
+                # failure must be visible, but must not replace that row with an
+                # exception after perception was deliberately made non-motion.
+                if recorder.failures == failures_before_capture:
+                    recorder.failures += 1
+                print(
+                    json.dumps(
+                        {
+                            "event": "vision_diagnostic_recording_error",
+                            "error": {
+                                "type": type(exc).__name__,
+                                "message": str(exc),
+                            },
+                            "hold_action_preserved": True,
+                        },
+                        sort_keys=True,
+                    )
+                )
             return hold_action
 
     LiveNoMotionDiagnosticPolicy.__name__ = "LiveNoMotionDiagnosticPolicy"

@@ -126,8 +126,8 @@ The tests cover:
 - preservation of the cube path.
 
 The provider has 26 focused tests, the annotation evaluator has 12, replay and
-overlay/provenance handling has 9, and the bounded live diagnostic has 12, for
-59 computer-vision-team tests total.
+overlay/provenance handling has 9, the live diagnostic has 14, and the
+annotation-bundle tool has 7, for 68 computer-vision-team tests total.
 Run the annotation evaluator tests directly with:
 
 ```bash
@@ -212,12 +212,14 @@ accuracy.
 
 Treat this hybrid profile as offline/no-motion until the native calibration,
 timestamp, negative-case, and measured-pose gates in `HARDWARE_VALIDATION.md`
-pass. The shared executor cannot execute screws at all. The exact no-motion
-fallback from `hardware/fanuc_cell` is:
+pass. The shared executor cannot execute screws at all. From the repository
+root in WSL, enter `hardware/fanuc_cell` and run the exact no-motion fallback:
 
 ```bash
+cd hardware/fanuc_cell
 unset ROCKWELL_INTEGRATION_PROFILE
 uv run supervised_run.py hold
+cd ../..
 ```
 
 That fallback verifies the cell connection and measured-pose hold but does not
@@ -246,8 +248,16 @@ timestamp. That timestamp is not a camera exposure timestamp. Provider or
 downstream task-partition failures produce an explicit error record and a
 nonzero final exit status; they never become an empty clear scene.
 `_detect_scene_views` includes the existing cube task's diagnostic partitioning,
-so an error there can follow valid provider output. The returned action is still
-the original strict measured TCP/gripper hold row.
+so an error there can follow valid provider output. The diagnostic preserves
+that separately validated provider scene before recording the downstream task
+error. If PNG/JSON evidence writing itself fails, it reports the error and
+still returns the already-constructed hold. Once the base policy has
+successfully constructed a row, the returned action remains the original
+strict measured TCP/gripper hold row.
+
+`--max-snapshots` limits provider calls and saved snapshots; it does **not**
+terminate the approved rollout. After the limit, the policy continues returning
+fresh measured-pose holds until the cell run ends or the operator stops it.
 
 The saved PNG is a lossless re-encoding of the RGB array delivered by the
 backend. Its record states RGB channel order, requested wire format, decoded
@@ -283,6 +293,8 @@ policy changes.
 - `replay_camera.py`: offline no-motion replay/overlay tool.
 - `live_no_motion_diagnostic.py`: bounded live perception capture while the
   official policy returns its measured-pose hold.
+- `prepare_annotation_bundle.py`: exact-frame, lossless, provenance-pinned
+  replay-to-annotation bridge with clean images and separate review overlays.
 - `tests/`: team-owned contract and edge-case tests.
 - `MODEL_EVALUATION.md`: model comparison and measured evidence.
 - `DECISION_LOG.md`: hypotheses, results, and next experiments.
@@ -290,11 +302,10 @@ policy changes.
 - `ANNOTATION_EVALUATION.md`, `annotation-manifest.v1.schema.json`, and
   `evaluate_annotations.py`: reviewed ground-truth/evaluation workflow.
 
-Lead/main follow-up: `docs/OBJECT_CATALOG.md` still describes the old
-profile-unset HSV path as unable to detect screws. The lead should clarify on
-`main` that the opt-in hybrid profile can emit a restricted, experimental lying
-screw observation but is not execution-ready. This vision branch intentionally
-does not edit that shared file.
+This branch updates `docs/OBJECT_CATALOG.md` to distinguish the profile-unset
+cube-only HSV path from the restricted opt-in screw observation. That catalog
+change must travel with this branch when the lead eventually merges it; it does
+not make screw execution ready.
 
 Ask the team AI when a field, coordinate frame, test, or failure message is
 unclear. Do not edit hardware control, Isaac, shared contracts, or the grasp

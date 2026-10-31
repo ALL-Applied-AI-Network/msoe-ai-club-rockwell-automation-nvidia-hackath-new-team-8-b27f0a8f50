@@ -599,6 +599,12 @@ def main() -> int:
                 "frame_index": frame_index,
                 "timestamp_s": timestamp_s,
                 "latency_ms": latency_ms,
+                "input_rgb_sha256": hashlib.sha256(
+                    rgb.tobytes(order="C")
+                ).hexdigest(),
+                "input_rgb_shape_hwc": [int(value) for value in rgb.shape],
+                "input_rgb_dtype": str(rgb.dtype),
+                "input_channel_order": "RGB",
                 "scene": scene_observation_to_dict(scene),
             }
         )

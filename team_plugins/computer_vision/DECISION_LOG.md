@@ -161,6 +161,43 @@
   evaluate with the strict annotation workflow before enabling any new provider
   for motion.
 
+## 2026-10-31 — Final clean compressed replay
+
+- Setup: clean commit `85be0d0`, 199 frames sampled every ten frames from
+  `table.mp4`, explicit 16 mm cube profile, qualitative nearest-neighbour
+  upscale, capture SHA-256 `0aa1940f...3d58`.
+- Result: 2,071 raw cube observations, 126 screw-candidate observations, and
+  217 unknown obstacles; latency mean 278.12 ms, median 276.08 ms, p95
+  387.29 ms, maximum 490.17 ms. The run emitted a schema-valid standardized
+  artifact.
+- Regression check: all 199 structured scene records matched the preceding
+  clean provider replay after excluding runtime-only latency; the overlay-only
+  change did not alter detections.
+- Evidence limit: no reviewed references or independent physical pose truth
+  exist in this compressed video, so these counts are not accuracy and cannot
+  justify motion.
+- Next experiment: use the no-motion diagnostic on measured native layouts and
+  evaluate the resulting reviewed annotation manifest.
+
+## 2026-10-31 — Lossless annotation bridge
+
+- Problem: the strict evaluator worked, but beginners had to hand-copy nested
+  provider predictions and could not export an irregular frame ledger in one
+  attributable step.
+- Action: add an offline bundle tool that selects explicit replay frame indices,
+  verifies capture/replay/calibration/provider/profile/catalog/Git provenance,
+  saves decoded and native-calibration PNGs losslessly, prefills predictions,
+  and creates separate non-authoritative review overlays.
+- Correctness fix: use the detector's stored image centroid for matching. A
+  review found that reprojecting the lower 3D cube center shifted frame-620 cube
+  centers by 3.04--6.71 pixels (median 4.07 pixels).
+- Evidence: seven focused tests cover schema validity, exact pixels, replay-RGB
+  identity, preview separation, strict selections, missing detector centers,
+  hash mismatch, report/scene mismatch, and stale output refusal. A development smoke exported
+  frames 580 and 620 from the archived replay; it remains pilot evidence only.
+- Limitation: the starter manifest has no human references or independent pose
+  truth. It cannot produce accuracy until those are added and reviewed.
+
 ## 2026-10-31 — Brev availability
 
 - Hypothesis: a fresh L40S launchable can run the GPU experiments.
