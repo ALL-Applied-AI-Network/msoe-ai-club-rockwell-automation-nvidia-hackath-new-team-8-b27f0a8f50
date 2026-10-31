@@ -465,6 +465,45 @@ class AnnotationBundleTests(unittest.TestCase):
             ):
                 self._prepare(fixture, root / "bundle")
 
+    def test_non_executable_metadata_requires_a_boolean(self):
+        for object_index, malformed in ((0, "true"), (2, 1), (2, None)):
+            with self.subTest(object_index=object_index, malformed=malformed):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    fixture = self._fixture(root)
+                    scenes_path = fixture["replay"] / "scenes.jsonl"
+                    record = json.loads(scenes_path.read_text(encoding="utf-8"))
+                    record["scene"]["objects"][object_index]["attributes"][
+                        "non_executable"
+                    ] = malformed
+                    scenes_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+                    self._refresh_scenes_hash(fixture)
+
+                    with self.assertRaisesRegex(
+                        AnnotationBundleError, "non_executable must be a boolean"
+                    ):
+                        self._prepare(fixture, root / "bundle")
+
+    def test_candidate_class_metadata_rejects_invalid_values_cleanly(self):
+        malformed_values = ([], {}, True, 7, "", " cube")
+        for malformed in malformed_values:
+            with self.subTest(malformed=malformed):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    fixture = self._fixture(root)
+                    scenes_path = fixture["replay"] / "scenes.jsonl"
+                    record = json.loads(scenes_path.read_text(encoding="utf-8"))
+                    record["scene"]["objects"][2]["attributes"][
+                        "candidate_class"
+                    ] = malformed
+                    scenes_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+                    self._refresh_scenes_hash(fixture)
+
+                    with self.assertRaisesRegex(
+                        AnnotationBundleError, "candidate_class must be a non-empty string"
+                    ):
+                        self._prepare(fixture, root / "bundle")
+
     def test_nonempty_output_is_refused(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

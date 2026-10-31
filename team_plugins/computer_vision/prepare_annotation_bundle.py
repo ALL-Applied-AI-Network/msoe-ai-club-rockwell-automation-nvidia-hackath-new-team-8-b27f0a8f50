@@ -434,16 +434,44 @@ def _point(values: Sequence[Any], path: str, length: int) -> np.ndarray:
     return array
 
 
+def _candidate_class_attribute(detected: Any, *, frame_index: int) -> str | None:
+    """Return a normalized optional class hint or reject malformed metadata."""
+
+    value = detected.attributes.get("candidate_class")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip() or value != value.strip():
+        raise AnnotationBundleError(
+            f"frame {frame_index} {detected.track_id} candidate_class must be "
+            "a non-empty string without surrounding whitespace or null"
+        )
+    return value
+
+
+def _non_executable_attribute(detected: Any, *, frame_index: int) -> bool | None:
+    """Return the optional boolean gate without accepting truthy substitutes."""
+
+    if "non_executable" not in detected.attributes:
+        return None
+    value = detected.attributes["non_executable"]
+    if not isinstance(value, bool):
+        raise AnnotationBundleError(
+            f"frame {frame_index} {detected.track_id} non_executable must be a boolean"
+        )
+    return value
+
+
 def _provider_eligibility(detected: Any, *, frame_index: int) -> dict[str, Any]:
     """Preserve semantic hypotheses without making withheld objects executable."""
 
+    candidate_class = _candidate_class_attribute(detected, frame_index=frame_index)
+    non_executable = _non_executable_attribute(detected, frame_index=frame_index)
     if detected.class_id in SUPPORTED_CLASSES:
-        candidate_hint = detected.attributes.get("candidate_class")
         ambiguity_reason = detected.attributes.get("ambiguity_reason")
         if (
-            detected.attributes.get("non_executable") is True
+            non_executable is True
             or ambiguity_reason not in (None, "")
-            or candidate_hint not in (None, detected.class_id)
+            or candidate_class not in (None, detected.class_id)
         ):
             raise AnnotationBundleError(
                 f"frame {frame_index} {detected.track_id} publishes supported class "
@@ -454,14 +482,13 @@ def _provider_eligibility(detected: Any, *, frame_index: int) -> dict[str, Any]:
             "provider_output_eligibility": "published_supported",
             "eligibility_reasons": [],
         }
-    candidate_class = detected.attributes.get("candidate_class")
     if candidate_class not in SUPPORTED_CLASSES:
         return {
             "semantic_candidate_class_id": None,
             "provider_output_eligibility": "not_supported_candidate",
             "eligibility_reasons": [],
         }
-    if detected.attributes.get("non_executable") is not True:
+    if non_executable is not True:
         raise AnnotationBundleError(
             f"frame {frame_index} {detected.track_id} has a supported semantic "
             "candidate without explicit non_executable=true"
