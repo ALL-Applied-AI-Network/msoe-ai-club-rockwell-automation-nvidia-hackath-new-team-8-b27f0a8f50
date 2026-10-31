@@ -378,6 +378,165 @@ class AnnotationEvaluationTests(unittest.TestCase):
         self.assertEqual(diagnostics["abstentions_total"], 2)
         self.assertEqual(diagnostics["abstentions_by_class"]["unknown_obstacle"], 1)
         self.assertEqual(diagnostics["abstentions_by_class"]["washer_unmodeled"], 1)
+        self.assertFalse(diagnostics["semantic_candidate_recognition"]["available"])
+
+    def test_semantic_candidate_recognition_keeps_withheld_target_a_primary_dropout(self):
+        manifest = valid_manifest()
+        source_frame = deepcopy(manifest["frames"][0])
+        screw_reference = source_frame["references"][1]
+        withheld = deepcopy(source_frame["predictions"][1])
+        withheld.update(
+            {
+                "prediction_id": "withheld-screw",
+                "track_id": "withheld-screw-track",
+                "class_id": "unknown_obstacle",
+                "sort_label": None,
+                "pose_quality": 0.0,
+                "head_uv": None,
+                "tip_uv": None,
+                "axis_observability": "unobservable",
+                "pose": None,
+                "semantic_candidate_class_id": "screw_iso10642_m6x30",
+                "provider_output_eligibility": "withheld_non_executable",
+                "eligibility_reasons": ["footprint_outside_pickup_region"],
+            }
+        )
+        source_frame["references"] = [screw_reference]
+        source_frame["predictions"] = [withheld]
+        manifest["frames"] = [source_frame]
+
+        evaluation, diagnostics = evaluate_manifest(manifest)
+        screw = evaluation["vision"]["per_class"][0]
+        self.assertEqual(screw["true_positives"], 0)
+        self.assertEqual(screw["dropouts"], 1)
+        self.assertEqual(diagnostics["abstentions_total"], 1)
+        semantic = diagnostics["semantic_candidate_recognition"]
+        self.assertTrue(semantic["available"])
+        self.assertEqual(
+            semantic["by_class"]["screw_iso10642_m6x30"],
+            {
+                "reference_instances": 1,
+                "matched_semantic_total": 1,
+                "matched_published_supported": 0,
+                "matched_withheld_non_executable": 1,
+                "dropouts": 0,
+                "unmatched_candidate_predictions": 0,
+                "unmatched_published_supported": 0,
+                "unmatched_withheld_non_executable": 0,
+                "semantic_candidate_recall": 1.0,
+            },
+        )
+        self.assertEqual(
+            semantic["matched_withheld_reasons"],
+            {"footprint_outside_pickup_region": 1},
+        )
+        self.assertIn("remains non-executable", semantic["evidence_limit"])
+
+    def test_explicit_published_eligibility_does_not_change_primary_metrics(self):
+        legacy_manifest = valid_manifest()
+        explicit_manifest = deepcopy(legacy_manifest)
+        for frame_value in explicit_manifest["frames"]:
+            for prediction_value in frame_value["predictions"]:
+                prediction_value.update(
+                    {
+                        "semantic_candidate_class_id": prediction_value["class_id"],
+                        "provider_output_eligibility": "published_supported",
+                        "eligibility_reasons": [],
+                    }
+                )
+
+        legacy_evaluation, legacy_diagnostics = evaluate_manifest(legacy_manifest)
+        explicit_evaluation, explicit_diagnostics = evaluate_manifest(explicit_manifest)
+
+        self.assertEqual(
+            explicit_evaluation["vision"],
+            legacy_evaluation["vision"],
+        )
+        self.assertEqual(
+            explicit_diagnostics["abstentions_total"],
+            legacy_diagnostics["abstentions_total"],
+        )
+        self.assertEqual(
+            explicit_diagnostics["abstentions_by_class"],
+            legacy_diagnostics["abstentions_by_class"],
+        )
+        self.assertTrue(
+            explicit_diagnostics["semantic_candidate_recognition"]["available"]
+        )
+        self.assertFalse(
+            legacy_diagnostics["semantic_candidate_recognition"]["available"]
+        )
+
+    def test_provider_eligibility_metadata_is_strict_and_all_or_none(self):
+        cases = []
+        partial = valid_manifest()
+        partial["frames"][0]["predictions"][0][
+            "semantic_candidate_class_id"
+        ] = "cube"
+        cases.append(("partial group", partial))
+
+        inconsistent = valid_manifest()
+        target = inconsistent["frames"][0]["predictions"][0]
+        target.update(
+            {
+                "semantic_candidate_class_id": "cube",
+                "provider_output_eligibility": "withheld_non_executable",
+                "eligibility_reasons": ["outside"],
+            }
+        )
+        cases.append(("withheld supported class", inconsistent))
+
+        mixed = valid_manifest()
+        target = mixed["frames"][0]["predictions"][0]
+        target.update(
+            {
+                "semantic_candidate_class_id": "cube",
+                "provider_output_eligibility": "published_supported",
+                "eligibility_reasons": [],
+            }
+        )
+        cases.append(("mixed legacy and extended predictions", mixed))
+
+        supported_marked_non_candidate = valid_manifest()
+        for frame in supported_marked_non_candidate["frames"]:
+            for prediction in frame["predictions"]:
+                prediction.update(
+                    {
+                        "semantic_candidate_class_id": None,
+                        "provider_output_eligibility": "not_supported_candidate",
+                        "eligibility_reasons": [],
+                    }
+                )
+        cases.append(
+            ("published supported class marked as non-candidate", supported_marked_non_candidate)
+        )
+
+        comma_reason = valid_manifest()
+        comma_reason["frames"] = [comma_reason["frames"][0]]
+        target = comma_reason["frames"][0]["predictions"][0]
+        target.update(
+            {
+                "class_id": "unknown_obstacle",
+                "sort_label": None,
+                "pose": None,
+                "semantic_candidate_class_id": "cube",
+                "provider_output_eligibility": "withheld_non_executable",
+                "eligibility_reasons": ["outside,blurred"],
+            }
+        )
+        for other in comma_reason["frames"][0]["predictions"][1:]:
+            other.update(
+                {
+                    "semantic_candidate_class_id": other["class_id"],
+                    "provider_output_eligibility": "published_supported",
+                    "eligibility_reasons": [],
+                }
+            )
+        cases.append(("non-atomic reason", comma_reason))
+
+        for name, manifest in cases:
+            with self.subTest(name=name), self.assertRaises(AnnotationValidationError):
+                validate_manifest(manifest)
 
     def test_scored_reference_wins_over_overlapping_ignore_region(self):
         manifest = valid_manifest()

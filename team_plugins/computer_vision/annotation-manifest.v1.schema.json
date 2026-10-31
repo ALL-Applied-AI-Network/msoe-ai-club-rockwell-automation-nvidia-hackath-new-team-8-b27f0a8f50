@@ -343,8 +343,41 @@
         },
         "pose": {
           "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/predictionPose" }]
+        },
+        "semantic_candidate_class_id": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/nonemptyString" }]
+        },
+        "provider_output_eligibility": {
+          "enum": [
+            "published_supported",
+            "withheld_non_executable",
+            "not_supported_candidate"
+          ]
+        },
+        "eligibility_reasons": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonemptyString" }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              { "required": ["semantic_candidate_class_id"] },
+              { "required": ["provider_output_eligibility"] },
+              { "required": ["eligibility_reasons"] }
+            ]
+          },
+          "then": {
+            "required": [
+              "semantic_candidate_class_id",
+              "provider_output_eligibility",
+              "eligibility_reasons"
+            ]
+          }
+        }
+      ]
     },
     "region": {
       "type": "object",

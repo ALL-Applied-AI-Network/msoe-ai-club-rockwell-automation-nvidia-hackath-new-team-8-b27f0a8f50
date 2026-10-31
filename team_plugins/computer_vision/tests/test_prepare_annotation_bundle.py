@@ -87,10 +87,32 @@ class AnnotationBundleTests(unittest.TestCase):
                 "tip_xy_base_m": [0.1, 0.0],
             },
         )
+        withheld_screw = DetectedObject(
+            track_id="withheld-screw-track",
+            class_id="unknown_obstacle",
+            sort_label=None,
+            capture_time_s=0.0,
+            pose=Pose3D(
+                position_base_m=(-0.2, 0.0, 1.0),
+                orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+            ),
+            dimensions_m=(0.03, 0.03, 0.013),
+            confidence=0.49,
+            pose_quality=0.0,
+            source_camera_ids=("table",),
+            attributes={
+                "pixel_center_uv": [30.0, 40.0],
+                "candidate_class": "screw_iso10642_m6x30",
+                "non_executable": True,
+                "ambiguity_reason": (
+                    "footprint_outside_pickup_region,not_isolated_on_white_table"
+                ),
+            },
+        )
         scene = SceneObservation(
             scene_id="capture:0",
             capture_time_s=0.0,
-            objects=(cube, screw),
+            objects=(cube, screw, withheld_screw),
             provider_name="test-provider",
             provider_version="1",
             calibration_ids=("cameras.json:table",),
@@ -144,6 +166,7 @@ class AnnotationBundleTests(unittest.TestCase):
             "object_observations_by_class": {
                 "cube": 1,
                 "screw_iso10642_m6x30": 1,
+                "unknown_obstacle": 1,
             },
             "evaluation_result": "evaluation-result.v1.json",
             "evaluation_result_skipped_reason": None,
@@ -247,6 +270,25 @@ class AnnotationBundleTests(unittest.TestCase):
             self.assertEqual(
                 predictions["screw_iso10642_m6x30"]["axis_observability"],
                 "directed",
+            )
+            self.assertEqual(
+                predictions["cube"]["provider_output_eligibility"],
+                "published_supported",
+            )
+            self.assertEqual(
+                predictions["unknown_obstacle"]["semantic_candidate_class_id"],
+                "screw_iso10642_m6x30",
+            )
+            self.assertEqual(
+                predictions["unknown_obstacle"]["provider_output_eligibility"],
+                "withheld_non_executable",
+            )
+            self.assertEqual(
+                predictions["unknown_obstacle"]["eligibility_reasons"],
+                [
+                    "footprint_outside_pickup_region",
+                    "not_isolated_on_white_table",
+                ],
             )
             source = cv2.imread(str(output / "source" / "frame-000000.png"))
             annotation = cv2.imread(
@@ -365,6 +407,61 @@ class AnnotationBundleTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 AnnotationBundleError, "lacks detector pixel_center_uv"
+            ):
+                self._prepare(fixture, root / "bundle")
+
+    def test_semantic_candidate_requires_explicit_non_executable_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = self._fixture(root)
+            scenes_path = fixture["replay"] / "scenes.jsonl"
+            record = json.loads(scenes_path.read_text(encoding="utf-8"))
+            candidate = record["scene"]["objects"][2]
+            candidate["attributes"]["non_executable"] = False
+            scenes_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            self._refresh_scenes_hash(fixture)
+
+            with self.assertRaisesRegex(
+                AnnotationBundleError, "without explicit non_executable=true"
+            ):
+                self._prepare(fixture, root / "bundle")
+
+    def test_semantic_candidate_rejects_empty_reason_segments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = self._fixture(root)
+            scenes_path = fixture["replay"] / "scenes.jsonl"
+            record = json.loads(scenes_path.read_text(encoding="utf-8"))
+            record["scene"]["objects"][2]["attributes"]["ambiguity_reason"] = (
+                "footprint_outside_pickup_region,,not_isolated_on_white_table"
+            )
+            scenes_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            self._refresh_scenes_hash(fixture)
+
+            with self.assertRaisesRegex(
+                AnnotationBundleError, "unique atomic ambiguity reasons"
+            ):
+                self._prepare(fixture, root / "bundle")
+
+    def test_published_supported_class_rejects_non_executable_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = self._fixture(root)
+            scenes_path = fixture["replay"] / "scenes.jsonl"
+            record = json.loads(scenes_path.read_text(encoding="utf-8"))
+            record["scene"]["objects"][0]["attributes"].update(
+                {
+                    "candidate_class": "cube",
+                    "non_executable": True,
+                    "ambiguity_reason": "occluded",
+                }
+            )
+            scenes_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            self._refresh_scenes_hash(fixture)
+
+            with self.assertRaisesRegex(
+                AnnotationBundleError,
+                "publishes supported class with contradictory non-executable candidate metadata",
             ):
                 self._prepare(fixture, root / "bundle")
 

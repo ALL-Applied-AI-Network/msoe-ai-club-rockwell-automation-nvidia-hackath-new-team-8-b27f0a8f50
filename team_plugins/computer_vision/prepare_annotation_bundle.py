@@ -28,7 +28,10 @@ import numpy as np
 from hardware.fanuc_cell.calibration.geometry import load as load_calibration
 from hardware.fanuc_cell.calibration.geometry import project
 from sorting_core import scene_observation_from_dict
-from team_plugins.computer_vision.evaluate_annotations import validate_manifest
+from team_plugins.computer_vision.evaluate_annotations import (
+    SUPPORTED_CLASSES,
+    validate_manifest,
+)
 from team_plugins.computer_vision.replay_camera import _draw_overlay, _frames
 
 
@@ -431,6 +434,62 @@ def _point(values: Sequence[Any], path: str, length: int) -> np.ndarray:
     return array
 
 
+def _provider_eligibility(detected: Any, *, frame_index: int) -> dict[str, Any]:
+    """Preserve semantic hypotheses without making withheld objects executable."""
+
+    if detected.class_id in SUPPORTED_CLASSES:
+        candidate_hint = detected.attributes.get("candidate_class")
+        ambiguity_reason = detected.attributes.get("ambiguity_reason")
+        if (
+            detected.attributes.get("non_executable") is True
+            or ambiguity_reason not in (None, "")
+            or candidate_hint not in (None, detected.class_id)
+        ):
+            raise AnnotationBundleError(
+                f"frame {frame_index} {detected.track_id} publishes supported class "
+                "with contradictory non-executable candidate metadata"
+            )
+        return {
+            "semantic_candidate_class_id": detected.class_id,
+            "provider_output_eligibility": "published_supported",
+            "eligibility_reasons": [],
+        }
+    candidate_class = detected.attributes.get("candidate_class")
+    if candidate_class not in SUPPORTED_CLASSES:
+        return {
+            "semantic_candidate_class_id": None,
+            "provider_output_eligibility": "not_supported_candidate",
+            "eligibility_reasons": [],
+        }
+    if detected.attributes.get("non_executable") is not True:
+        raise AnnotationBundleError(
+            f"frame {frame_index} {detected.track_id} has a supported semantic "
+            "candidate without explicit non_executable=true"
+        )
+    reason_value = detected.attributes.get("ambiguity_reason")
+    if not isinstance(reason_value, str):
+        raise AnnotationBundleError(
+            f"frame {frame_index} {detected.track_id} semantic candidate lacks "
+            "a string ambiguity_reason"
+        )
+    reason_parts = [item.strip() for item in reason_value.split(",")]
+    if (
+        not reason_parts
+        or any(not item for item in reason_parts)
+        or len(set(reason_parts)) != len(reason_parts)
+    ):
+        raise AnnotationBundleError(
+            f"frame {frame_index} {detected.track_id} semantic candidate requires "
+            "unique atomic ambiguity reasons"
+        )
+    reasons = reason_parts
+    return {
+        "semantic_candidate_class_id": candidate_class,
+        "provider_output_eligibility": "withheld_non_executable",
+        "eligibility_reasons": reasons,
+    }
+
+
 def _prediction_from_object(
     *,
     frame_index: int,
@@ -511,6 +570,7 @@ def _prediction_from_object(
             if detected.class_id in {"cube", "screw_iso10642_m6x30"}
             else None
         ),
+        **_provider_eligibility(detected, frame_index=frame_index),
     }
 
 

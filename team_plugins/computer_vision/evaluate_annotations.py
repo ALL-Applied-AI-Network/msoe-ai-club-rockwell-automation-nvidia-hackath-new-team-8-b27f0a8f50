@@ -22,8 +22,13 @@ from typing import Any, Iterable, Mapping, Sequence
 
 
 SCHEMA_VERSION = 1
-EVALUATOR_VERSION = "1.1"
+EVALUATOR_VERSION = "1.2"
 SUPPORTED_CLASSES = {"cube", "screw_iso10642_m6x30"}
+PROVIDER_OUTPUT_ELIGIBILITY = {
+    "published_supported",
+    "withheld_non_executable",
+    "not_supported_candidate",
+}
 SYMMETRY_IDS = {
     "cube": "upright_square_yaw_modulo_90_deg",
     "screw": "catalog_axial_symmetry_unresolved",
@@ -366,6 +371,11 @@ def _validate_prediction(
             "axis_observability",
             "pose",
         ),
+        optional=(
+            "semantic_candidate_class_id",
+            "provider_output_eligibility",
+            "eligibility_reasons",
+        ),
         path=path,
     )
     _string(prediction["prediction_id"], f"{path}.prediction_id")
@@ -418,6 +428,65 @@ def _validate_prediction(
         norm = math.sqrt(sum(component * component for component in quaternion))
         if not math.isclose(norm, 1.0, rel_tol=0.0, abs_tol=1e-6):
             _fail(f"{path}.pose.orientation_xyzw", "must be a unit quaternion")
+    eligibility_fields = {
+        "semantic_candidate_class_id",
+        "provider_output_eligibility",
+        "eligibility_reasons",
+    }
+    present_eligibility_fields = eligibility_fields & set(prediction)
+    if present_eligibility_fields and present_eligibility_fields != eligibility_fields:
+        missing = sorted(eligibility_fields - present_eligibility_fields)
+        _fail(
+            path,
+            "provider eligibility metadata is an all-or-none group; missing "
+            + ", ".join(missing),
+        )
+    if present_eligibility_fields:
+        candidate_class = _nullable_string(
+            prediction["semantic_candidate_class_id"],
+            f"{path}.semantic_candidate_class_id",
+        )
+        eligibility = _enum(
+            prediction["provider_output_eligibility"],
+            PROVIDER_OUTPUT_ELIGIBILITY,
+            f"{path}.provider_output_eligibility",
+        )
+        reasons = [
+            _string(item, f"{path}.eligibility_reasons[{index}]")
+            for index, item in enumerate(
+                _array(prediction["eligibility_reasons"], f"{path}.eligibility_reasons")
+            )
+        ]
+        _unique(reasons, f"{path}.eligibility_reasons")
+        if any("," in reason for reason in reasons):
+            _fail(f"{path}.eligibility_reasons", "entries must be atomic, not comma-separated")
+        if eligibility == "published_supported":
+            if class_id not in SUPPORTED_CLASSES or candidate_class != class_id:
+                _fail(
+                    path,
+                    "published_supported requires class_id and semantic candidate to be the same supported class",
+                )
+            if reasons:
+                _fail(f"{path}.eligibility_reasons", "published_supported requires no withholding reasons")
+        elif eligibility == "withheld_non_executable":
+            if class_id in SUPPORTED_CLASSES:
+                _fail(path, "withheld_non_executable cannot publish a supported class_id")
+            if candidate_class not in SUPPORTED_CLASSES:
+                _fail(
+                    f"{path}.semantic_candidate_class_id",
+                    "withheld_non_executable requires a supported semantic candidate class",
+                )
+            if not reasons:
+                _fail(
+                    f"{path}.eligibility_reasons",
+                    "withheld_non_executable requires at least one explicit reason",
+                )
+        else:
+            if class_id in SUPPORTED_CLASSES or candidate_class is not None or reasons:
+                _fail(
+                    path,
+                    "not_supported_candidate requires an unpublished class_id, a null semantic candidate, and no reasons",
+                )
     return prediction
 
 
@@ -525,6 +594,7 @@ def validate_manifest(value: Any, *, source: str = "manifest") -> Mapping[str, A
     frame_indices: list[int] = []
     identities: dict[tuple[str, str], tuple[str, str | None]] = {}
     has_base_pose_claim = False
+    eligibility_metadata_presence: list[bool] = []
     for frame_index, frame_value in enumerate(frames):
         frame_path = f"{source}.frames[{frame_index}]"
         frame = _object(frame_value, frame_path)
@@ -573,6 +643,9 @@ def validate_manifest(value: Any, *, source: str = "manifest") -> Mapping[str, A
             _validate_prediction(item, width=width, height=height, path=f"{frame_path}.predictions[{index}]")
             for index, item in enumerate(_array(frame["predictions"], f"{frame_path}.predictions"))
         ]
+        eligibility_metadata_presence.extend(
+            "provider_output_eligibility" in item for item in predictions
+        )
         has_base_pose_claim = has_base_pose_claim or any(
             item["pose"] is not None for item in predictions
         )
@@ -609,6 +682,13 @@ def validate_manifest(value: Any, *, source: str = "manifest") -> Mapping[str, A
         _fail(
             f"{source}.provenance.calibration_ids",
             "must identify calibration provenance for robot-base pose claims",
+        )
+    if eligibility_metadata_presence and any(eligibility_metadata_presence) and not all(
+        eligibility_metadata_presence
+    ):
+        _fail(
+            f"{source}.frames.predictions",
+            "provider eligibility metadata must be present on every prediction or omitted from all",
         )
     return manifest
 
@@ -715,6 +795,8 @@ def _prediction_ignored(prediction: Mapping[str, Any], regions: Sequence[Mapping
 def _minimum_cost_maximum_matching(
     references: Sequence[Mapping[str, Any]],
     predictions: Sequence[Mapping[str, Any]],
+    *,
+    require_sort_label: bool = True,
 ) -> list[tuple[int, int]]:
     """Return maximum-cardinality matches, then minimize summed center distance.
 
@@ -756,7 +838,7 @@ def _minimum_cost_maximum_matching(
             prediction = predictions[prediction_index]
             if prediction["class_id"] != reference["class_id"]:
                 continue
-            if prediction["sort_label"] != reference["sort_label"]:
+            if require_sort_label and prediction["sort_label"] != reference["sort_label"]:
                 continue
             if not _point_in_polygon(prediction["center_uv"], reference["polygon_px"]):
                 continue
@@ -871,6 +953,150 @@ def _match_frame(
         ignored_predictions,
         abstentions,
     )
+
+
+def _semantic_candidate_recognition(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """Score explicit semantic hypotheses separately from publish eligibility.
+
+    This sidecar diagnostic never changes the primary evaluation counts.  A
+    provider may recognize a supported object shape yet intentionally publish
+    it as ``unknown_obstacle`` because a geometric or visibility gate makes it
+    non-executable.  Only manifests that explicitly preserve the three-field
+    provider-eligibility group are eligible for this secondary accounting.
+    """
+
+    all_predictions = [
+        prediction
+        for frame in manifest["frames"]
+        for prediction in frame["predictions"]
+    ]
+    available = bool(all_predictions) and all(
+        "provider_output_eligibility" in prediction
+        for prediction in all_predictions
+    )
+    evidence_limit = (
+        "Semantic-candidate recognition is a vision diagnostic only. A matched "
+        "withheld candidate remains non-executable and does not establish reach, "
+        "collision clearance, pose accuracy, or grasp feasibility."
+    )
+    if not available:
+        return {
+            "available": False,
+            "unavailable_reason": (
+                "manifest has no predictions"
+                if not all_predictions
+                else "legacy predictions omit explicit provider eligibility metadata"
+            ),
+            "by_class": {},
+            "ignored_candidate_predictions": 0,
+            "withheld_prediction_reasons": {},
+            "matched_withheld_reasons": {},
+            "evidence_limit": evidence_limit,
+        }
+
+    counts: dict[str, dict[str, int]] = defaultdict(
+        lambda: {
+            "reference_instances": 0,
+            "matched_semantic_total": 0,
+            "matched_published_supported": 0,
+            "matched_withheld_non_executable": 0,
+            "dropouts": 0,
+            "unmatched_candidate_predictions": 0,
+            "unmatched_published_supported": 0,
+            "unmatched_withheld_non_executable": 0,
+        }
+    )
+    ignored_candidate_predictions = 0
+    withheld_reasons: dict[str, int] = defaultdict(int)
+    matched_withheld_reasons: dict[str, int] = defaultdict(int)
+
+    for frame in sorted(manifest["frames"], key=lambda item: item["frame_index"]):
+        references = [
+            item for item in frame["references"] if not item["ignore_for_scoring"]
+        ]
+        ignored_reference_polygons = [
+            item["polygon_px"]
+            for item in frame["references"]
+            if item["ignore_for_scoring"]
+        ]
+        for reference in references:
+            counts[reference["class_id"]]["reference_instances"] += 1
+
+        candidates: list[Mapping[str, Any]] = []
+        for prediction in frame["predictions"]:
+            candidate_class = prediction["semantic_candidate_class_id"]
+            if candidate_class is None:
+                continue
+            semantic_prediction = dict(prediction)
+            semantic_prediction["class_id"] = candidate_class
+            if prediction["provider_output_eligibility"] == "withheld_non_executable":
+                for reason in prediction["eligibility_reasons"]:
+                    withheld_reasons[reason] += 1
+            overlaps_scored_reference = any(
+                _point_in_polygon(
+                    semantic_prediction["center_uv"], reference["polygon_px"]
+                )
+                for reference in references
+            )
+            suppressed = _prediction_ignored(
+                semantic_prediction, frame["regions"]
+            ) or any(
+                _point_in_polygon(semantic_prediction["center_uv"], polygon)
+                for polygon in ignored_reference_polygons
+            )
+            if suppressed and not overlaps_scored_reference:
+                ignored_candidate_predictions += 1
+            else:
+                candidates.append(semantic_prediction)
+
+        matched_pairs = _minimum_cost_maximum_matching(
+            references,
+            candidates,
+            require_sort_label=False,
+        )
+        matched_reference = {reference_index for reference_index, _ in matched_pairs}
+        matched_prediction = {prediction_index for _, prediction_index in matched_pairs}
+        for reference_index, prediction_index in matched_pairs:
+            reference = references[reference_index]
+            prediction = candidates[prediction_index]
+            class_counts = counts[reference["class_id"]]
+            class_counts["matched_semantic_total"] += 1
+            eligibility = prediction["provider_output_eligibility"]
+            class_counts[f"matched_{eligibility}"] += 1
+            if eligibility == "withheld_non_executable":
+                for reason in prediction["eligibility_reasons"]:
+                    matched_withheld_reasons[reason] += 1
+        for reference_index, reference in enumerate(references):
+            if reference_index not in matched_reference:
+                counts[reference["class_id"]]["dropouts"] += 1
+        for prediction_index, prediction in enumerate(candidates):
+            if prediction_index in matched_prediction:
+                continue
+            class_counts = counts[prediction["class_id"]]
+            class_counts["unmatched_candidate_predictions"] += 1
+            eligibility = prediction["provider_output_eligibility"]
+            class_counts[f"unmatched_{eligibility}"] += 1
+
+    by_class: dict[str, dict[str, int | float | None]] = {}
+    for class_id, class_counts in sorted(counts.items()):
+        reference_instances = class_counts["reference_instances"]
+        by_class[class_id] = {
+            **class_counts,
+            "semantic_candidate_recall": (
+                class_counts["matched_semantic_total"] / reference_instances
+                if reference_instances
+                else None
+            ),
+        }
+    return {
+        "available": True,
+        "unavailable_reason": None,
+        "by_class": by_class,
+        "ignored_candidate_predictions": ignored_candidate_predictions,
+        "withheld_prediction_reasons": dict(sorted(withheld_reasons.items())),
+        "matched_withheld_reasons": dict(sorted(matched_withheld_reasons.items())),
+        "evidence_limit": evidence_limit,
+    }
 
 
 def evaluate_manifest(manifest_value: Any) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1116,6 +1342,7 @@ def evaluate_manifest(manifest_value: Any) -> tuple[dict[str, Any], dict[str, An
         "ignored_predictions": ignored_predictions,
         "abstentions_total": sum(abstentions_by_class.values()),
         "abstentions_by_class": dict(sorted(abstentions_by_class.items())),
+        "semantic_candidate_recognition": _semantic_candidate_recognition(manifest),
         "matched_without_pose_pair": matched_without_pose_pair,
         "pose_truth_uncertainty_mm": {
             "samples": len(pose_truth_uncertainties_mm),

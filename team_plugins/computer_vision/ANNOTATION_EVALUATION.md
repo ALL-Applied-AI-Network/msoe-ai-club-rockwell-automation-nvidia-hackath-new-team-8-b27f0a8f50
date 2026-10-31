@@ -66,6 +66,31 @@ They are excluded from the shared per-class score and reported by class in the
 diagnostics sidecar. A supported reference covered only by an abstention still
 counts as a dropout.
 
+New annotation bundles preserve an optional, all-or-none provider-output
+eligibility group on every prediction:
+
+- `semantic_candidate_class_id`: the supported class hypothesis, or null;
+- `provider_output_eligibility`: whether that hypothesis was published as a
+  supported target, withheld as non-executable, or was not a supported
+  candidate; and
+- `eligibility_reasons`: atomic provider gate reasons such as
+  `footprint_outside_pickup_region`.
+
+The JSON Schema preserves backward-compatible shape validation. The evaluator's
+`validate_manifest()` is the authoritative validator for cross-field semantics,
+including which class/status/reason combinations are allowed; schema-only
+acceptance is not sufficient for evaluation.
+
+The primary precision/recall contract above is unchanged. The diagnostics
+sidecar separately matches explicit semantic candidates by class and image
+region **without** requiring a destination label, then reports whether each
+match was published or withheld. This prevents a recognized boundary object
+from being described as a pure recognition miss while preserving the dropout
+in the executable-target metric. A semantic match never grants action
+eligibility and does not prove reach, collision clearance, pose accuracy, or
+grasp feasibility. Legacy manifests remain valid; their semantic-candidate
+diagnostic is explicitly unavailable rather than inferred.
+
 Cube rotation error is the full 3D rotation error minimized over four
 90-degree-equivalent upright orientations, so tilt is not hidden. Screw error
 uses the catalog local `-Z` head-to-tip axis and respects `directed` versus
@@ -181,8 +206,9 @@ clearance, or physical success. A small hardware set with independent
 base-frame truth is still required before a new provider controls motion.
 
 The shared `evaluation-result.v1` schema has no fields for review provenance,
-evaluator provenance, abstentions, 2D image-axis errors, confidence strata, or
-occlusion/truncation/touching strata. To stay schema-compatible, those fields
+evaluator provenance, abstentions, semantic-candidate eligibility, 2D image-axis
+errors, confidence strata, or occlusion/truncation/touching strata. To stay
+schema-compatible, those fields
 are kept in the hash-linked diagnostics sidecar. The shared output contains
 only supported-class counts, base-pose samples when justified, latency, and
 placeholder `not_executed` episodes. Their timing contains `perception_s` only;
