@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "experiment_id": "replace-with-reviewed-native-pilot-id",
+  "license_context": "evaluation-only-agpl-review",
+  "model": {
+    "checkpoint": "artifacts/yoloe-26s-seg.pt",
+    "sha256": "48f24206bc8680d60cbbfa296b0140da849669b9515058b72f5a945142df0654",
+    "ultralytics_version": "8.4.194",
+    "model_id": "yoloe-26s-seg"
+  },
+  "expected_image_size": [1920, 1080],
+  "roi_xyxy": [0, 0, 1920, 1080],
+  "tile_size": [640, 640],
+  "overlap_fraction": 0.25,
+  "merge_iou_threshold": 0.5,
+  "prompts": [
+    {
+      "class_id": "screw_iso10642_m6x30",
+      "reference_image": "evidence/reference-native-table.png",
+      "reference_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "bbox_xyxy": [100, 100, 130, 120]
+    }
+  ],
+  "inputs": [
+    {
+      "image": "evidence/held-out-native-table.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "split": "validation",
+      "frame_id": "replace-with-stable-frame-id",
+      "annotation": "evidence/held-out-native-table.annotation.json",
+      "annotation_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "inference": {
+    "imgsz": 640,
+    "confidence": 0.05,
+    "model_iou": 0.7,
+    "device": "0"
+  }
+}
