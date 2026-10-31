@@ -214,6 +214,26 @@ def _worktree_dirty(repository: Path) -> bool:
     return bool(result.stdout.strip())
 
 
+def _repository_provenance_stable(
+    *,
+    commit_at_start: str,
+    commit_at_end: str,
+    branch_at_start: str,
+    branch_at_end: str,
+    dirty_at_start: bool,
+    dirty_at_end: bool,
+) -> bool:
+    return (
+        commit_at_start == commit_at_end
+        and branch_at_start == branch_at_end
+        and dirty_at_start == dirty_at_end
+    )
+
+
+def _provenance_exit_code(provenance_stable: bool) -> int:
+    return 0 if provenance_stable else 2
+
+
 def _load_annotation(path: Path, expected_image_sha256: str) -> tuple[dict[str, Any], ...]:
     raw = json.loads(
         path.read_text(encoding="utf-8"),
@@ -500,15 +520,16 @@ def _draw_predictions(image: np.ndarray, predictions: tuple[ImagePrediction, ...
     return overlay
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
-    return parser.parse_args()
+    parser.add_argument("--allow-dirty", action="store_true")
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = _parse_args()
+def main(argv=None) -> int:
+    args = _parse_args(argv)
     config = load_manifest(args.manifest)
     installed_version = metadata.version("ultralytics")
     if installed_version != config["ultralytics_version"]:
@@ -535,6 +556,10 @@ def main() -> int:
     commit_at_start = _git_value(repository, "rev-parse", "HEAD")
     branch_at_start = _git_value(repository, "branch", "--show-current")
     dirty_at_start = _worktree_dirty(repository)
+    if dirty_at_start and not args.allow_dirty:
+        raise ManifestError(
+            "clean committed worktree required; use --allow-dirty only for development"
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     # Heavy import occurs only after every path/hash/shape/license/output gate passes.
     from ultralytics import YOLOE
@@ -615,8 +640,13 @@ def main() -> int:
     commit_at_end = _git_value(repository, "rev-parse", "HEAD")
     branch_at_end = _git_value(repository, "branch", "--show-current")
     dirty_at_end = _worktree_dirty(repository)
-    provenance_stable = (
-        commit_at_start == commit_at_end and branch_at_start == branch_at_end
+    provenance_stable = _repository_provenance_stable(
+        commit_at_start=commit_at_start,
+        commit_at_end=commit_at_end,
+        branch_at_start=branch_at_start,
+        branch_at_end=branch_at_end,
+        dirty_at_start=dirty_at_start,
+        dirty_at_end=dirty_at_end,
     )
     report = {
         "schema_version": 1,
@@ -707,7 +737,7 @@ def main() -> int:
         "output": str(output_dir / "report.json"),
     }
     print(json.dumps(summary, indent=2, sort_keys=True, allow_nan=False))
-    return 0
+    return _provenance_exit_code(provenance_stable)
 
 
 if __name__ == "__main__":
