@@ -4,10 +4,13 @@ from pathlib import Path
 import tempfile
 import unittest
 
+import numpy as np
+
 from demos.scripted_cube_screw_bucket_sort import scenario as scenario_module
 
 from team_plugins.grasping.isolated_sim_runner import (
     AttemptIdentity,
+    _finite_xyz,
     _resolved_outcome,
     _screw_retention_evidence,
     _screw_trainer_label,
@@ -97,6 +100,33 @@ class IsolatedSimulationRunnerTests(unittest.TestCase):
         self.assertAlmostEqual(axis[1], 0.0)
         self.assertTrue(same_parallel_axis(axis, (1.0, 0.0, 0.0)))
         self.assertFalse(same_parallel_axis(axis, (0.0, 1.0, 0.0)))
+
+    def test_finite_xyz_accepts_numpy_endpoints_and_rejects_bad_values(self):
+        self.assertEqual(
+            _finite_xyz(np.array([1.0, 2.0, 3.0]), "endpoint"),
+            (1.0, 2.0, 3.0),
+        )
+
+        for value in (
+            "123",
+            b"123",
+            object(),
+            [1.0, 2.0],
+            [1.0, 2.0, 3.0, 4.0],
+            [1.0, 2.0, "bad"],
+        ):
+            with self.subTest(value=repr(value)):
+                with self.assertRaisesRegex(
+                    ValueError, "must contain three coordinates"
+                ):
+                    _finite_xyz(value, "endpoint")
+
+        for value in ([1.0, math.nan, 3.0], [math.inf, 2.0, 3.0]):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    ValueError, "must contain finite coordinates"
+                ):
+                    _finite_xyz(value, "endpoint")
 
     def test_cube_candidate_is_regenerated_on_settled_pose(self):
         candidate = build_candidate(

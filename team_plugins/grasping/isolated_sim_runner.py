@@ -119,13 +119,16 @@ def same_parallel_axis(
 
 
 def _finite_xyz(value: Any, name: str) -> tuple[float, float, float]:
-    if (
-        not isinstance(value, Sequence)
-        or isinstance(value, (str, bytes))
-        or len(value) != 3
-    ):
+    if isinstance(value, (str, bytes)):
         raise ValueError(f"{name} must contain three coordinates")
-    result = tuple(float(component) for component in value)
+    try:
+        result = tuple(float(component) for component in value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"{name} must contain three coordinates"
+        ) from exc
+    if len(result) != 3:
+        raise ValueError(f"{name} must contain three coordinates")
     if not all(math.isfinite(component) for component in result):
         raise ValueError(f"{name} must contain finite coordinates")
     return result
@@ -769,6 +772,7 @@ def run(args: argparse.Namespace) -> None:
         delegated.extend(["--screw-model", args.screw_model])
     if args.physics_only:
         delegated.append("--physics-only")
+    delegated.append("--defer-shutdown")
 
     caught: BaseException | None = None
     try:
@@ -791,6 +795,11 @@ def run(args: argparse.Namespace) -> None:
         demo.build_sort_items = original_demo_builder
         scenario_module.build_sort_items = original_scenario_builder
 
+    deferred_app = demo._take_deferred_simulation_app()
+    if deferred_app is None and caught is None:
+        caught = RuntimeError(
+            "shared demo returned without registering its deferred Isaac app"
+        )
     execution_caught = caught
     report_path = run_path / "execution_report.json"
     augmentation_caught: BaseException | None = None
@@ -860,6 +869,8 @@ def run(args: argparse.Namespace) -> None:
         ),
     }
     _atomic_json(run_path / "attempt_metadata.json", metadata)
+    if deferred_app is not None:
+        deferred_app.close(exit_code=1 if caught is not None else 0)
     if caught is not None:
         raise caught
 

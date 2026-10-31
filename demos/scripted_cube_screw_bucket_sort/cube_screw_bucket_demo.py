@@ -61,6 +61,7 @@ BIN_MATERIALS = {
     "yellow": "plastic_yellow",
     "blue": "plastic_blue",
 }
+_DEFERRED_SIMULATION_APP = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -81,7 +82,23 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="run contact physics and verification without writing PNG frames",
     )
+    parser.add_argument(
+        "--defer-shutdown",
+        action="store_true",
+        help=(
+            "leave Isaac open so an embedding runner can finish its report "
+            "before requesting fast shutdown"
+        ),
+    )
     return parser.parse_args()
+
+
+def _take_deferred_simulation_app():
+    global _DEFERRED_SIMULATION_APP
+
+    app = _DEFERRED_SIMULATION_APP
+    _DEFERRED_SIMULATION_APP = None
+    return app
 
 
 def _reference_model(value: str | None, filename: str) -> Path:
@@ -218,6 +235,8 @@ def _motion_segments(pick: dict, home: np.ndarray, scene_config):
 
 
 def main() -> None:
+    global _DEFERRED_SIMULATION_APP
+
     args = parse_args()
     scenario = load_scenario_config()
     task_config = scenario.cube_config
@@ -276,7 +295,11 @@ def main() -> None:
 
     from isaacsim import SimulationApp
 
+    if args.defer_shutdown and _DEFERRED_SIMULATION_APP is not None:
+        raise RuntimeError("a deferred Isaac app is already registered")
     app = SimulationApp({"headless": True})
+    if args.defer_shutdown:
+        _DEFERRED_SIMULATION_APP = app
     try:
         import cv2
         import omni.usd
@@ -1071,7 +1094,10 @@ def main() -> None:
         traceback.print_exc()
         raise
     finally:
-        app.close()
+        if not args.defer_shutdown:
+            app.close(
+                exit_code=1 if sys.exc_info()[0] is not None else 0
+            )
 
 
 if __name__ == "__main__":
