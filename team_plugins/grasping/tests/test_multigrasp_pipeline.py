@@ -67,6 +67,7 @@ class MultiGraspPipelineTests(unittest.TestCase):
         self,
         *,
         target_confidence=0.9,
+        target_yaw_rad=0.0,
         obstacle_xy=(0.50, 0.10),
         obstacle_dimensions=(0.01, 0.01, 0.01),
     ):
@@ -75,7 +76,7 @@ class MultiGraspPipelineTests(unittest.TestCase):
             colour="red",
             capture_time_s=self.capture_time_s,
             position_base_m=(0.44, 0.0, -0.0001),
-            yaw_rad=0.0,
+            yaw_rad=target_yaw_rad,
             confidence=target_confidence,
         )
         scene = SceneDetections(
@@ -226,8 +227,8 @@ class MultiGraspPipelineTests(unittest.TestCase):
         rejected = {
             item.candidate.candidate_id for item in decision.rejections
         }
-        self.assertIn("cube-yaw-000-0", accepted)
-        self.assertIn("cube-yaw-090-2", rejected)
+        self.assertIn("cube-yaw-090-2", accepted)
+        self.assertIn("cube-yaw-000-0", rejected)
         self.assertTrue(
             all(
                 "top-down finger envelope is obstructed"
@@ -235,6 +236,93 @@ class MultiGraspPipelineTests(unittest.TestCase):
                 for item in decision.rejections
             )
         )
+
+    def test_rotated_target_preserves_finger_and_closing_axes(self):
+        pipeline = create_simulation(self._factory_context())
+        target_yaw = math.radians(30.0)
+        distance = 0.019
+        scene, target, context = self._cube_inputs(
+            target_yaw_rad=target_yaw,
+            obstacle_xy=(
+                0.44 + distance * math.cos(target_yaw),
+                distance * math.sin(target_yaw),
+            ),
+        )
+        decision = pipeline.decide_for_target(scene, target, context)
+        accepted = {
+            item.candidate.candidate_id for item in decision.evaluations
+        }
+        rejected = {
+            item.candidate.candidate_id for item in decision.rejections
+        }
+        self.assertIn("cube-yaw-000-0", rejected)
+        self.assertIn("cube-yaw-090-2", accepted)
+
+    def test_finger_width_and_closing_extent_boundaries(self):
+        required_clearance = 0.001
+        pipeline = create_simulation(
+            self._factory_context(
+                yaw_offsets_deg=[0.0],
+                required_clearance_m=required_clearance,
+            )
+        )
+        tiny_dimensions = (1e-6, 1e-6, 1e-6)
+        obstacle_radius = math.sqrt(3.0) * 0.5e-6
+        half_extents = {
+            "finger_length_axis": (
+                0.01 / 2.0
+                + self.config.gripper.finger_width_m / 2.0
+            ),
+            "closing_axis": (
+                0.0103 / 2.0
+                + self.config.gripper.finger_thickness_m / 2.0
+            ),
+        }
+        epsilon = 0.0001
+        for axis_name, half_extent in half_extents.items():
+            for delta, obstructed in (
+                (-epsilon, True),
+                (epsilon, False),
+            ):
+                distance = (
+                    half_extent
+                    + obstacle_radius
+                    + required_clearance
+                    + delta
+                )
+                obstacle_xy = (
+                    (0.44 + distance, 0.0)
+                    if axis_name == "finger_length_axis"
+                    else (0.44, distance)
+                )
+                scene, target, context = self._cube_inputs(
+                    obstacle_xy=obstacle_xy,
+                    obstacle_dimensions=tiny_dimensions,
+                )
+                candidate = pipeline.generator.generate(
+                    scene,
+                    target,
+                    context,
+                )[0]
+                result = pipeline.checker.check(
+                    scene,
+                    candidate,
+                    context,
+                )
+                with self.subTest(
+                    axis=axis_name,
+                    obstructed=obstructed,
+                ):
+                    self.assertEqual(
+                        "top-down finger envelope is obstructed"
+                        in result.rejection_reasons,
+                        obstructed,
+                    )
+                    self.assertAlmostEqual(
+                        result.metrics["minimum_footprint_clearance_m"],
+                        required_clearance + delta,
+                        places=9,
+                    )
 
     def test_low_quality_cube_fails_before_scoring(self):
         pipeline = create_simulation(self._factory_context())
@@ -375,7 +463,7 @@ class MultiGraspPipelineTests(unittest.TestCase):
             class_id="cube",
             sort_label="yellow",
             capture_time_s=self.capture_time_s,
-            pose=Pose3D.from_yaw((0.429, 0.0, 0.0), 0.0),
+            pose=Pose3D.from_yaw((0.441, 0.0, 0.0), 0.0),
             dimensions_m=(0.01, 0.01, 0.01),
             confidence=0.9,
             pose_quality=0.9,

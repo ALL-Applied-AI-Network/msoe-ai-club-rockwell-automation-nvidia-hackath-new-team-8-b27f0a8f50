@@ -10,6 +10,10 @@ scene verification. Contact, jaw closure, or a brief lift alone is not success.
 Cancelled, crashed, and unobserved episodes are unresolved and are not silently
 relabeled as failures.
 
+The project's coloured "blocks" are the configured 10 mm square cube class.
+Arbitrary rectangular, tilted, or otherwise uncatalogued blocks are unsupported
+and fail closed rather than inheriting cube geometry.
+
 Training and held-out splits must be grouped by layout/arrival sequence rather
 than adjacent frames. Report Brier score and log loss alongside placement
 success and candidate-ranking accuracy.
@@ -63,13 +67,35 @@ version, feature schema, full dataset hash, and hyperparameters; the separate
 checkpoint SHA-256 binds the final bytes. Then set
 `ROCKWELL_GRASP_CHECKPOINT` and create a matching calibrated profile.
 
+The 12-attempt isolated screw matrix is a diagnostic pilot only and its
+collector always reports `trainer_ready: false`. In particular, a
+fail/success/fail pattern over the 12/16/20 mm offsets is not monotone in the v1
+raw axial-offset feature. Such a result requires a reviewed nonlinear feature
+or schema/model revision plus a larger locked collection; it must not be
+promoted by training the existing v1 logistic scorer.
+
 ## Current execution boundary
 
 Cube decisions satisfy the shared executable `GraspPlanningPipeline`
-contract. The current camera demo reconstructs a grasp instead of consuming the
-selected candidate pose, so no closed-loop cube-yaw execution claim is made.
-Screw 12/16/20 mm shaft decisions are auditable but offline because the shared public
-target is still `CubeDetection` and the executor is cube-specific. The
-scripted screw demo can provide matched physics labels, but it does not prove a
-camera-derived or closed-loop screw selector. A lead-reviewed generic target
-and executor hook is required before screw execution may be claimed.
+contract, but the standard camera demo still reconstructs its own grasp. The
+grasping-owned `isolated_sim_runner` now wraps the validated mixed Isaac demo,
+generates a requested cube or screw candidate from configured target-only truth,
+transforms it onto the settled simulator target pose, and verifies the exact
+parallel-jaw axis used by the motion segments. It is a
+simulation-only experiment, is not referenced by an integration profile, and
+uses simulator truth in runtime control.
+
+Cube reports from that runner remain smoke labels because the mixed demo does
+not record synchronized cube retention truth throughout carry. A screw report
+receives a target-only complete-grasp label only when the recorded screw grasp
+point remains within 8 mm of the commanded lift, carry, and lower endpoints and
+all revalidation, placement, and final-scene checks resolve. Missing phase or
+command evidence is unresolved.
+
+That label does not evaluate final poses or contact safety for the four
+non-target obstacles, so it is explicitly ineligible as a collision-safe label.
+Pilot feature recomputation uses settled truth for the target but configured
+poses for neighboring objects. The public screw decision remains offline
+because the shared target is still `CubeDetection`; camera-derived screw
+selection and hardware execution still require a reviewed generic target and
+executor hook.

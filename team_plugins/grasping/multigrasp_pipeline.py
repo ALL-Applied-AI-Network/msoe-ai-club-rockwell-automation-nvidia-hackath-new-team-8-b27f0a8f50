@@ -253,8 +253,12 @@ def _measure_candidate(
     yaw = candidate.pick_tip_pose.yaw_rad
     cos_yaw = math.cos(yaw)
     sin_yaw = math.sin(yaw)
-    half_u = opening / 2.0 + settings.finger_thickness_m / 2.0
-    half_v = max(target_x, target_y) / 2.0 + settings.finger_width_m / 2.0
+    # TipPoseBase yaw follows the finger-length axis.  The twin converts it to
+    # FINGER_SPREAD_AXIS=(-sin(yaw), cos(yaw)), the direction in which the jaws
+    # close.  Keep the wide finger body on the yaw axis and the opening plus
+    # finger thickness on the perpendicular spread axis.
+    half_u = max(target_x, target_y) / 2.0 + settings.finger_width_m / 2.0
+    half_v = opening / 2.0 + settings.finger_thickness_m / 2.0
     px, py = candidate.pick_tip_pose.xyz_m[:2]
     nearest_centre = settings.maximum_radial_reach_m
     minimum_clearance = settings.maximum_radial_reach_m
