@@ -1,0 +1,390 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rockwell-hackathon:vision-annotation-manifest:v1",
+  "title": "Vision annotation and prediction manifest v1",
+  "description": "Hash-pinned cube/screw reference annotations and predictions. Robot-base truth is optional and must be independently measured, never inferred from the evaluated camera.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "annotation_id",
+    "created_at_utc",
+    "split",
+    "backend",
+    "provenance",
+    "source",
+    "frames"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "annotation_id": { "$ref": "#/$defs/nonemptyString" },
+    "created_at_utc": { "type": "string", "format": "date-time" },
+    "split": { "enum": ["pilot", "train", "validation", "test"] },
+    "backend": { "enum": ["offline_replay", "isaac", "hardware"] },
+    "provenance": { "$ref": "#/$defs/provenance" },
+    "source": { "$ref": "#/$defs/source" },
+    "frames": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/frame" }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "split": { "enum": ["validation", "test"] } },
+        "required": ["split"]
+      },
+      "then": {
+        "properties": {
+          "provenance": {
+            "properties": {
+              "review": {
+                "properties": {
+                  "review_status": { "enum": ["reviewed", "adjudicated"] }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "nonemptyString": { "type": "string", "minLength": 1 },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "sha256OrNull": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }]
+    },
+    "point2": {
+      "type": "array",
+      "prefixItems": [{ "type": "number" }, { "type": "number" }],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "point3": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "number" },
+        { "type": "number" },
+        { "type": "number" }
+      ],
+      "items": false,
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "quaternion": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "number" },
+        { "type": "number" },
+        { "type": "number" },
+        { "type": "number" }
+      ],
+      "items": false,
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "polygon": {
+      "type": "array",
+      "minItems": 3,
+      "items": { "$ref": "#/$defs/point2" }
+    },
+    "bbox": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "number", "minimum": 0 },
+        { "type": "number", "minimum": 0 },
+        { "type": "number", "exclusiveMinimum": 0 },
+        { "type": "number", "exclusiveMinimum": 0 }
+      ],
+      "items": false,
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "integrationProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_id", "profile_sha256"],
+      "properties": {
+        "profile_id": { "$ref": "#/$defs/nonemptyString" },
+        "profile_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "artifact_sha256"],
+      "properties": {
+        "name": { "$ref": "#/$defs/nonemptyString" },
+        "version": { "$ref": "#/$defs/nonemptyString" },
+        "artifact_sha256": { "$ref": "#/$defs/sha256OrNull" }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["annotator_id", "review_status", "reviewer_id"],
+      "properties": {
+        "annotator_id": { "$ref": "#/$defs/nonemptyString" },
+        "review_status": { "enum": ["unreviewed", "reviewed", "adjudicated"] },
+        "reviewer_id": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/nonemptyString" }]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "review_status": { "const": "unreviewed" } },
+            "required": ["review_status"]
+          },
+          "then": { "properties": { "reviewer_id": { "type": "null" } } },
+          "else": {
+            "properties": {
+              "reviewer_id": { "$ref": "#/$defs/nonemptyString" }
+            }
+          }
+        }
+      ]
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project_commit",
+        "branch",
+        "integration_profile",
+        "provider",
+        "object_catalog_version",
+        "calibration_ids",
+        "review"
+      ],
+      "properties": {
+        "project_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "branch": { "$ref": "#/$defs/nonemptyString" },
+        "integration_profile": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/integrationProfile" }]
+        },
+        "provider": { "$ref": "#/$defs/provider" },
+        "object_catalog_version": { "$ref": "#/$defs/nonemptyString" },
+        "calibration_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonemptyString" }
+        },
+        "review": { "$ref": "#/$defs/review" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dataset_id",
+        "source_run_id",
+        "capture_sha256",
+        "camera_id",
+        "image_width_px",
+        "image_height_px",
+        "timestamp_source"
+      ],
+      "properties": {
+        "dataset_id": { "$ref": "#/$defs/nonemptyString" },
+        "source_run_id": { "$ref": "#/$defs/nonemptyString" },
+        "capture_sha256": { "$ref": "#/$defs/sha256" },
+        "camera_id": { "$ref": "#/$defs/nonemptyString" },
+        "image_width_px": { "type": "integer", "minimum": 2 },
+        "image_height_px": { "type": "integer", "minimum": 2 },
+        "timestamp_source": {
+          "enum": ["measured_exposure", "backend_observation", "frame_index_over_fps", "unknown"]
+        }
+      }
+    },
+    "occlusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "fraction", "causes"],
+      "properties": {
+        "category": { "enum": ["none", "partial", "heavy", "unknown"] },
+        "fraction": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "number", "minimum": 0, "maximum": 1 }
+          ]
+        },
+        "causes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": ["cable", "hand", "robot", "container", "supported_object", "unknown"]
+          }
+        }
+      }
+    },
+    "poseTruth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "position_base_m",
+        "position_uncertainty_mm",
+        "cube_yaw_rad",
+        "screw_head_to_tip_unit_base",
+        "symmetry_id",
+        "measurement_method"
+      ],
+      "properties": {
+        "position_base_m": { "$ref": "#/$defs/point3" },
+        "position_uncertainty_mm": { "type": "number", "minimum": 0 },
+        "cube_yaw_rad": {
+          "oneOf": [{ "type": "null" }, { "type": "number" }]
+        },
+        "screw_head_to_tip_unit_base": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/point3" }]
+        },
+        "symmetry_id": {
+          "enum": [
+            "upright_square_yaw_modulo_90_deg",
+            "catalog_axial_symmetry_unresolved"
+          ]
+        },
+        "measurement_method": { "$ref": "#/$defs/nonemptyString" }
+      }
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instance_id",
+        "class_id",
+        "sort_label",
+        "polygon_px",
+        "bbox_xywh_px",
+        "center_uv",
+        "head_uv",
+        "tip_uv",
+        "axis_observability",
+        "occlusion",
+        "truncated",
+        "touching_group_id",
+        "ignore_for_scoring",
+        "pose_truth"
+      ],
+      "properties": {
+        "instance_id": { "$ref": "#/$defs/nonemptyString" },
+        "class_id": { "enum": ["cube", "screw_iso10642_m6x30"] },
+        "sort_label": {
+          "oneOf": [{ "type": "null" }, { "enum": ["red", "yellow", "blue"] }]
+        },
+        "polygon_px": { "$ref": "#/$defs/polygon" },
+        "bbox_xywh_px": { "$ref": "#/$defs/bbox" },
+        "center_uv": { "$ref": "#/$defs/point2" },
+        "head_uv": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/point2" }] },
+        "tip_uv": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/point2" }] },
+        "axis_observability": { "enum": ["directed", "undirected", "unobservable"] },
+        "occlusion": { "$ref": "#/$defs/occlusion" },
+        "truncated": { "type": "boolean" },
+        "touching_group_id": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/nonemptyString" }]
+        },
+        "ignore_for_scoring": { "type": "boolean" },
+        "pose_truth": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/poseTruth" }]
+        }
+      }
+    },
+    "predictionPose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["position_base_m", "orientation_xyzw"],
+      "properties": {
+        "position_base_m": { "$ref": "#/$defs/point3" },
+        "orientation_xyzw": { "$ref": "#/$defs/quaternion" }
+      }
+    },
+    "prediction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prediction_id",
+        "track_id",
+        "class_id",
+        "sort_label",
+        "center_uv",
+        "confidence",
+        "pose_quality",
+        "head_uv",
+        "tip_uv",
+        "axis_observability",
+        "pose"
+      ],
+      "properties": {
+        "prediction_id": { "$ref": "#/$defs/nonemptyString" },
+        "track_id": { "$ref": "#/$defs/nonemptyString" },
+        "class_id": { "$ref": "#/$defs/nonemptyString" },
+        "sort_label": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/nonemptyString" }]
+        },
+        "center_uv": { "$ref": "#/$defs/point2" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "pose_quality": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "number", "minimum": 0, "maximum": 1 }
+          ]
+        },
+        "head_uv": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/point2" }]
+        },
+        "tip_uv": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/point2" }]
+        },
+        "axis_observability": {
+          "enum": ["directed", "undirected", "unobservable"]
+        },
+        "pose": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/predictionPose" }]
+        }
+      }
+    },
+    "region": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["region_id", "kind", "polygon_px"],
+      "properties": {
+        "region_id": { "$ref": "#/$defs/nonemptyString" },
+        "kind": { "enum": ["ignore", "unknown", "cable", "hand", "robot", "container", "unsupported_object"] },
+        "polygon_px": { "$ref": "#/$defs/polygon" }
+      }
+    },
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "frame_id",
+        "layout_id",
+        "frame_index",
+        "capture_time_s",
+        "image_sha256",
+        "inference_latency_ms",
+        "references",
+        "predictions",
+        "regions"
+      ],
+      "properties": {
+        "frame_id": { "$ref": "#/$defs/nonemptyString" },
+        "layout_id": { "$ref": "#/$defs/nonemptyString" },
+        "frame_index": { "type": "integer", "minimum": 0 },
+        "capture_time_s": {
+          "oneOf": [{ "type": "null" }, { "type": "number" }]
+        },
+        "image_sha256": { "$ref": "#/$defs/sha256" },
+        "inference_latency_ms": {
+          "oneOf": [{ "type": "null" }, { "type": "number", "minimum": 0 }]
+        },
+        "references": { "type": "array", "items": { "$ref": "#/$defs/reference" } },
+        "predictions": { "type": "array", "items": { "$ref": "#/$defs/prediction" } },
+        "regions": { "type": "array", "items": { "$ref": "#/$defs/region" } }
+      }
+    }
+  }
+}

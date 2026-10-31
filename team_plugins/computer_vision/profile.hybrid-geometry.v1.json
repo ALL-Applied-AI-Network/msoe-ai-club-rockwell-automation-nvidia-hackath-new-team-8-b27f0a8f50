@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "profile_id": "vision-hybrid-cube-screw-geometry-v1",
+  "vision": {
+    "factory": "team_plugins.computer_vision.hybrid_geometry_provider:create",
+    "camera_ids": ["table"],
+    "depth_camera_ids": [],
+    "calibration_ids": {
+      "table": "sidclab-cameras.json:table"
+    },
+    "depth_calibration_ids": {},
+    "options": {
+      "camera_id": "table",
+      "maximum_frame_age_s": 0.15,
+      "screw": {
+        "expected_image_size": [1920, 1080],
+        "require_expected_image_size": true,
+        "maximum_gray": 100,
+        "maximum_saturation": 150,
+        "context_margin_px": 36,
+        "minimum_white_context_fraction": 0.7,
+        "context_minimum_gray": 135,
+        "context_maximum_saturation": 90,
+        "morphology_close_px": 3,
+        "minimum_component_area_px": 35.0,
+        "maximum_component_area_px": 6000.0,
+        "minimum_length_m": 0.026,
+        "maximum_length_m": 0.034,
+        "minimum_width_m": 0.009,
+        "maximum_width_m": 0.014,
+        "minimum_aspect_ratio": 1.8,
+        "terminal_fraction": 0.28,
+        "minimum_head_width_ratio": 1.18,
+        "origin_height_above_surface_m": 0.0065,
+        "workspace_margin_m": 0.0,
+        "minimum_detection_confidence": 0.3,
+        "track_match_distance_m": 0.025,
+        "track_ttl_s": 2.0,
+        "minimum_track_observations": 3,
+        "maximum_track_length_change_m": 0.004,
+        "maximum_track_width_change_m": 0.003,
+        "maximum_track_axis_change_deg": 15.0,
+        "maximum_track_head_ratio_change": 0.5,
+        "report_ambiguous_components": true
+      }
+    }
+  }
+}
