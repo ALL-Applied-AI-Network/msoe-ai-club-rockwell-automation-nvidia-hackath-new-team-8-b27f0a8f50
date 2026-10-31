@@ -38,6 +38,33 @@
 - License: both harnesses use Ultralytics, so AGPL-3.0/Enterprise deployment
   terms remain a factory-deployment gate.
 
+## 2026-10-31 — Fine-tuned YOLO11n pilot
+
+- Hypothesis: a small pretrained detector fine-tuned on grouped synthetic plus
+  independent archived data transfers better than zero/few-shot prompting.
+- Frozen split: train = eight synthetic frames plus six frames from capture
+  `0aa194...` (72 cube and 8 screw boxes); validation = two synthetic frames
+  (6 cubes); final test = all nine frames from independent capture `236ce2...`
+  kept together (35 cubes). No capture ID or image hash crosses splits.
+- Setup: Ultralytics 8.4.194 `yolo11n.pt`, 100 epochs, seeds 53/54/55, 960-pixel
+  input, L40S. Each operating threshold was selected only from synthetic
+  validation, then applied once to the provisional real test capture.
+- Result: seed recalls were 71.4%, 68.6%, and 82.9%; precisions were 89.3%,
+  88.9%, and 85.3%; F1 scores were 79.4%, 77.4%, and 84.1%. The three-seed
+  means were 74.3% recall, 87.8% precision, and 80.3% F1. Mean warm inference
+  was about 7.02 ms per cropped frame on the L40S.
+- Conclusion: this is the strongest neural detector tested, but it is not ready
+  to replace the existing runtime provider. Labels are provisional compressed-
+  video boxes; no robot-base pose or orientation was evaluated. The final test
+  is cube-only, so screw recall is unmeasured.
+- Reproducibility note: the first frozen run used Ultralytics RAM caching, which
+  emitted a nondeterminism warning. Preserve and report these exact checkpoints
+  rather than rerunning until the test result improves; use disk/no cache in a
+  future pre-registered experiment.
+- Next experiment: human-review native-resolution cube and screw boxes from a
+  new capture, keep complete episodes grouped, then connect detections to the
+  existing calibrated geometry only if selective held-out accuracy improves.
+
 ## 2026-10-31 — FoundationPose prerequisite audit
 
 - Hypothesis: FoundationPose can directly replace current perception from RGB.
