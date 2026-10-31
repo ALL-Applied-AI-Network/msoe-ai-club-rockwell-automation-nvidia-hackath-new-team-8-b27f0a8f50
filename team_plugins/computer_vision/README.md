@@ -127,7 +127,7 @@ The tests cover:
 
 The provider has 26 focused tests, the annotation evaluator has 12, replay and
 overlay/provenance handling has 9, the live diagnostic has 14, and the
-annotation-bundle tool has 7, for 68 computer-vision-team tests total.
+annotation-bundle tool has 9, for 70 computer-vision-team tests total.
 Run the annotation evaluator tests directly with:
 
 ```bash

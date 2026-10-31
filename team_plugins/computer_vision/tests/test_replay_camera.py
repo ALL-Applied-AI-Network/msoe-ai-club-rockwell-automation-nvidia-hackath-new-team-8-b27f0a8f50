@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -389,6 +390,10 @@ class ReplayMainGuardTests(unittest.TestCase):
             self.assertEqual(
                 report["evaluation_result_skipped_reason"],
                 "repository/input provenance changed during replay",
+            )
+            self.assertEqual(
+                report["scenes_jsonl_sha256"],
+                hashlib.sha256((output / "scenes.jsonl").read_bytes()).hexdigest(),
             )
 
     def test_main_rejects_profile_for_unattributed_factory(self):

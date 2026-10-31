@@ -53,7 +53,7 @@ registered depth and should not be treated as the default.
   profile found exactly one pickable cube of each color on 121/123 sampled
   frames. That is a stability statistic, not recall or millimetre accuracy.
 - Twenty-six hybrid-provider, twelve annotation-evaluator, nine replay-tool,
-  fourteen bounded-live-diagnostic, and seven annotation-bundle tests pass (68
+  fourteen bounded-live-diagnostic, and nine annotation-bundle tests pass (70
   computer-vision-team tests total).
 - A 199-frame sampled compressed replay completed with no inference exceptions.
   Before the colored-context guard it produced 278 screw observations and 46

@@ -633,10 +633,12 @@ def main() -> int:
         writer.release()
     if not records:
         raise ValueError("no frames were processed")
-    (args.output_dir / "scenes.jsonl").write_text(
-        "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
-        encoding="utf-8",
-    )
+    scenes_path = args.output_dir / "scenes.jsonl"
+    scenes_payload = "".join(
+        json.dumps(record, sort_keys=True) + "\n" for record in records
+    ).encode("utf-8")
+    scenes_path.write_bytes(scenes_payload)
+    scenes_jsonl_sha256 = hashlib.sha256(scenes_payload).hexdigest()
     ordered = sorted(latencies_ms)
     p95 = ordered[min(len(ordered) - 1, int(0.95 * len(ordered)))]
     capture_sha256 = provenance_at_start["capture_sha256"]
@@ -757,6 +759,7 @@ def main() -> int:
         "provider_version": provider.PROVIDER_VERSION,
         "provider_artifact_sha256": provider_sha256,
         "replay_tool_sha256": provenance_at_start["replay_tool_sha256"],
+        "scenes_jsonl_sha256": scenes_jsonl_sha256,
         "project_commit": project_commit,
         "branch": branch,
         "worktree_dirty": worktree_dirty,

@@ -263,6 +263,7 @@ def _verify_replay(
     selected_indices: Sequence[int],
     capture_sha256: str,
     calibration_sha256: str,
+    scenes_jsonl_sha256: str,
     calibration_path: Path,
     profile_path: Path,
     provider_path: Path,
@@ -288,6 +289,22 @@ def _verify_replay(
         raise AnnotationBundleError("capture hash does not match replay report")
     if report.get("calibration_sha256") != calibration_sha256:
         raise AnnotationBundleError("calibration hash does not match replay report")
+    reported_scenes_hash = report.get("scenes_jsonl_sha256")
+    if (
+        not isinstance(reported_scenes_hash, str)
+        or len(reported_scenes_hash) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in reported_scenes_hash
+        )
+    ):
+        raise AnnotationBundleError(
+            "replay report lacks a valid scenes.jsonl SHA-256"
+        )
+    if reported_scenes_hash != scenes_jsonl_sha256:
+        raise AnnotationBundleError(
+            "replay scenes.jsonl hash does not match replay report"
+        )
 
     report_indices = report.get("processed_frame_indices")
     if (
@@ -552,6 +569,7 @@ def prepare_bundle(
     evaluation = _load_json(evaluation_path)
     capture_sha256 = _sha256(capture)
     calibration_sha256 = _sha256(calibration_path)
+    scenes_jsonl_sha256 = _sha256(scenes_path)
     _verify_replay(
         report=report,
         evaluation=evaluation,
@@ -559,6 +577,7 @@ def prepare_bundle(
         selected_indices=selected_indices,
         capture_sha256=capture_sha256,
         calibration_sha256=calibration_sha256,
+        scenes_jsonl_sha256=scenes_jsonl_sha256,
         calibration_path=calibration_path,
         profile_path=profile_path,
         provider_path=provider_path,
@@ -772,7 +791,7 @@ def prepare_bundle(
         "created_at_utc": created_at,
         "capture_sha256": capture_sha256,
         "replay_report_sha256": _sha256(report_path),
-        "replay_scenes_sha256": _sha256(scenes_path),
+        "replay_scenes_sha256": scenes_jsonl_sha256,
         "replay_evaluation_sha256": _sha256(evaluation_path),
         "calibration_sha256": calibration_sha256,
         "frame_indices_file_sha256": _sha256(frame_indices_file),

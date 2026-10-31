@@ -107,7 +107,8 @@ class AnnotationBundleTests(unittest.TestCase):
             "input_channel_order": "RGB",
             "scene": scene_observation_to_dict(scene),
         }
-        (replay / "scenes.jsonl").write_text(
+        scenes_path = replay / "scenes.jsonl"
+        scenes_path.write_text(
             json.dumps(record, sort_keys=True) + "\n", encoding="utf-8"
         )
         profile_sha = "b" * 64
@@ -122,6 +123,7 @@ class AnnotationBundleTests(unittest.TestCase):
             "provider_version": "1",
             "provider_artifact_sha256": provider_sha,
             "replay_tool_sha256": "d" * 64,
+            "scenes_jsonl_sha256": _sha256(scenes_path),
             "project_commit": "a" * 40,
             "branch": "computer-vision",
             "worktree_dirty": False,
@@ -181,6 +183,15 @@ class AnnotationBundleTests(unittest.TestCase):
             "replay": replay,
             "image": image,
         }
+
+    @staticmethod
+    def _refresh_scenes_hash(fixture: dict[str, Path]) -> None:
+        report_path = fixture["replay"] / "report.json"
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        report["scenes_jsonl_sha256"] = _sha256(
+            fixture["replay"] / "scenes.jsonl"
+        )
+        report_path.write_text(json.dumps(report, sort_keys=True), encoding="utf-8")
 
     def _prepare(self, fixture: dict[str, Path], output: Path):
         return prepare_bundle(
@@ -292,11 +303,43 @@ class AnnotationBundleTests(unittest.TestCase):
             record = json.loads(scenes_path.read_text(encoding="utf-8"))
             record["input_rgb_sha256"] = "f" * 64
             scenes_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            self._refresh_scenes_hash(fixture)
 
             with self.assertRaisesRegex(
                 AnnotationBundleError, "pixels differ from replay input_rgb_sha256"
             ):
                 self._prepare(fixture, root / "bundle")
+
+    def test_scenes_hash_mismatch_fails_before_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = self._fixture(root)
+            scenes_path = fixture["replay"] / "scenes.jsonl"
+            record = json.loads(scenes_path.read_text(encoding="utf-8"))
+            # This edit keeps frame indices, RGB provenance, classes, counts,
+            # and provider identity plausible. Only the file-level hash can
+            # prove that it was not the replay's original prediction.
+            record["scene"]["objects"][0]["confidence"] = 0.8
+            scenes_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            output = root / "bundle"
+            with self.assertRaisesRegex(AnnotationBundleError, "scenes.jsonl hash"):
+                self._prepare(fixture, output)
+            self.assertFalse(output.exists())
+
+    def test_missing_scenes_hash_fails_before_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = self._fixture(root)
+            report_path = fixture["replay"] / "report.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report.pop("scenes_jsonl_sha256")
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+            output = root / "bundle"
+            with self.assertRaisesRegex(
+                AnnotationBundleError, "valid scenes.jsonl SHA-256"
+            ):
+                self._prepare(fixture, output)
+            self.assertFalse(output.exists())
 
     def test_report_and_scene_indices_must_match_exactly(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -318,6 +361,7 @@ class AnnotationBundleTests(unittest.TestCase):
             record = json.loads(scenes_path.read_text(encoding="utf-8"))
             record["scene"]["objects"][0]["attributes"].pop("pixel_center_uv")
             scenes_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            self._refresh_scenes_hash(fixture)
 
             with self.assertRaisesRegex(
                 AnnotationBundleError, "lacks detector pixel_center_uv"

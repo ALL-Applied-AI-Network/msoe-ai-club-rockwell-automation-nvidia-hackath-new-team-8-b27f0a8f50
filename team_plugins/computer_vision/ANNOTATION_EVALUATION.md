@@ -136,8 +136,10 @@ bundle per physical layout so repeated frames stay grouped by `layout_id`.
 
 The tool rejects a dirty checkout, stale/mismatched replay artifacts, a capture
 or calibration hash mismatch, missing frame indices, nonempty output, and any
-output path inside the repository. Its bundle report pins the bundle-tool bytes,
-current Git commit/branch/dirty state, and all replay inputs. It also requires
+output path inside the repository. The replay report pins the complete
+`scenes.jsonl` byte hash, and the bundle verifies that hash before trusting any
+prediction. Its bundle report pins the bundle-tool bytes, current Git
+commit/branch/dirty state, and all replay inputs. It also requires
 each re-decoded/upscaled RGB array to match the per-frame hash recorded by the
 replay, so a decoder/backend difference cannot silently change annotation
 pixels. It never imports the cell client or sends a robot command. An old replay may need to be
