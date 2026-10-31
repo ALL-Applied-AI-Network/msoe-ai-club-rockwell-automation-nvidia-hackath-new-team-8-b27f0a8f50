@@ -9,12 +9,13 @@ it must not be described as camera or AI perception.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import random
 import struct
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -774,6 +775,154 @@ def build_sort_items(config: ScenarioConfig) -> tuple[SortItem, ...]:
             target_axis_yaw_deg=screw.target_axis_yaw_deg,
         )
     return tuple(by_id[item_id] for item_id in config.sort_order)
+
+
+def randomize_scenario_spawns(
+    config: ScenarioConfig,
+    *,
+    seed: int,
+) -> tuple[ScenarioConfig, dict[str, Any]]:
+    """Return a seeded layout with collision-free poses inside the pickup area.
+
+    Poses are sampled in a central subset of the configured pickup region to
+    stay near the demonstrated reach envelope. Cube and screw orientation is
+    retained; changing the XY position therefore changes only the spawn layout.
+    The conservative axis-aligned footprints include a 3 mm separation margin.
+    """
+
+    rng = random.Random(seed)
+    cube_config = config.cube_config
+    task = cube_config.task
+    region_x = task.pickup_region_base_m["x"]
+    region_y = task.pickup_region_base_m["y"]
+    # Keep random samples around the demonstrated pickup zone while leaving
+    # room for a screw's complete head-to-tip footprint.
+    sample_x = (max(region_x[0] + 0.08, 0.38), min(region_x[1] - 0.06, 0.49))
+    sample_y = (max(region_y[0] + 0.06, -0.24), min(region_y[1] - 0.06, 0.24))
+    if sample_x[0] >= sample_x[1] or sample_y[0] >= sample_y[1]:
+        raise ScenarioError("pickup region is too small for randomized spawns")
+
+    separation_m = 0.003
+    screw_radius_m = config.screw.head_diameter_m / 2.0
+    candidates: list[dict[str, Any]] = []
+    for colour in task.colour_order:
+        _x, _y, yaw_deg = task.cube_spawns_base_xy_yaw_deg[colour]
+        candidates.append(
+            {
+                "item_id": f"cube-{colour}",
+                "kind": "cube",
+                "yaw_deg": yaw_deg,
+                "z_m": cube_config.cube_centre_base_z_m,
+            }
+        )
+    for screw in config.screws:
+        candidates.append(
+            {
+                "item_id": screw.item_id,
+                "kind": "screw",
+                "yaw_deg": screw.spawn_yaw_deg,
+                "z_m": screw.spawn_head_base_m[2],
+                "length_m": config.screw.length_m,
+            }
+        )
+
+    def bounds_for(candidate: dict[str, Any], x: float, y: float):
+        yaw = math.radians(candidate["yaw_deg"])
+        if candidate["kind"] == "cube":
+            half_extent = cube_config.cube_edge_m * 0.5 * (
+                abs(math.cos(yaw)) + abs(math.sin(yaw))
+            )
+            half_extent += separation_m
+            return (x - half_extent, y - half_extent, x + half_extent, y + half_extent)
+
+        tip_x = x + candidate["length_m"] * math.cos(yaw)
+        tip_y = y + candidate["length_m"] * math.sin(yaw)
+        radius = screw_radius_m + separation_m
+        return (
+            min(x, tip_x) - radius,
+            min(y, tip_y) - radius,
+            max(x, tip_x) + radius,
+            max(y, tip_y) + radius,
+        )
+
+    def overlaps(first, second) -> bool:
+        return (
+            first[0] < second[2]
+            and second[0] < first[2]
+            and first[1] < second[3]
+            and second[1] < first[3]
+        )
+
+    # Place the larger screw footprints first; deterministic tie ordering makes
+    # the same seed produce the same poses across runs.
+    candidates.sort(
+        key=lambda item: (
+            item["kind"] != "screw",
+            item["item_id"],
+        )
+    )
+    placements: dict[str, dict[str, Any]] = {}
+    occupied: list[tuple[float, float, float, float]] = []
+    for candidate in candidates:
+        placed = None
+        for _attempt in range(20_000):
+            x = rng.uniform(*sample_x)
+            y = rng.uniform(*sample_y)
+            bounds = bounds_for(candidate, x, y)
+            if (
+                bounds[0] < region_x[0]
+                or bounds[1] < region_y[0]
+                or bounds[2] > region_x[1]
+                or bounds[3] > region_y[1]
+                or any(overlaps(bounds, other) for other in occupied)
+            ):
+                continue
+            placed = (x, y, bounds)
+            break
+        if placed is None:
+            raise ScenarioError(
+                f"could not place {candidate['item_id']} without overlap; "
+                "pickup region may be too crowded"
+            )
+        x, y, bounds = placed
+        occupied.append(bounds)
+        placements[candidate["item_id"]] = {
+            "kind": candidate["kind"],
+            "spawn_reference_base_m": [x, y, candidate["z_m"]],
+            "spawn_yaw_deg": candidate["yaw_deg"],
+        }
+
+    cube_spawns = dict(task.cube_spawns_base_xy_yaw_deg)
+    for colour in task.colour_order:
+        pose = placements[f"cube-{colour}"]["spawn_reference_base_m"]
+        yaw_deg = placements[f"cube-{colour}"]["spawn_yaw_deg"]
+        cube_spawns[colour] = (pose[0], pose[1], yaw_deg)
+    randomized_task = replace(task, cube_spawns_base_xy_yaw_deg=cube_spawns)
+    randomized_cube_config = replace(cube_config, task=randomized_task)
+
+    randomized_screws = tuple(
+        replace(
+            screw,
+            spawn_head_base_m=tuple(
+                placements[screw.item_id]["spawn_reference_base_m"]
+            ),
+        )
+        for screw in config.screws
+    )
+    randomized_config = replace(
+        config,
+        cube_config=randomized_cube_config,
+        screws=randomized_screws,
+    )
+    metadata = {
+        "enabled": True,
+        "seed": seed,
+        "sampling_bounds_base_m": {"x": list(sample_x), "y": list(sample_y)},
+        "pickup_region_base_m": {"x": list(region_x), "y": list(region_y)},
+        "minimum_footprint_separation_m": separation_m,
+        "objects": placements,
+    }
+    return randomized_config, metadata
 
 
 def build_completion_report(

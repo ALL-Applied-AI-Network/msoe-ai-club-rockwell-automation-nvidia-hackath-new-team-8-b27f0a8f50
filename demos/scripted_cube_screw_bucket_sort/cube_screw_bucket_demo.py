@@ -16,6 +16,7 @@ import json
 import math
 import os
 from pathlib import Path
+import secrets
 import sys
 
 import numpy as np
@@ -47,6 +48,7 @@ from demos.scripted_cube_screw_bucket_sort.scenario import (  # noqa: E402
     build_sort_items,
     load_scenario_config,
     resolve_screw_model,
+    randomize_scenario_spawns,
     screw_jaw_half_target,
     tool_tip_z_for_desired_grasp_height,
     validate_screw_model,
@@ -80,6 +82,25 @@ def parse_args() -> argparse.Namespace:
         "--physics-only",
         action="store_true",
         help="run contact physics and verification without writing PNG frames",
+    )
+    parser.add_argument(
+        "--foundationpose-capture",
+        action="store_true",
+        help=(
+            "record isolated RGB-D, instance masks, CAD meshes, calibration, "
+            "and separate simulator ground truth for FoundationPose evaluation"
+        ),
+    )
+    parser.add_argument(
+        "--random-spawn",
+        action="store_true",
+        help="sample a separated, reachable starting layout for all five objects",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="random-spawn seed; omitted seeds are generated and recorded",
     )
     return parser.parse_args()
 
@@ -219,7 +240,17 @@ def _motion_segments(pick: dict, home: np.ndarray, scene_config):
 
 def main() -> None:
     args = parse_args()
+    if args.physics_only and args.foundationpose_capture:
+        raise SystemExit("--foundationpose-capture requires rendered camera frames")
+    if args.seed is not None and not args.random_spawn:
+        raise SystemExit("--seed requires --random-spawn")
     scenario = load_scenario_config()
+    random_spawn_report = {"enabled": False, "seed": None}
+    if args.random_spawn:
+        spawn_seed = args.seed if args.seed is not None else secrets.randbits(32)
+        scenario, random_spawn_report = randomize_scenario_spawns(
+            scenario, seed=spawn_seed
+        )
     task_config = scenario.cube_config
     screw_path = resolve_screw_model(args.screw_model)
     screw_model = validate_screw_model(screw_path, scenario.screw)
@@ -253,6 +284,14 @@ def main() -> None:
     frames = run / "frames"
     if not args.physics_only:
         frames.mkdir(parents=True, exist_ok=True)
+    (run / "random_spawn.json").write_text(
+        json.dumps(random_spawn_report, indent=2) + "\n", encoding="utf-8"
+    )
+    if args.random_spawn:
+        print(
+            f"[cube-screw-demo] random_spawn_seed={random_spawn_report['seed']}",
+            flush=True,
+        )
 
     # Import the supplied runtime only after all host-side contracts pass.
     import scene_config as C
@@ -283,6 +322,7 @@ def main() -> None:
         from pxr import Gf, PhysxSchema, UsdGeom, UsdPhysics
         from isaacsim.core.api import World
         from isaacsim.core.prims import SingleArticulation, SingleXFormPrim
+        from isaacsim.core.utils.semantics import add_labels
         from isaacsim.core.utils.types import ArticulationAction
         from isaacsim.sensors.camera import Camera
         import cell
@@ -376,6 +416,7 @@ def main() -> None:
             cell.make_dynamic(
                 root.GetPrim(), scenario.screw.mass_kg, collide_self=False
             )
+            add_labels(root.GetPrim(), [screw.item_id], instance_name="class")
             UsdPhysics.RigidBodyAPI(root.GetPrim()).CreateKinematicEnabledAttr().Set(True)
             screw_roots[screw.item_id] = root_path
 
@@ -387,6 +428,11 @@ def main() -> None:
             UsdPhysics.RigidBodyAPI(
                 stage.GetPrimAtPath(path)
             ).CreateKinematicEnabledAttr().Set(True)
+            add_labels(
+                stage.GetPrimAtPath(path),
+                [f"cube-{colour}"],
+                instance_name="class",
+            )
             wrappers[f"cube-{colour}"] = SingleXFormPrim(path)
         for item_id, path in screw_roots.items():
             wrappers[item_id] = SingleXFormPrim(path)
@@ -402,6 +448,9 @@ def main() -> None:
         world.reset()
         if camera is not None:
             camera.initialize()
+            if args.foundationpose_capture:
+                camera.add_distance_to_image_plane_to_frame()
+                camera.add_instance_segmentation_to_frame({"colorize": False})
 
         arm = SingleArticulation(prim_path=C.ROBOT_PRIM, name="er4ia")
         arm.initialize()
@@ -479,6 +528,222 @@ def main() -> None:
                 ],
             }
 
+        def write_obj_mesh(path: Path, vertices_m: np.ndarray) -> None:
+            """Write triangle-soup vertices as a metre-scale OBJ."""
+
+            vertices = np.asarray(vertices_m, dtype=float).reshape((-1, 3))
+            if len(vertices) % 3:
+                raise ValueError(f"OBJ triangle soup has {len(vertices)} vertices")
+            lines = [
+                f"v {point[0]:.9g} {point[1]:.9g} {point[2]:.9g}"
+                for point in vertices
+            ]
+            lines.extend(
+                f"f {index + 1} {index + 2} {index + 3}"
+                for index in range(0, len(vertices), 3)
+            )
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        object_prim_paths = {
+            f"cube-{colour}": f"/World/SortCube{index}"
+            for index, colour in enumerate(colours)
+        }
+        object_prim_paths.update(screw_roots)
+
+        def instance_ids_for_object(
+            id_to_labels, object_id: str, prim_path: str
+        ) -> list[int]:
+            def contains_label(value) -> bool:
+                if isinstance(value, dict):
+                    return any(contains_label(item) for item in value.values())
+                if isinstance(value, (list, tuple)):
+                    return any(contains_label(item) for item in value)
+                if isinstance(value, str):
+                    try:
+                        decoded = json.loads(value)
+                    except (json.JSONDecodeError, TypeError):
+                        decoded = None
+                    if decoded is not None and decoded != value:
+                        return contains_label(decoded)
+                    return value in (object_id, prim_path)
+                return False
+
+            return [
+                int(instance_id)
+                for instance_id, labels in dict(id_to_labels).items()
+                if contains_label(labels)
+            ]
+
+        def capture_foundationpose(phase: str, poses: dict[str, dict]) -> None:
+            """Capture model inputs and truth into deliberately separate trees."""
+
+            if not args.foundationpose_capture:
+                return
+            if camera is None:
+                raise RuntimeError("FoundationPose capture has no initialized camera")
+            # Give the newly attached annotators enough rendered updates to populate.
+            for _ in range(3):
+                command(q, C.JAW_OPEN)
+                world.step(render=True)
+            rgba = camera.get_rgba()
+            depth = camera.get_depth()
+            frame = camera.get_current_frame(clone=True)
+            segmentation = frame.get("instance_segmentation")
+            if rgba is None or depth is None or segmentation is None:
+                raise RuntimeError(
+                    "camera did not return RGB, distance-to-image-plane depth, "
+                    "and instance segmentation"
+                )
+            if isinstance(segmentation, dict):
+                segmentation_data = segmentation.get("data")
+                segmentation_info = segmentation.get("info", {})
+            else:
+                segmentation_data = segmentation
+                segmentation_info = frame.get("instance_segmentation_info", {})
+            if segmentation_data is None:
+                raise RuntimeError("instance segmentation contains no data array")
+            instance_image = np.asarray(segmentation_data)
+            if instance_image.ndim == 3 and instance_image.shape[2] == 1:
+                instance_image = instance_image[:, :, 0]
+            id_to_labels = dict(segmentation_info).get("idToLabels", {})
+            if not id_to_labels:
+                raise RuntimeError(
+                    "instance segmentation contains no idToLabels metadata"
+                )
+
+            capture = run / "perception" / phase / "capture"
+            masks_dir = capture / "masks"
+            meshes_dir = capture / "meshes"
+            masks_dir.mkdir(parents=True, exist_ok=True)
+            meshes_dir.mkdir(parents=True, exist_ok=True)
+            rgb = np.asarray(rgba[:, :, :3], dtype=np.uint8)
+            if not cv2.imwrite(
+                str(capture / "rgb.png"),
+                cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
+            ):
+                raise RuntimeError("could not write FoundationPose RGB capture")
+            depth_m = np.asarray(depth, dtype=np.float32)
+            if depth_m.shape != rgb.shape[:2]:
+                raise RuntimeError("camera depth and RGB dimensions do not match")
+            np.save(capture / "depth_m.npy", depth_m)
+
+            cube_edge = float(C.CUBE_EDGE)
+            cube_vertices = np.array(
+                [
+                    [x, y, z]
+                    for z in (0.0, cube_edge)
+                    for y in (-cube_edge / 2.0, cube_edge / 2.0)
+                    for x in (-cube_edge / 2.0, cube_edge / 2.0)
+                ],
+                dtype=float,
+            )
+            cube_faces = np.array(
+                [
+                    [0, 1, 3], [0, 3, 2], [4, 6, 7], [4, 7, 5],
+                    [0, 4, 5], [0, 5, 1], [2, 3, 7], [2, 7, 6],
+                    [0, 2, 6], [0, 6, 4], [1, 5, 7], [1, 7, 3],
+                ],
+                dtype=int,
+            )
+            write_obj_mesh(meshes_dir / "cube.obj", cube_vertices[cube_faces].reshape((-1, 3)))
+            write_obj_mesh(meshes_dir / "screw.obj", screw_points_m)
+
+            object_specs = []
+            truth_objects = {}
+            base_origin_world = np.array([0.0, 0.0, C.TABLE_TOP_Z])
+            for item in items:
+                instance_ids = instance_ids_for_object(
+                    id_to_labels,
+                    item.item_id,
+                    object_prim_paths[item.item_id],
+                )
+                if not instance_ids:
+                    raise RuntimeError(
+                        f"no instance segmentation ID found for {item.item_id}; "
+                        f"labels={id_to_labels}"
+                    )
+                mask = np.isin(instance_image, instance_ids).astype(np.uint8) * 255
+                if not np.any(mask):
+                    raise RuntimeError(f"camera mask is empty for {item.item_id}")
+                mask_file = f"masks/{item.item_id}.png"
+                if not cv2.imwrite(str(capture / mask_file), mask):
+                    raise RuntimeError(f"could not write mask for {item.item_id}")
+                object_specs.append(
+                    {
+                        "object_id": item.item_id,
+                        "class_id": item.kind,
+                        "sort_label": item.destination_colour,
+                        "mask_file": mask_file,
+                        "mask_source": "isaac_instance_segmentation",
+                        "mesh_file": f"meshes/{item.kind}.obj",
+                        "mesh_units": "m",
+                    }
+                )
+                pose = poses[item.item_id]
+                quaternion_wxyz = pose["orientation_wxyz"]
+                truth_objects[item.item_id] = {
+                    "class_id": item.kind,
+                    "sort_label": item.destination_colour,
+                    "position_base_m": (
+                        np.asarray(pose["origin_world_m"], dtype=float)
+                        - base_origin_world
+                    ).tolist(),
+                    "orientation_xyzw": [
+                        quaternion_wxyz[1],
+                        quaternion_wxyz[2],
+                        quaternion_wxyz[3],
+                        quaternion_wxyz[0],
+                    ],
+                    "evaluation_axis_local": (
+                        [1.0, 0.0, 0.0]
+                        if item.kind == "cube"
+                        else [0.0, 0.0, -1.0]
+                    ),
+                    "axis_undirected": item.kind == "screw",
+                }
+
+            camera_position, camera_quaternion = camera.get_world_pose(
+                camera_axes="ros"
+            )
+            camera_to_base = np.eye(4, dtype=float)
+            camera_to_base[:3, :3] = _rotation_matrix_from_quat(camera_quaternion)
+            camera_to_base[:3, 3] = (
+                np.asarray(camera_position, dtype=float) - base_origin_world
+            )
+            manifest = {
+                "schema_version": 1,
+                "capture_id": f"{run.name}-{phase}",
+                "rgb_file": "rgb.png",
+                "depth_file": "depth_m.npy",
+                "depth_definition": "distance_to_image_plane_metres",
+                "camera": {
+                    "intrinsics": np.asarray(
+                        camera.get_intrinsics_matrix(), dtype=float
+                    ).tolist(),
+                    "camera_axes": "opencv_x_right_y_down_z_forward",
+                    "camera_to_base_column_matrix": camera_to_base.tolist(),
+                },
+                "objects": object_specs,
+            }
+            (capture / "manifest.json").write_text(
+                json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+            )
+            truth = {
+                "schema_version": 1,
+                "coordinate_frame": "robot_base",
+                "capture_id": manifest["capture_id"],
+                "source": "isaac_rigid_body_ground_truth",
+                "objects": truth_objects,
+            }
+            truth_path = run / "perception" / phase / "ground_truth.json"
+            truth_path.write_text(
+                json.dumps(truth, indent=2) + "\n", encoding="utf-8"
+            )
+            print(
+                f"[cube-screw-demo] FoundationPose {phase} capture: {capture}",
+                flush=True,
+            )
+
         frame_number = 0
 
         def save_frame(item_id: str, kind: str, destination: str, phase: str) -> None:
@@ -519,6 +784,7 @@ def main() -> None:
         initial = {
             item.item_id: object_pose(item.item_id, item.kind) for item in items
         }
+        capture_foundationpose("initial", initial)
         screw_jaw_target = screw_jaw_half_target(
             shank_diameter_m=scenario.screw.shank_diameter_m,
             finger_inner_tip_m=C.FINGER_INNER_TIP,
@@ -898,6 +1164,7 @@ def main() -> None:
         final = {
             item.item_id: object_pose(item.item_id, item.kind) for item in items
         }
+        capture_foundationpose("final", final)
         final_scene_items: dict[str, dict] = {}
         for item in items:
             samples = final_samples[item.item_id]
@@ -1008,13 +1275,24 @@ def main() -> None:
         report = {
             "task": "scripted_cube_screw_bucket_sort",
             "scope": (
-                "separate configured-pose Isaac smoke demo; existing cube demo and "
-                "real-hardware policy are unchanged"
+                "separate scripted Isaac smoke demo using configured or seeded "
+                "randomized spawn poses; existing cube demo and real-hardware "
+                "policy are unchanged"
             ),
-            "decision_source": "configured simulator poses and simulator truth",
+            "decision_source": (
+                "seeded randomized simulator poses and simulator truth"
+                if args.random_spawn
+                else "configured simulator poses and simulator truth"
+            ),
             "decision_uses_simulator_truth": True,
-            "camera_perception": False,
+            "camera_perception": bool(args.foundationpose_capture),
             "cosmos_or_ai_perception": False,
+            "foundationpose_capture": {
+                "enabled": bool(args.foundationpose_capture),
+                "inputs_are_camera_derived": True,
+                "ground_truth_isolated_from_inference": True,
+                "phases": ["initial", "final"] if args.foundationpose_capture else [],
+            },
             "physics": (
                 "Isaac Sim rigid-body contact; cubes and screws are never attached "
                 "to the gripper"
@@ -1025,6 +1303,7 @@ def main() -> None:
                 "schema_version": scenario.schema_version,
                 "sort_order": list(scenario.sort_order),
             },
+            "random_spawn": random_spawn_report,
             "models": {
                 "bin": {
                     "path": str(bin_path),

@@ -10,10 +10,12 @@ blue cubes into matching supplied bins—then physically grasps two supplied ISO
 the red bin. The screws and cubes remain dynamic rigid bodies; the demo never
 attaches an object to the gripper.
 
-This is a configured-pose simulation regression. It does **not** use Cosmos,
-camera perception, a learned selector, or the real-robot interface. The current
-HSV/silhouette detector is cube-specific and cannot honestly perceive the black
-screws, so this entry point intentionally has no camera/training-data mode.
+The scripted robot motion remains a configured-pose simulation regression; it
+does not use an AI estimate to command the robot. An optional, evaluation-only
+camera path records RGB-D, instance masks, calibration, and meshes for NVIDIA
+FoundationPose. Simulator truth is stored outside the inference capture so the
+pose estimator cannot read it. This makes it possible to measure camera-model
+error and confidence before using estimates for control.
 
 ## Prerequisite
 
@@ -42,6 +44,38 @@ cd "$ROCKWELL_TWIN_RUNTIME"
 
 Use a new output directory for every run. Add `--physics-only` for a faster
 contact/IK check without PNG rendering.
+
+Add `--foundationpose-capture` to record both the initial pickup scene and the
+final sorted scene:
+
+```bash
+"$ISAAC/python.sh" \
+  /workspace/rockwell-hackathon/demos/scripted_cube_screw_bucket_sort/cube_screw_bucket_demo.py \
+  --run "$ROCKWELL_RUNS_ROOT/cube_screw_foundationpose_01" \
+  --random-spawn --seed 20261030 --foundationpose-capture
+```
+
+Each phase contains `capture/manifest.json`, raw RGB, depth in metres, one
+instance mask per object, and metre-scale OBJ meshes. Its sibling
+`ground_truth.json` contains the actual Isaac poses. Never mount that sibling
+file into the inference container. See `demos/foundationpose_camera/README.md`
+for inference and evaluation commands. The masks are Isaac-generated in this
+first version; FoundationPose derives pose from camera RGB-D and CAD, while a
+future hardware version should replace mask generation with a detector or SAM.
+
+Add `--random-spawn` to place all five objects at a new, separated layout
+inside the configured pickup region. Each object's orientation and destination
+stay fixed, and the pickup plan uses the sampled pose. The generated seed,
+spawn coordinates, initial simulator poses, final poses, and per-object pickup
+and placement results are recorded in `execution_report.json`. Pass `--seed`
+to reproduce a layout; if omitted, the run generates and records a seed:
+
+```bash
+"$ISAAC/python.sh" \
+  /workspace/rockwell-hackathon/demos/scripted_cube_screw_bucket_sort/cube_screw_bucket_demo.py \
+  --run "$ROCKWELL_RUNS_ROOT/cube_screw_bucket_sort_random_01" \
+  --random-spawn --seed 20261029 --physics-only
+```
 
 To encode a rendered run:
 
