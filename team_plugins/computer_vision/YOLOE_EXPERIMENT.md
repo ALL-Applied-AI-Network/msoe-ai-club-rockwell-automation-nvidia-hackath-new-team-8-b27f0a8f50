@@ -75,6 +75,10 @@ The output directory contains:
 - lossless PNG overlays.
 
 The runner never contacts the robot and never reads simulator truth.
+It requires a clean committed worktree by default. `--allow-dirty` exists only
+for development runs, which remain visibly marked in the report. A commit,
+branch, or dirty-state change during inference makes the provenance unstable;
+the report is still preserved, but the command exits with status 2.
 
 Run the dependency-free harness tests either in the shared client environment
 or the exact model environment:
@@ -84,7 +88,7 @@ uv run --project team_plugins/computer_vision/yoloe_env --frozen \
   python -m unittest team_plugins.computer_vision.tests.test_yoloe_experiment -v
 ```
 
-The current branch passes 15 harness tests and the complete 258-test
+The current branch passes 17 harness tests and the complete 258-test
 profile-unset repository baseline.
 
 ## Annotation and metrics

@@ -24,6 +24,9 @@ from team_plugins.computer_vision.yoloe_visual_prompt_experiment import (
     ManifestError,
     _git_environment,
     _git_value,
+    _parse_args,
+    _provenance_exit_code,
+    _repository_provenance_stable,
     _worktree_dirty,
     load_manifest,
 )
@@ -303,6 +306,27 @@ class ManifestTests(unittest.TestCase):
 
 
 class GitProvenanceTests(unittest.TestCase):
+    def test_dirty_runs_require_explicit_development_opt_in(self):
+        default = _parse_args(["--manifest", "manifest.json", "--output-dir", "out"])
+        allowed = _parse_args(
+            ["--manifest", "manifest.json", "--output-dir", "out", "--allow-dirty"]
+        )
+        self.assertFalse(default.allow_dirty)
+        self.assertTrue(allowed.allow_dirty)
+
+    def test_dirty_state_change_invalidates_run_and_returns_nonzero(self):
+        stable = _repository_provenance_stable(
+            commit_at_start="a" * 40,
+            commit_at_end="a" * 40,
+            branch_at_start="vision/test",
+            branch_at_end="vision/test",
+            dirty_at_start=False,
+            dirty_at_end=True,
+        )
+        self.assertFalse(stable)
+        self.assertEqual(_provenance_exit_code(stable), 2)
+        self.assertEqual(_provenance_exit_code(True), 0)
+
     def test_current_cross_os_worktree_provenance_is_readable(self):
         repository = Path(__file__).resolve().parents[3]
         environment = _git_environment(repository)
