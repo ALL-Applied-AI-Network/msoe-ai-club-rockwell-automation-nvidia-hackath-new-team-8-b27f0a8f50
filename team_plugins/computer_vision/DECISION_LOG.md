@@ -124,6 +124,43 @@
 - Conclusion: suitable for regression triage, not physical pose validation.
 - Next experiment: native, independently measured cube/screw poses.
 
+## 2026-10-31 — Clean compressed replay persistence signal
+
+- Setup: committed clean replay of `table.mp4`, sampling every tenth 10 Hz
+  source frame with the 16 mm profile and qualitative nearest-neighbour upscale.
+- Result: one real-looking fastener track was emitted as screw in 109 of 111
+  sampled observations from source frames 560--1660. A second screw-like track
+  remained `unknown_obstacle` because its projected footprint crossed the
+  pickup boundary.
+- Evidence limit: the video is compressed, resized, and unannotated. Persistence
+  is not a true-positive label, identity proof, millimetre accuracy result, or
+  grasp-suitability result. Boundary rejection could be correct or a calibration
+  artifact.
+- Conclusion: useful qualitative persistence/abstention evidence only. Retain
+  the provider for native no-motion measurement, not screw motion.
+
+## 2026-10-31 — Live no-motion perception seam
+
+- Problem: the checked-in `hold` mode returns before perception, while `hover`
+  can start approach motion after a stable scene.
+- Action: add a vision-owned bounded diagnostic that selects the hybrid profile,
+  clears motion/descent/grasp-fit flags, verifies the policy remains unarmed
+  after each reset, runs only `_detect_scene_views`, and returns the exact hold
+  action unchanged.
+- Evidence: focused tests cover environment clearing, exact hold preservation,
+  decoded requested-resolution PNG/scene/provenance output, failure recording,
+  snapshot bounds,
+  reset-time interlock checking, import ordering, dry-run isolation, and refusal
+  to write hardware/private captures anywhere inside the repository.
+- Limitation: `_detect_scene_views` is a private lead-owned seam. The official
+  boundary also applies cube-task partitioning, so an error can follow valid
+  provider output. The TCP contract still has no true no-op; measured-pose
+  hold can make a small controller correction and is not an emergency stop.
+- Next experiment: collect 5--10 decoded full-frame observations for each
+  measured layout, verify whether the backend output is sensor-native, then
+  evaluate with the strict annotation workflow before enabling any new provider
+  for motion.
+
 ## 2026-10-31 — Brev availability
 
 - Hypothesis: a fresh L40S launchable can run the GPU experiments.

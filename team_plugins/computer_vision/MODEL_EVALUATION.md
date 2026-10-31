@@ -52,8 +52,9 @@ registered depth and should not be treated as the default.
 - Before this experiment, rollout-4 compressed replay under the 16 mm cube
   profile found exactly one pickable cube of each color on 121/123 sampled
   frames. That is a stability statistic, not recall or millimetre accuracy.
-- Twenty-six hybrid-provider, twelve annotation-evaluator, and seven replay-tool
-  tests pass (45 computer-vision-team tests total).
+- Twenty-six hybrid-provider, twelve annotation-evaluator, nine replay-tool,
+  and twelve bounded-live-diagnostic tests pass (59 computer-vision-team tests
+  total).
 - A 199-frame sampled compressed replay completed with no inference exceptions.
   Before the colored-context guard it produced 278 screw observations and 46
   ambiguous obstacles; these are observations, not true positives.
@@ -238,6 +239,23 @@ The original repository recommends CUDA and lists CLIP only for text prompting:
 text have conflicting Apache/AGPL statements, and using the Ultralytics wrapper
 also invokes Ultralytics licensing. Treat deployment licensing as unresolved
 until the organizers/team obtain a clear determination.
+
+Measured smoke on branch `vision/fastsam-mask-provider`, commit
+`146043e3ab8ea1edc3f592f7dc81faf8353d5b1d`, used archived frame SHA-256
+`2d8a09f3a3c70eec8b9b2212075f21a9405b809193ba5258d5acb5eae7e0dc9d`,
+FastSAM-s model SHA-256
+`c9f78716a81c7aff0d608ccc73e1b82ab3aaad86005049f6a92106a0be6d0844`,
+and `ultralytics==8.4.194`. At confidence 0.05 it returned 214 masks; nine
+covered the inspected point, including one compact confidence-0.512 proposal
+with box `[200, 297, 212, 303]` and area 69 pixels. Cold CPU calls varied from
+17.34 to 82.49 s; a repeated same-process call took 3.36 s. The branch passed
+7 focused, 27 integration, 14 perception, and 258 profile-unset baseline tests.
+
+This is unannotated proposal coverage, not object identity, base pose, mask
+accuracy, or hardware readiness. Giant/nested proposals demonstrate
+over-segmentation; semantic classification, calibrated geometry, GPU latency,
+runtime compatibility, and AGPL/Enterprise licensing remain blockers. Do not
+promote this branch into the runtime provider from this evidence.
 
 ## Pose semantics
 

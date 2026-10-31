@@ -125,8 +125,9 @@ The tests cover:
 - non-monotonic time and non-fabrication of occlusion on disappearance; and
 - preservation of the cube path.
 
-The provider has 26 focused tests, the annotation evaluator has 12, and replay
-provenance/decoder handling has 7, for 45 computer-vision-team tests total.
+The provider has 26 focused tests, the annotation evaluator has 12, replay and
+overlay/provenance handling has 9, and the bounded live diagnostic has 12, for
+59 computer-vision-team tests total.
 Run the annotation evaluator tests directly with:
 
 ```bash
@@ -162,6 +163,13 @@ clean and capture/calibration/profile/provider/tool/catalog/commit/branch
 provenance stays unchanged throughout the run. A provenance change makes the
 command exit nonzero. Timestamps are decoded `frame_index / FPS`, not measured
 exposure times. Do not commit recordings, weights, or generated outputs.
+
+The overlay uses numbered markers and a corner legend: yellow rows are cubes,
+green rows are screw **geometry candidates**, red rows are non-executable
+unknowns, and gray/crossed rows are outside the permitted region. `cube-region`
+means only that a cube center is inside the configured pickup region; confidence,
+ambiguity, complete-scene, clearance, and planner checks still apply.
+`screw-cand` does not mean the cube-only executor can grasp a screw.
 
 Use `--every 1` when testing temporal confirmation. Sparse sampling can hide
 short-lived false tracks and does not represent the live 10 Hz decision stream.
@@ -212,12 +220,69 @@ unset ROCKWELL_INTEGRATION_PROFILE
 uv run supervised_run.py hold
 ```
 
+That fallback verifies the cell connection and measured-pose hold but does not
+invoke perception. For a bounded live perception capture, run this from the
+repository root in WSL during the approved operator-supervised slot:
+
+```bash
+uv run --project hardware/fanuc_cell python -m \
+  team_plugins.computer_vision.live_no_motion_diagnostic \
+  --output-dir /mnt/c/path/outside-the-repository/live-vision-01 \
+  --cube-mm 16 \
+  --max-snapshots 10
+```
+
+The output directory must be new or empty. The tool selects the exact hybrid
+profile before importing the official policy, clears inherited motion,
+descent, and grasp-fit flags, refuses a policy that reports either interlock as
+enabled after construction or rollout reset, and rejects a cached/different
+integration profile instead of silently using it. It runs only the existing
+perception boundary, and saves decoded requested-resolution RGB as PNG plus
+canonical `SceneObservation` JSON, latency, hashes, calibration/provider
+identity, the exact `cameras.json` SHA-256,
+commit, branch, and dirty-state provenance. Each record also retains the current
+six-joint-plus-gripper feedback and UF0 TCP pose with the backend observation
+timestamp. That timestamp is not a camera exposure timestamp. Provider or
+downstream task-partition failures produce an explicit error record and a
+nonzero final exit status; they never become an empty clear scene.
+`_detect_scene_views` includes the existing cube task's diagnostic partitioning,
+so an error there can follow valid provider output. The returned action is still
+the original strict measured TCP/gripper hold row.
+
+The saved PNG is a lossless re-encoding of the RGB array delivered by the
+backend. Its record states RGB channel order, requested wire format, decoded
+shape, and both pixel/PNG hashes. It is not claimed to be an untouched sensor
+frame; verify sensor-native resolution and upstream processing separately.
+
+The provider's configured 0.15 s frame-age check does not bound inference or
+end-to-end age in the current hardware adapter: both the request and
+`CameraFrame` are stamped from the same `obs['t']`, so their difference is
+normally zero. The policy separately enforces its gained-observation-age
+deadline (3 s by default) after synchronous perception/planning. Neither value
+measures camera exposure skew.
+
+The official TCP protocol has no true no-op. Repeating the measured pose may
+still cause a small controller correction, so this diagnostic is not an
+emergency stop and the operator/controller remain responsible for stopping.
+Run it only with the supervised cell stationary; do not jog the robot while it
+is active. Perception and evidence writes happen before `act()` returns, so they
+delay delivery of the already-constructed hold row. Each record separates
+hold-construction time, perception/task-boundary latency, and a lower bound on
+total action-return delay (the final record write/print is excluded). This is
+intentionally synchronous; do not add asynchronous capture during the final
+hardware session.
+It uses the private lead-owned `_detect_scene_views` boundary because no public
+live perception-only seam exists; recheck this adapter whenever the hardware
+policy changes.
+
 ## Files and ownership
 
 - `hybrid_geometry_provider.py`: provider, screw geometry, ambiguity handling,
   and tracking.
 - `profile.hybrid-geometry.v1.json`: exact opt-in integration profile.
 - `replay_camera.py`: offline no-motion replay/overlay tool.
+- `live_no_motion_diagnostic.py`: bounded live perception capture while the
+  official policy returns its measured-pose hold.
 - `tests/`: team-owned contract and edge-case tests.
 - `MODEL_EVALUATION.md`: model comparison and measured evidence.
 - `DECISION_LOG.md`: hypotheses, results, and next experiments.

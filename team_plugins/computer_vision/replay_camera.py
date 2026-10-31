@@ -146,56 +146,301 @@ def _frames(path: Path) -> Iterator[tuple[int, float, np.ndarray, float]]:
     yield from _pyav_frames(path)
 
 
+_OVERLAY_CLASS_STYLES = {
+    "cube": ("C", (0, 220, 255)),
+    "screw_iso10642_m6x30": ("S", (40, 220, 40)),
+    "unknown_obstacle": ("U", (40, 40, 230)),
+}
+_OVERLAY_INELIGIBLE_COLOUR = (165, 165, 165)
+
+
+def _overlay_status(detected) -> tuple[str, bool]:
+    """Return a compact status and whether to highlight the geometry."""
+
+    attributes = detected.attributes
+    if detected.class_id == "cube":
+        in_pickup = attributes.get("in_pickup_region")
+        if in_pickup is True:
+            return "in-region", True
+        if in_pickup is False:
+            return "out", False
+        return "region?", False
+    if detected.class_id == "screw_iso10642_m6x30":
+        if attributes.get("non_executable") is True:
+            return "noexec", False
+        in_pickup = attributes.get("footprint_inside_pickup_region")
+        if in_pickup is True:
+            # The current executor is cube-only. Passing the vision geometry
+            # gate makes this a grasp-team candidate, never a pick command.
+            return "candidate", True
+        if in_pickup is False:
+            return "out", False
+        return "region?", False
+    if detected.class_id == "unknown_obstacle":
+        return "noexec", False
+    return "unsupported", False
+
+
+def _overlay_axis_pixels(detected, camera: dict) -> tuple[np.ndarray, np.ndarray] | None:
+    """Project an explicitly reported head/tip axis, including abstentions."""
+
+    head_xy = detected.attributes.get("head_xy_base_m")
+    tip_xy = detected.attributes.get("tip_xy_base_m")
+    if head_xy is None or tip_xy is None:
+        return None
+    z_m = detected.pose.position_base_m[2]
+    head = np.asarray((head_xy[0], head_xy[1], z_m), dtype=float)
+    tip = np.asarray((tip_xy[0], tip_xy[1], z_m), dtype=float)
+    head_uv, tip_uv = project(camera, (head, tip)).round().astype(int)
+    return head_uv, tip_uv
+
+
+def _overlay_anchor(detected, camera: dict) -> tuple[int, int]:
+    axis = _overlay_axis_pixels(detected, camera)
+    if axis is not None:
+        return tuple(int(value) for value in axis[0])
+    uv = detected.attributes.get("pixel_center_uv")
+    if uv is None:
+        xyz = np.asarray(detected.pose.position_base_m, dtype=float)
+        uv = tuple(project(camera, (xyz,))[0])
+    return tuple(int(value) for value in np.rint(uv))
+
+
+def _overlay_row(index: int, detected, status: str) -> str:
+    token, _ = _OVERLAY_CLASS_STYLES.get(
+        detected.class_id, ("?", (255, 255, 255))
+    )
+    label = detected.sort_label or "-"
+    quality = "-" if detected.pose_quality is None else f"{detected.pose_quality:.2f}"
+    track = detected.track_id[-8:]
+    candidate = detected.attributes.get("candidate_class")
+    candidate_suffix = " cand:S" if candidate == "screw_iso10642_m6x30" else ""
+    return (
+        f"{index:02d} {token}:{label} c{detected.confidence:.2f} "
+        f"q{quality} {status} t:{track}{candidate_suffix}"
+    )
+
+
+def _overlay_colour(detected, highlighted: bool) -> tuple[int, int, int]:
+    """Keep abstentions visibly red while dimming merely out-of-region targets."""
+
+    _, class_colour = _OVERLAY_CLASS_STYLES.get(
+        detected.class_id, ("?", (255, 255, 255))
+    )
+    if detected.class_id == "unknown_obstacle":
+        return class_colour
+    return class_colour if highlighted else _OVERLAY_INELIGIBLE_COLOUR
+
+
+def _overlay_panel_rectangle(
+    image_shape: tuple[int, ...],
+    anchors: list[tuple[int, int]],
+    rows: list[str],
+    header: str,
+    font_scale: float,
+    row_height: int,
+) -> tuple[tuple[int, int, int, int], int, int]:
+    """Choose the least-obstructive corner and a bounded column layout."""
+
+    height, width = image_shape[:2]
+    preferred_margin = max(6, int(round(min(width, height) * 0.008)))
+    margin = min(preferred_margin, max(0, (min(width, height) - 2) // 4))
+    maximum_rows = max(4, (height - 2 * margin) // row_height - 2)
+    columns = max(1, (len(rows) + maximum_rows - 1) // maximum_rows)
+    rows_per_column = max(1, (len(rows) + columns - 1) // columns)
+    column_widths: list[int] = []
+    for column in range(columns):
+        column_rows = rows[column * rows_per_column : (column + 1) * rows_per_column]
+        maximum_text_width = max(
+            (
+                cv2.getTextSize(
+                    row,
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    font_scale,
+                    1,
+                )[0][0]
+                for row in column_rows
+            ),
+            default=0,
+        )
+        if column == 0:
+            maximum_text_width = max(
+                maximum_text_width,
+                cv2.getTextSize(
+                    header,
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    font_scale,
+                    1,
+                )[0][0],
+            )
+        column_widths.append(maximum_text_width + 2 * margin)
+    panel_width = min(width - 2 * margin, max(1, sum(column_widths) + margin))
+    panel_height = min(
+        height - 2 * margin,
+        max(1, (rows_per_column + 2) * row_height + margin),
+    )
+    candidates = (
+        (margin, margin),
+        (width - margin - panel_width, margin),
+        (margin, height - margin - panel_height),
+        (width - margin - panel_width, height - margin - panel_height),
+    )
+
+    def overlap_score(origin: tuple[int, int]) -> tuple[int, int]:
+        x0, y0 = origin
+        x1, y1 = x0 + panel_width, y0 + panel_height
+        inside = sum(x0 <= x <= x1 and y0 <= y <= y1 for x, y in anchors)
+        # Candidate order is the deterministic tie break.
+        return inside, candidates.index(origin)
+
+    x0, y0 = min(candidates, key=overlap_score)
+    return (x0, y0, x0 + panel_width, y0 + panel_height), columns, rows_per_column
+
+
 def _draw_overlay(
     bgr: np.ndarray,
     scene,
     camera: dict,
 ) -> np.ndarray:
+    """Draw numbered geometry plus a collision-free review legend.
+
+    The provider result and source frame remain untouched. Long labels live in
+    one deterministic corner panel instead of covering the small parts they
+    describe. Markers distinguish cube pickup eligibility from screw geometry
+    candidates. Cube region membership alone is not a complete pickability
+    decision; the current executor remains cube-only and this function never
+    changes which objects are executable.
+    """
+
     overlay = bgr.copy()
-    colours = {
-        "cube": (0, 255, 255),
-        "screw_iso10642_m6x30": (0, 255, 0),
-        "unknown_obstacle": (0, 0, 255),
-    }
-    for detected in scene.objects:
-        colour = colours.get(detected.class_id, (255, 255, 255))
-        if detected.class_id == "screw_iso10642_m6x30":
-            head = np.array(
-                (
-                    detected.attributes["head_xy_base_m"][0],
-                    detected.attributes["head_xy_base_m"][1],
-                    detected.pose.position_base_m[2],
+    detected_with_anchors = [
+        (detected, _overlay_anchor(detected, camera)) for detected in scene.objects
+    ]
+    detected_with_anchors.sort(
+        key=lambda item: (
+            {"cube": 0, "screw_iso10642_m6x30": 1, "unknown_obstacle": 2}.get(
+                item[0].class_id, 3
+            ),
+            item[1][1],
+            item[1][0],
+            item[0].track_id,
+        )
+    )
+    rows: list[str] = []
+    statuses: Counter[str] = Counter()
+    anchors: list[tuple[int, int]] = []
+    for index, (detected, anchor) in enumerate(detected_with_anchors, start=1):
+        status, highlighted = _overlay_status(detected)
+        statuses[f"{detected.class_id}:{status}"] += 1
+        anchors.append(anchor)
+        colour = _overlay_colour(detected, highlighted)
+        axis = _overlay_axis_pixels(detected, camera)
+        if axis is not None:
+            head_uv, tip_uv = axis
+            if highlighted and detected.class_id == "screw_iso10642_m6x30":
+                cv2.arrowedLine(
+                    overlay,
+                    tuple(head_uv),
+                    tuple(tip_uv),
+                    colour,
+                    4,
+                    tipLength=0.2,
                 )
-            )
-            tip = np.array(
-                (
-                    detected.attributes["tip_xy_base_m"][0],
-                    detected.attributes["tip_xy_base_m"][1],
-                    detected.pose.position_base_m[2],
-                )
-            )
-            head_uv, tip_uv = project(camera, (head, tip)).round().astype(int)
-            cv2.arrowedLine(overlay, tuple(head_uv), tuple(tip_uv), colour, 4, tipLength=0.2)
-            anchor = tuple(head_uv)
+            else:
+                cv2.line(overlay, tuple(head_uv), tuple(tip_uv), colour, 2)
         else:
-            uv = detected.attributes.get("pixel_center_uv")
-            if uv is None:
-                xyz = np.asarray(detected.pose.position_base_m, dtype=float)
-                uv = tuple(project(camera, (xyz,))[0])
-            anchor = tuple(np.rint(uv).astype(int))
-            cv2.circle(overlay, anchor, 10, colour, 3)
-        label = (
-            f"{detected.class_id}:{detected.sort_label or '-'} "
-            f"c={detected.confidence:.2f} q={detected.pose_quality if detected.pose_quality is not None else -1:.2f}"
+            cv2.circle(overlay, anchor, 10, colour, 3 if highlighted else 1)
+        if not highlighted:
+            cv2.drawMarker(
+                overlay,
+                anchor,
+                colour,
+                markerType=cv2.MARKER_TILTED_CROSS,
+                markerSize=15,
+                thickness=2,
+            )
+        marker = f"{index:02d}"
+        marker_origin = (anchor[0] + 7, anchor[1] - 7)
+        cv2.putText(
+            overlay,
+            marker,
+            marker_origin,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 0, 0),
+            4,
+            cv2.LINE_AA,
         )
         cv2.putText(
             overlay,
-            label,
-            (anchor[0] + 8, anchor[1] - 8),
+            marker,
+            marker_origin,
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
+            0.55,
             colour,
             2,
+            cv2.LINE_AA,
+        )
+        rows.append(_overlay_row(index, detected, status))
+
+    if not rows:
+        return overlay
+    height, width = overlay.shape[:2]
+    font_scale = max(0.32, min(0.62, 0.62 * width / 1920.0))
+    row_height = max(14, int(round(27 * width / 1920.0)))
+    class_counts = Counter(item[0].class_id for item in detected_with_anchors)
+    summary = (
+        f"C:{class_counts['cube']} "
+        f"S:{class_counts['screw_iso10642_m6x30']} "
+        f"U:{class_counts['unknown_obstacle']} "
+        f"cube-region:{statuses['cube:in-region']} "
+        f"screw-cand:{statuses['screw_iso10642_m6x30:candidate']} "
+        f"other:{sum(statuses.values()) - statuses['cube:in-region'] - statuses['screw_iso10642_m6x30:candidate']}"
+    )
+    panel, columns, rows_per_column = _overlay_panel_rectangle(
+        overlay.shape, anchors, rows, summary, font_scale, row_height
+    )
+    x0, y0, x1, y1 = panel
+    panel_pixels = overlay[y0:y1, x0:x1]
+    overlay[y0:y1, x0:x1] = cv2.addWeighted(
+        panel_pixels,
+        0.22,
+        np.zeros_like(panel_pixels),
+        0.78,
+        0.0,
+    )
+    cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (235, 235, 235), 1)
+    text_x = x0 + max(5, row_height // 3)
+    baseline_y = y0 + row_height
+    cv2.putText(
+        overlay,
+        summary,
+        (text_x, baseline_y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        (245, 245, 245),
+        1,
+        cv2.LINE_AA,
+    )
+    usable_width = max(1, x1 - x0 - 2 * max(5, row_height // 3))
+    column_width = usable_width // columns
+    for row_index, row in enumerate(rows):
+        column = min(columns - 1, row_index // rows_per_column)
+        within_column = row_index % rows_per_column
+        detected = detected_with_anchors[row_index][0]
+        _, highlighted = _overlay_status(detected)
+        colour = _overlay_colour(detected, highlighted)
+        cv2.putText(
+            overlay,
+            row,
+            (
+                text_x + column * column_width,
+                baseline_y + (within_column + 1) * row_height,
+            ),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            colour,
+            1,
             cv2.LINE_AA,
         )
     return overlay

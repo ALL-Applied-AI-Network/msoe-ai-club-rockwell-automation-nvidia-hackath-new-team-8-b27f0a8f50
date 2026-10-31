@@ -28,9 +28,41 @@ in one accuracy claim.
 
 ## Capture first; do not move the robot
 
+The ordinary `supervised_run.py hold` path does not invoke perception. Use the
+bounded diagnostic from the repository root during the approved slot:
+
+```bash
+uv run --project hardware/fanuc_cell python -m \
+  team_plugins.computer_vision.live_no_motion_diagnostic \
+  --output-dir /mnt/c/path/outside-the-repository/live-vision-01 \
+  --cube-mm 16 --max-snapshots 10
+```
+
+Choose `10` or `16` only after measuring the actual cubes. Start with
+`--dry-run` to inspect the non-secret effective settings. The directory must be
+new or empty and must remain outside Git. The tool clears motion/descent flags,
+refuses an armed policy after construction or reset, never calls planning, and
+saves decoded requested-resolution RGB plus the validated structured scene. It
+still returns the official measured-pose hold row, which is not an emergency
+stop and can produce a small controller correction. The assigned operator and
+controller remain responsible for stopping.
+
+Keep the robot/controller stationary and do not jog while this tool is active.
+The hold row is constructed first, but synchronous perception and file writes
+delay its return to the client. Records separate hold-construction time,
+perception/task-boundary latency, and a lower bound on total action-return delay;
+the lower bound excludes the final record write and event print.
+
+Every record includes current J1--J6 degrees, gripper feedback, and the UF0 TCP
+pose in millimetres/WPR degrees. Their source timestamp is the backend
+observation time copied into the adapter, **not** a measured camera exposure
+time. Use it for replay/provenance, not as proof of camera/robot synchronization.
+
 For table, side, and wrist cameras, save:
 
-- raw uncropped RGB;
+- decoded full-frame RGB at the requested resolution, and separately record
+  whether the backend output is actually sensor-native;
+- untouched sensor output too, if the backend exposes it;
 - image shape, dtype, channel order, camera ID, and exposure timestamp;
 - the exact robot observation timestamp and joints;
 - calibration ID;
@@ -40,6 +72,11 @@ For table, side, and wrist cameras, save:
 The table camera is the only current source permitted for robot-base target
 coordinates. Side/wrist frames are diagnostic until cross-camera calibration
 and timing are measured.
+
+The active hybrid profile requests table RGB only, so the diagnostic captures
+only that stream. Capturing side/wrist/depth requires a separately reviewed
+profile/backend change; merely listing another camera does not calibrate or
+fuse it.
 
 ## Minimal measured pose set
 
@@ -175,8 +212,15 @@ part. Then require:
   current official adapter copies
   one observation timestamp into each `CameraFrame`, so this validates metadata
   consistency but does **not** measure real camera-exposure-to-robot skew;
-- inference plus capture/service latency below the observation-age limit; and
+- inference plus capture/service latency below the policy's separate gained-age
+  deadline (3 s by default); and
 - the same preprocessing/profile used in the test and runtime.
+
+The provider's 0.15 s check is normally zero in the current hardware adapter,
+because request time and `CameraFrame` time both come from the same `obs['t']`.
+It therefore does **not** constrain inference or end-to-end latency. The policy's
+separate gained-age deadline is the active synchronous processing limit, while
+actual exposure-to-observation skew remains unmeasured.
 
 If any gate fails, use the existing cube-only baseline for the physical demo.
 Do not lower a gate just to make a model pass.

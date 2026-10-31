@@ -11,7 +11,12 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
-from sorting_core.perception import SceneObservation
+from sorting_core.perception import (
+    DetectedObject,
+    Pose3D,
+    SceneObservation,
+    scene_observation_to_dict,
+)
 from team_plugins.computer_vision import replay_camera
 
 
@@ -121,6 +126,151 @@ class ReplayFrameTests(unittest.TestCase):
 
         self.assertEqual([item[1] for item in decoded], [0.0, 1.0 / 25.0])
         self.assertEqual([item[3] for item in decoded], [25.0, 25.0])
+
+
+class ReplayOverlayTests(unittest.TestCase):
+    @staticmethod
+    def _detected(
+        track_id: str,
+        class_id: str,
+        *,
+        sort_label: str | None,
+        attributes: dict,
+        confidence: float,
+        pose_quality: float | None,
+    ) -> DetectedObject:
+        return DetectedObject(
+            track_id=track_id,
+            class_id=class_id,
+            sort_label=sort_label,
+            capture_time_s=1.0,
+            pose=Pose3D(
+                position_base_m=(0.4, 0.0, 0.01),
+                orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+            ),
+            dimensions_m=(0.01, 0.01, 0.01),
+            confidence=confidence,
+            pose_quality=pose_quality,
+            source_camera_ids=("table",),
+            attributes=attributes,
+        )
+
+    def test_overlay_is_deterministic_and_does_not_mutate_inputs(self):
+        cube = self._detected(
+            "cube-track-0001",
+            "cube",
+            sort_label="red",
+            attributes={"pixel_center_uv": [70.0, 140.0], "in_pickup_region": True},
+            confidence=0.91,
+            pose_quality=None,
+        )
+        screw = self._detected(
+            "screw-track-0002",
+            "screw_iso10642_m6x30",
+            sort_label="red",
+            attributes={
+                "head_xy_base_m": [0.2, 0.2],
+                "tip_xy_base_m": [0.35, 0.2],
+                "footprint_inside_pickup_region": True,
+            },
+            confidence=0.84,
+            pose_quality=0.77,
+        )
+        unknown = self._detected(
+            "unknown-track-0003",
+            "unknown_obstacle",
+            sort_label=None,
+            attributes={
+                "pixel_center_uv": [250.0, 160.0],
+                "non_executable": True,
+                "candidate_class": "screw_iso10642_m6x30",
+            },
+            confidence=0.49,
+            pose_quality=0.0,
+        )
+        scene = SceneObservation(
+            scene_id="overlay-scene",
+            capture_time_s=1.0,
+            objects=(unknown, screw, cube),
+            provider_name="test-provider",
+            provider_version="1",
+            calibration_ids=("table-calibration",),
+        )
+        source = np.full((240, 320, 3), 210, dtype=np.uint8)
+        source_before = source.copy()
+        scene_before = scene_observation_to_dict(scene)
+
+        def fake_project(unused_camera, points):
+            return np.asarray(
+                [[point[0] * 300.0, point[1] * 300.0] for point in points],
+                dtype=float,
+            )
+
+        with patch.object(replay_camera, "project", side_effect=fake_project):
+            first = replay_camera._draw_overlay(source, scene, {})
+            second = replay_camera._draw_overlay(source, scene, {})
+
+        self.assertTrue(np.array_equal(first, second))
+        self.assertTrue(np.array_equal(source, source_before))
+        self.assertEqual(scene_observation_to_dict(scene), scene_before)
+        self.assertEqual(first.shape, source.shape)
+        self.assertFalse(np.array_equal(first, source))
+        self.assertEqual(replay_camera._overlay_status(screw), ("candidate", True))
+
+    def test_overlay_status_never_promotes_missing_or_non_executable_metadata(self):
+        cube_in_region = self._detected(
+            "cube-in-region",
+            "cube",
+            sort_label="red",
+            attributes={"pixel_center_uv": [12.0, 12.0], "in_pickup_region": True},
+            confidence=0.9,
+            pose_quality=None,
+        )
+        cube_unknown_region = self._detected(
+            "cube",
+            "cube",
+            sort_label="blue",
+            attributes={"pixel_center_uv": [10.0, 10.0]},
+            confidence=0.5,
+            pose_quality=None,
+        )
+        screw_outside = self._detected(
+            "screw",
+            "screw_iso10642_m6x30",
+            sort_label="red",
+            attributes={
+                "head_xy_base_m": [0.2, 0.2],
+                "tip_xy_base_m": [0.3, 0.2],
+                "footprint_inside_pickup_region": False,
+            },
+            confidence=0.5,
+            pose_quality=0.5,
+        )
+        unknown = self._detected(
+            "unknown",
+            "unknown_obstacle",
+            sort_label=None,
+            attributes={"pixel_center_uv": [20.0, 20.0]},
+            confidence=0.49,
+            pose_quality=0.0,
+        )
+
+        self.assertEqual(
+            replay_camera._overlay_status(cube_in_region), ("in-region", True)
+        )
+        self.assertEqual(
+            replay_camera._overlay_status(cube_unknown_region), ("region?", False)
+        )
+        self.assertEqual(replay_camera._overlay_status(screw_outside), ("out", False))
+        self.assertEqual(replay_camera._overlay_status(unknown), ("noexec", False))
+        self.assertEqual(
+            replay_camera._overlay_colour(screw_outside, False),
+            replay_camera._OVERLAY_INELIGIBLE_COLOUR,
+        )
+        self.assertEqual(
+            replay_camera._overlay_colour(unknown, False),
+            replay_camera._OVERLAY_CLASS_STYLES["unknown_obstacle"][1],
+        )
 
 
 class ReplayMainGuardTests(unittest.TestCase):
