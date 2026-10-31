@@ -13,8 +13,10 @@ from datetime import datetime, timezone
 import hashlib
 from importlib import metadata
 import json
+import os
 from pathlib import Path
 import platform
+import re
 import subprocess
 import sys
 import time
@@ -139,17 +141,77 @@ def _box(value: Any, name: str) -> tuple[float, float, float, float]:
     return result
 
 
-def _git_value(repository: Path, *arguments: str) -> str | None:
+def _git_environment(repository: Path) -> dict[str, str]:
+    """Resolve Windows-created worktree metadata when running under WSL.
+
+    Windows Git writes a Windows absolute ``gitdir`` into a linked worktree's
+    ``.git`` file. Linux Git cannot resolve that spelling in WSL, even though
+    the directory is mounted below ``/mnt/<drive>``. Explicit, verified Git
+    paths preserve experiment provenance in either runtime.
+    """
+
+    environment = os.environ.copy()
+    pointer = repository / ".git"
+    if pointer.is_dir():
+        return environment
+    try:
+        text = pointer.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RuntimeError(f"cannot read worktree Git pointer: {exc}") from exc
+    prefix = "gitdir: "
+    if not text.startswith(prefix):
+        raise RuntimeError("worktree .git file does not contain a gitdir pointer")
+    raw = text[len(prefix) :]
+    windows_absolute = re.fullmatch(r"([A-Za-z]):[\\/](.+)", raw)
+    if os.name != "nt" and windows_absolute is not None:
+        drive, remainder = windows_absolute.groups()
+        git_directory = Path("/mnt") / drive.lower() / Path(
+            remainder.replace("\\", "/")
+        )
+    else:
+        candidate = Path(raw)
+        git_directory = (
+            candidate if candidate.is_absolute() else pointer.parent / candidate
+        )
+    git_directory = git_directory.resolve(strict=False)
+    if not git_directory.is_dir():
+        raise RuntimeError(f"worktree gitdir does not exist: {git_directory}")
+    environment["GIT_DIR"] = str(git_directory)
+    environment["GIT_WORK_TREE"] = str(repository)
+    return environment
+
+
+def _git_value(repository: Path, *arguments: str) -> str:
     result = subprocess.run(
         ("git", *arguments),
         cwd=repository,
+        env=_git_environment(repository),
         check=False,
         text=True,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
     )
     value = result.stdout.strip()
-    return value if result.returncode == 0 and value else None
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "git provenance command failed")
+    if not value:
+        raise RuntimeError("git provenance command returned no value")
+    return value
+
+
+def _worktree_dirty(repository: Path) -> bool:
+    result = subprocess.run(
+        ("git", "status", "--porcelain=v1", "--untracked-files=normal"),
+        cwd=repository,
+        env=_git_environment(repository),
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "git status failed")
+    return bool(result.stdout.strip())
 
 
 def _load_annotation(path: Path, expected_image_sha256: str) -> tuple[dict[str, Any], ...]:
@@ -470,6 +532,9 @@ def main() -> int:
         raise RuntimeError("generated experiment outputs must remain outside the repository")
     if output_dir.exists() and any(output_dir.iterdir()):
         raise RuntimeError("output directory must be absent or empty")
+    commit_at_start = _git_value(repository, "rev-parse", "HEAD")
+    branch_at_start = _git_value(repository, "branch", "--show-current")
+    dirty_at_start = _worktree_dirty(repository)
     output_dir.mkdir(parents=True, exist_ok=True)
     # Heavy import occurs only after every path/hash/shape/license/output gate passes.
     from ultralytics import YOLOE
@@ -547,6 +612,12 @@ def main() -> int:
                 "overlay": overlay_name,
             }
         )
+    commit_at_end = _git_value(repository, "rev-parse", "HEAD")
+    branch_at_end = _git_value(repository, "branch", "--show-current")
+    dirty_at_end = _worktree_dirty(repository)
+    provenance_stable = (
+        commit_at_start == commit_at_end and branch_at_start == branch_at_end
+    )
     report = {
         "schema_version": 1,
         "experiment_id": config["experiment_id"],
@@ -563,12 +634,13 @@ def main() -> int:
         "license_context": config["license_context"],
         "provenance": {
             "manifest_sha256": config["manifest_sha256"],
-            "project_commit": _git_value(repository, "rev-parse", "HEAD"),
-            "branch": _git_value(repository, "branch", "--show-current"),
-            "worktree_dirty": _git_value(
-                repository, "status", "--porcelain=v1", "--untracked-files=normal"
-            )
-            is not None,
+            "project_commit": commit_at_start,
+            "project_commit_at_end": commit_at_end,
+            "branch": branch_at_start,
+            "branch_at_end": branch_at_end,
+            "worktree_dirty": dirty_at_start,
+            "worktree_dirty_at_end": dirty_at_end,
+            "repository_provenance_stable": provenance_stable,
             "python": sys.version,
             "platform": platform.platform(),
             "ultralytics_version": installed_version,

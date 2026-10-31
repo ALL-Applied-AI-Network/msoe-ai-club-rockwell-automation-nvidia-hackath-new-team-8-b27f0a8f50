@@ -84,7 +84,7 @@ uv run --project team_plugins/computer_vision/yoloe_env --frozen \
   python -m unittest team_plugins.computer_vision.tests.test_yoloe_experiment -v
 ```
 
-The current branch passes 13 harness tests and the complete 258-test
+The current branch passes 15 harness tests and the complete 258-test
 profile-unset repository baseline.
 
 ## Annotation and metrics
@@ -144,6 +144,13 @@ and, for the final-code low-threshold rerun,
 `b7fcd0011d1ddd764dc99d3247b72f618cebf0290f23f4c2a46776466e53f256`;
 the reports and images remain external under
 `HardwareResults/VisionExperiments/yoloe-harness/` and are not committed.
+Those archived reports predate the cross-OS Git provenance fix and contain null
+commit/branch fields. The measured inference outputs remain bounded exploratory
+evidence, but the reports are not clean-commit-pinned artifacts. The current
+runner resolves Windows-created worktree pointers under WSL, fails closed when
+Git provenance cannot be read, and records start/end branch, commit, and dirty
+state. Rerun the exact thresholds before using a YOLOE report as reproducible
+handoff evidence.
 
 Creating the isolated environment installed 60 packages and occupied about
 4.9 GB in this WSL-on-Windows worktree. The first sync took 5 minutes 35
