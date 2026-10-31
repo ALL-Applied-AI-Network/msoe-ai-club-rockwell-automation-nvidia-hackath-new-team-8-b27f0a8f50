@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import math
+from types import SimpleNamespace
 import unittest
 
 import cv2
@@ -12,6 +13,7 @@ from sorting_core.integration_plugins import VisionFactoryContext
 from sorting_core.perception import CameraFrame, PerceptionRequest
 from sorting_core.vision import VisionError
 from team_plugins.computer_vision.hybrid_geometry_provider import (
+    CubeDetectorOverrides,
     CubeScrewHybridVisionProvider,
     SCREW_CLASS_ID,
     ScrewDetectorConfig,
@@ -524,6 +526,58 @@ class HybridGeometryProviderTests(unittest.TestCase):
         self.assertFalse(cube.attributes["in_pickup_region"])
         self.assertLess(cube.pose.position_base_m[0], 0.30)
 
+    def test_profile_only_cube_aspect_override_recovers_bounded_silhouette(self):
+        image = np.full((400, 400, 3), 235, dtype=np.uint8)
+        # 40 px is the expected 10 mm short edge; 64 px gives aspect 1.6.
+        # The baseline 1.5 gate rejects it. The explicit 1.8 experiment may
+        # retain it while all physical-size and fill gates still apply.
+        cv2.rectangle(image, (168, 180), (232, 220), (230, 20, 20), thickness=-1)
+        baseline = self.provider().observe(
+            request(image, scene_id="scene-aspect-baseline", capture_time_s=5.7)
+        )
+        self.assertFalse(any(item.class_id == "cube" for item in baseline.objects))
+        experimental = CubeScrewHybridVisionProvider(
+            config=self.config,
+            camera_projectors={"table": projector},
+            calibration_ids={"table": "test-table-v1"},
+            camera_id="table",
+            expected_cube_edge_m=0.010,
+            cube_config=CubeDetectorOverrides(
+                maximum_component_aspect_ratio=1.8,
+            ),
+            screw_config=self.screw_config,
+        ).observe(
+            request(image, scene_id="scene-aspect-experiment", capture_time_s=5.8)
+        )
+        cubes = [item for item in experimental.objects if item.class_id == "cube"]
+        self.assertEqual(len(cubes), 1)
+        self.assertEqual(cubes[0].sort_label, "red")
+
+    def test_cube_options_are_bounded_and_do_not_mutate_shared_config(self):
+        original_limit = self.config.vision.maximum_component_aspect_ratio
+        self.assertEqual(
+            CubeDetectorOverrides.from_options({}).apply(self.config),
+            self.config,
+        )
+        overridden = CubeDetectorOverrides.from_options(
+            {"maximum_component_aspect_ratio": 1.8}
+        ).apply(self.config)
+        self.assertEqual(original_limit, 1.5)
+        self.assertEqual(self.config.vision.maximum_component_aspect_ratio, 1.5)
+        self.assertEqual(overridden.vision.maximum_component_aspect_ratio, 1.8)
+        for value in (1.0, 2.1, True, "wide"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    ValueError, "maximum_component_aspect_ratio"
+                ):
+                    CubeDetectorOverrides.from_options(
+                        {"maximum_component_aspect_ratio": value}
+                    )
+        with self.assertRaisesRegex(ValueError, "unknown cube detector options"):
+            CubeDetectorOverrides.from_options({"invented": 1.8})
+        with self.assertRaisesRegex(ValueError, "vision.options.cube must be an object"):
+            create(SimpleNamespace(options={"cube": []}))
+
     def test_rejects_wrong_resolution_in_hardware_profile(self):
         image = np.full((200, 200, 3), 235, dtype=np.uint8)
         with self.assertRaisesRegex(VisionError, "uncropped native image"):
@@ -599,6 +653,7 @@ class HybridGeometryProviderTests(unittest.TestCase):
             options={
                 "camera_id": "table",
                 "maximum_frame_age_s": 0.15,
+                "cube": {"maximum_component_aspect_ratio": 1.8},
                 "screw": {
                     "expected_image_size": list(IMAGE_SIZE),
                     "minimum_component_area_px": 20.0,
@@ -625,6 +680,10 @@ class HybridGeometryProviderTests(unittest.TestCase):
         self.assertEqual(
             screw.attributes["integration_profile"]["profile_sha256"],
             "a" * 64,
+        )
+        self.assertEqual(
+            create(context).config.vision.maximum_component_aspect_ratio,
+            1.8,
         )
 
 
