@@ -235,6 +235,136 @@ class ReplayComparisonTests(unittest.TestCase):
         self.assertNotIn("profile_path", report["baseline"]["integration_profile"])
         self.assertIn("not ground truth", report["evidence_limit"])
 
+    def test_variable_per_frame_errors_are_compacted_by_semantic_category(self) -> None:
+        cube = _object("cube-red")
+        baseline_records = [
+            _scene_record(frame_index, "baseline", (cube,))
+            for frame_index in range(10)
+        ]
+        candidate_records = [_scene_record(0, "candidate", (cube,))]
+        for frame_index in range(1, 10):
+            candidate_records.append(
+                _error_record(
+                    frame_index,
+                    (
+                        "YOLO11n and calibrated geometry disagree inside the "
+                        "inference crop: unmatched_yolo_boxes=0, "
+                        "unmatched_geometry_detections=1, unmatched_yolo=[], "
+                        "unmatched_geometry=[{'track_id': "
+                        f"'frame-{frame_index}', 'pixel_center_uv': "
+                        f"({700 + frame_index}.0, 500.0)}}]"
+                    ),
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline_path = _write_bundle(
+                root,
+                "baseline",
+                baseline_records,
+                provider="baseline",
+            )
+            candidate_path = _write_bundle(
+                root,
+                "candidate",
+                candidate_records,
+                provider="candidate",
+            )
+            baseline = compare_replays.load_replay_bundle(
+                baseline_path, name="baseline", baseline=True
+            )
+            candidate = compare_replays.load_replay_bundle(
+                candidate_path, name="candidate", baseline=False
+            )
+            report = compare_replays.compare_replays(baseline, candidate)
+
+        self.assertEqual(report["schema_version"], 2)
+        categories = report["availability"]["error_categories"]
+        self.assertEqual(len(categories), 1)
+        category = categories[0]
+        self.assertEqual(category["category"], "yolo_geometry_disagreement")
+        self.assertEqual(category["frames"], 9)
+        self.assertEqual(category["distinct_message_sha256_count"], 9)
+        self.assertEqual(len(category["representative_examples"]), 3)
+        self.assertTrue(
+            all(
+                "message" not in example
+                for example in category["representative_examples"]
+            )
+        )
+        self.assertEqual(category["first_source_frame_index"], 1)
+        self.assertEqual(category["last_source_frame_index"], 9)
+        abstention_row = report["frames"][1]["vision_error"]
+        self.assertNotIn("message", abstention_row)
+        self.assertRegex(abstention_row["message_sha256"], r"^[0-9a-f]{64}$")
+        streak_reason = report["availability"]["error_streaks"]["streaks"][0][
+            "reasons"
+        ][0]
+        self.assertNotIn("message", streak_reason)
+        self.assertEqual(streak_reason["processed_frames"], 9)
+        self.assertNotIn("frame-9", json.dumps(report))
+        self.assertEqual(
+            report["availability"]["full_error_detail_source"]["sha256"],
+            candidate.scenes_fingerprint["sha256"],
+        )
+
+    def test_absolute_path_like_error_is_absent_from_report_and_receipt(self) -> None:
+        cube = _object("cube-red")
+        private_message = (
+            "provider failed while reading /home/alice/private/checkpoint.pt"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline_path = _write_bundle(
+                root,
+                "baseline",
+                [_scene_record(0, "baseline", (cube,))],
+                provider="baseline",
+            )
+            candidate_path = _write_bundle(
+                root,
+                "candidate",
+                [_error_record(0, private_message)],
+                provider=None,
+            )
+            output = root / "comparison.json"
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(
+                    compare_replays.main(
+                        [
+                            str(baseline_path),
+                            str(candidate_path),
+                            "--output",
+                            str(output),
+                        ]
+                    ),
+                    0,
+                )
+            report_text = output.read_text(encoding="utf-8")
+            receipt_text = stdout.getvalue()
+
+        self.assertNotIn(private_message, report_text)
+        self.assertNotIn("/home/alice", report_text)
+        self.assertNotIn("checkpoint.pt", report_text)
+        self.assertNotIn(private_message, receipt_text)
+        self.assertNotIn("/home/alice", receipt_text)
+        report = json.loads(report_text)
+        category = report["availability"]["error_categories"][0]
+        self.assertRegex(
+            category["attributes"]["bounded_prefix_sha256"],
+            r"^[0-9a-f]{64}$",
+        )
+        self.assertEqual(
+            category["representative_examples"][0]["source_frame_index"],
+            0,
+        )
+        self.assertRegex(
+            category["representative_examples"][0]["message_sha256"],
+            r"^[0-9a-f]{64}$",
+        )
+
     def test_every_per_frame_rgb_hash_must_match(self) -> None:
         cube = _object("cube-red")
         with tempfile.TemporaryDirectory() as temporary:
@@ -443,7 +573,32 @@ class ReplayComparisonTests(unittest.TestCase):
                     [str(baseline_path), str(candidate_path), "--output", str(output)]
                 )
             self.assertEqual(result, 0)
-            self.assertEqual(json.loads(stdout.getvalue()), json.loads(output.read_text()))
+            receipt = json.loads(stdout.getvalue())
+            full_report = json.loads(output.read_text())
+            self.assertEqual(
+                receipt["tool"],
+                "team_plugins.computer_vision.compare_replays.output_receipt",
+            )
+            self.assertEqual(receipt["output_file"], "comparison.json")
+            self.assertNotIn(str(root), stdout.getvalue())
+            self.assertEqual(
+                receipt["output_sha256"],
+                hashlib.sha256(output.read_bytes()).hexdigest(),
+            )
+            self.assertEqual(receipt["processed_frames"], 1)
+            self.assertEqual(receipt["candidate_validated_scene_frames"], 1)
+            self.assertEqual(receipt["candidate_explicit_abstention_frames"], 0)
+            self.assertEqual(receipt["maximum_error_streak_processed_frames"], 0)
+            self.assertEqual(receipt["error_category_count"], 0)
+            self.assertEqual(receipt["evidence_limit"], full_report["evidence_limit"])
+
+            full_stdout = io.StringIO()
+            with contextlib.redirect_stdout(full_stdout):
+                self.assertEqual(
+                    compare_replays.main([str(baseline_path), str(candidate_path)]),
+                    0,
+                )
+            self.assertEqual(json.loads(full_stdout.getvalue()), full_report)
             with self.assertRaisesRegex(ValueError, "new path"):
                 compare_replays.main(
                     [str(baseline_path), str(candidate_path), "--output", str(output)]

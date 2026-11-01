@@ -27,12 +27,20 @@ from sorting_core.perception import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REPLAY_TOOL = "team_plugins.computer_vision.replay_camera"
 COMPARISON_TOOL = "team_plugins.computer_vision.compare_replays"
 COMPARISON_TOOL_PATH = Path(__file__).resolve()
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 GIT_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+MAX_ERROR_EXAMPLES_PER_CATEGORY = 3
+MAX_FALLBACK_ERROR_PREFIX_CHARACTERS = 160
+YOLO_GEOMETRY_DISAGREEMENT_PATTERN = re.compile(
+    r"^YOLO11n and calibrated geometry disagree inside the inference crop:\s*"
+    r"unmatched_yolo_boxes=(?P<unmatched_yolo_boxes>\d+),\s*"
+    r"unmatched_geometry_detections="
+    r"(?P<unmatched_geometry_detections>\d+),"
+)
 
 MATCHING_PROVENANCE_FIELDS = (
     "capture_sha256",
@@ -359,6 +367,57 @@ def _object_counts(records: Iterable[ReplayRecord]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _error_descriptor(error: Mapping[str, str]) -> dict[str, Any]:
+    """Return a compact, deterministic description of one provider error.
+
+    Full messages remain in the candidate replay's hash-pinned ``scenes.jsonl``.
+    The comparison uses a category plus a message digest so variable track IDs,
+    coordinates, and boxes do not duplicate a long message in every frame.
+    """
+
+    error_type = error["error_type"]
+    message = error["message"]
+    match = YOLO_GEOMETRY_DISAGREEMENT_PATTERN.match(message)
+    if match is not None:
+        category = "yolo_geometry_disagreement"
+        attributes: dict[str, Any] = {
+            "unmatched_yolo_boxes": int(match.group("unmatched_yolo_boxes")),
+            "unmatched_geometry_detections": int(
+                match.group("unmatched_geometry_detections")
+            ),
+        }
+    else:
+        prefix = " ".join(message.partition(":")[0].split())
+        if not prefix:
+            prefix = "unclassified_message"
+        bounded_prefix = prefix[:MAX_FALLBACK_ERROR_PREFIX_CHARACTERS]
+        category = "message_prefix"
+        attributes = {
+            "bounded_prefix_sha256": hashlib.sha256(
+                bounded_prefix.encode("utf-8")
+            ).hexdigest(),
+            "bounded_prefix_character_count": len(bounded_prefix),
+            "prefix_was_truncated": (
+                len(prefix) > MAX_FALLBACK_ERROR_PREFIX_CHARACTERS
+            ),
+        }
+    identity = {
+        "error_type": error_type,
+        "category": category,
+        "attributes": attributes,
+    }
+    encoded_identity = json.dumps(
+        identity,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        **identity,
+        "category_id": hashlib.sha256(encoded_identity).hexdigest(),
+        "message_sha256": hashlib.sha256(message.encode("utf-8")).hexdigest(),
+    }
+
+
 def _validate_bundle_consistency(
     report: Mapping[str, Any],
     records: tuple[ReplayRecord, ...],
@@ -607,26 +666,31 @@ def _match_objects(
 def _error_streaks(records: Sequence[ReplayRecord]) -> dict[str, Any]:
     streaks: list[dict[str, Any]] = []
     start: int | None = None
-    reasons: Counter[tuple[str, str]] = Counter()
+    reasons: Counter[str] = Counter()
+    descriptors: dict[str, Mapping[str, Any]] = {}
     for ordinal, record in enumerate(records, start=1):
         if record.vision_error is not None:
             if start is None:
                 start = ordinal
                 reasons.clear()
-            reasons[
-                (
-                    record.vision_error["error_type"],
-                    record.vision_error["message"],
-                )
-            ] += 1
+                descriptors.clear()
+            descriptor = _error_descriptor(record.vision_error)
+            category_id = descriptor["category_id"]
+            reasons[category_id] += 1
+            descriptors[category_id] = descriptor
             continue
         if start is not None:
             end = ordinal - 1
-            streaks.append(_streak_record(records, start, end, reasons))
+            streaks.append(
+                _streak_record(records, start, end, reasons, descriptors)
+            )
             start = None
             reasons = Counter()
+            descriptors = {}
     if start is not None:
-        streaks.append(_streak_record(records, start, len(records), reasons))
+        streaks.append(
+            _streak_record(records, start, len(records), reasons, descriptors)
+        )
     return {
         "unit": "consecutive processed replay frames (1-based processed ordinals)",
         "count": len(streaks),
@@ -642,7 +706,8 @@ def _streak_record(
     records: Sequence[ReplayRecord],
     start: int,
     end: int,
-    reasons: Counter[tuple[str, str]],
+    reasons: Counter[str],
+    descriptors: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
     return {
         "start_processed_ordinal": start,
@@ -652,13 +717,61 @@ def _streak_record(
         "end_source_frame_index": records[end - 1].frame_index,
         "reasons": [
             {
-                "error_type": error_type,
-                "message": message,
+                "category_id": category_id,
+                "error_type": descriptors[category_id]["error_type"],
+                "category": descriptors[category_id]["category"],
+                "attributes": descriptors[category_id]["attributes"],
                 "processed_frames": count,
             }
-            for (error_type, message), count in sorted(reasons.items())
+            for category_id, count in sorted(reasons.items())
         ],
     }
+
+
+def _error_categories(records: Sequence[ReplayRecord]) -> list[dict[str, Any]]:
+    categories: dict[str, dict[str, Any]] = {}
+    distinct_messages: dict[str, set[str]] = defaultdict(set)
+    for processed_ordinal, record in enumerate(records, start=1):
+        if record.vision_error is None:
+            continue
+        descriptor = _error_descriptor(record.vision_error)
+        category_id = descriptor["category_id"]
+        if category_id not in categories:
+            categories[category_id] = {
+                "category_id": category_id,
+                "error_type": descriptor["error_type"],
+                "category": descriptor["category"],
+                "attributes": descriptor["attributes"],
+                "frames": 0,
+                "first_processed_ordinal": processed_ordinal,
+                "first_source_frame_index": record.frame_index,
+                "last_processed_ordinal": processed_ordinal,
+                "last_source_frame_index": record.frame_index,
+                "representative_examples": [],
+            }
+        category_row = categories[category_id]
+        category_row["frames"] += 1
+        category_row["last_processed_ordinal"] = processed_ordinal
+        category_row["last_source_frame_index"] = record.frame_index
+        message_sha256 = descriptor["message_sha256"]
+        distinct_messages[category_id].add(message_sha256)
+        examples = category_row["representative_examples"]
+        if len(examples) < MAX_ERROR_EXAMPLES_PER_CATEGORY:
+            examples.append(
+                {
+                    "processed_ordinal": processed_ordinal,
+                    "source_frame_index": record.frame_index,
+                    "message_sha256": message_sha256,
+                }
+            )
+    result = []
+    for category_id in sorted(categories):
+        row = categories[category_id]
+        row["distinct_message_sha256_count"] = len(
+            distinct_messages[category_id]
+        )
+        result.append(row)
+    return result
 
 
 def _comparison_frame(
@@ -676,12 +789,17 @@ def _comparison_frame(
         "baseline_object_count": len(baseline_record.scene.objects),
     }
     if candidate_record.vision_error is not None:
+        descriptor = _error_descriptor(candidate_record.vision_error)
         return (
             {
                 **common,
                 "candidate_status": "explicit_abstention",
                 "candidate_object_count": None,
-                "vision_error": dict(candidate_record.vision_error),
+                "vision_error": {
+                    "error_type": descriptor["error_type"],
+                    "category_id": descriptor["category_id"],
+                    "message_sha256": descriptor["message_sha256"],
+                },
             },
             [],
             0,
@@ -792,7 +910,6 @@ def compare_replays(baseline: ReplayBundle, candidate: ReplayBundle) -> dict[str
     accepted = 0
     object_count_difference_frames = 0
     label_difference_frames = 0
-    error_reasons: Counter[tuple[str, str]] = Counter()
     baseline_latencies = []
     candidate_latencies = []
     for baseline_record, candidate_record in zip(
@@ -815,13 +932,6 @@ def compare_replays(baseline: ReplayBundle, candidate: ReplayBundle) -> dict[str
                 row["object_count_delta_candidate_minus_baseline"] != 0
             )
             label_difference_frames += int(bool(row["same_track_label_changes"]))
-        elif candidate_record.vision_error is not None:
-            error_reasons[
-                (
-                    candidate_record.vision_error["error_type"],
-                    candidate_record.vision_error["message"],
-                )
-            ] += 1
     total = len(baseline.records)
     abstained = total - accepted
     return {
@@ -837,15 +947,18 @@ def compare_replays(baseline: ReplayBundle, candidate: ReplayBundle) -> dict[str
             "candidate_explicit_abstention_frames": abstained,
             "candidate_acceptance_fraction": accepted / total,
             "candidate_abstention_fraction": abstained / total,
-            "error_reasons": [
-                {
-                    "error_type": error_type,
-                    "message": message,
-                    "frames": count,
-                }
-                for (error_type, message), count in sorted(error_reasons.items())
-            ],
+            "error_categories": _error_categories(candidate.records),
             "error_streaks": _error_streaks(candidate.records),
+            "full_error_detail_source": {
+                "candidate_bundle_name": candidate.directory.name,
+                "relative_file": "scenes.jsonl",
+                "sha256": candidate.scenes_fingerprint["sha256"],
+                "note": (
+                    "Full per-frame provider messages remain in the immutable "
+                    "candidate replay; this comparison stores only their "
+                    "SHA-256 digests and source-frame locations."
+                ),
+            },
         },
         "disagreement": {
             "accepted_frames_with_object_count_difference": (
@@ -930,9 +1043,36 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         type=Path,
-        help="optional new JSON report path; stdout is always printed",
+        help=(
+            "optional new JSON report path; with this option stdout contains "
+            "only a compact JSON receipt"
+        ),
     )
     return parser
+
+
+def _output_receipt(result: Mapping[str, Any], output: Path) -> dict[str, Any]:
+    availability = result["availability"]
+    streaks = availability["error_streaks"]
+    return {
+        "schema_version": 1,
+        "tool": f"{COMPARISON_TOOL}.output_receipt",
+        "comparison_schema_version": result["schema_version"],
+        "output_file": output.name,
+        "output_sha256": _sha256(output),
+        "processed_frames": availability["processed_frames"],
+        "candidate_validated_scene_frames": availability[
+            "candidate_validated_scene_frames"
+        ],
+        "candidate_explicit_abstention_frames": availability[
+            "candidate_explicit_abstention_frames"
+        ],
+        "maximum_error_streak_processed_frames": streaks[
+            "maximum_length_processed_frames"
+        ],
+        "error_category_count": len(availability["error_categories"]),
+        "evidence_limit": result["evidence_limit"],
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -959,13 +1099,16 @@ def main(argv: list[str] | None = None) -> int:
     if result["comparison_tool_sha256"] != _sha256(COMPARISON_TOOL_PATH):
         raise RuntimeError("comparison tool changed during comparison")
     encoded = json.dumps(result, indent=2, sort_keys=True) + "\n"
-    print(encoded, end="")
-    if output is not None:
+    if output is None:
+        print(encoded, end="")
+    else:
         try:
             with output.open("x", encoding="utf-8") as stream:
                 stream.write(encoded)
         except FileExistsError as exc:
             raise ValueError("--output must be a new path") from exc
+        receipt = _output_receipt(result, output)
+        print(json.dumps(receipt, indent=2, sort_keys=True))
     return 0
 
 

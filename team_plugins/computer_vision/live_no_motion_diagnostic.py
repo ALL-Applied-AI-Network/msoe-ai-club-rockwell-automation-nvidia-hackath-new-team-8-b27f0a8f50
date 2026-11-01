@@ -6,13 +6,15 @@ physical-motion/descent interlocks, lets the normal policy construct its strict
 measured-pose hold row, and only then calls the existing private perception
 boundary for the trusted table-camera mode.  Side and wrist modes save native-
 resolution evidence plus measured robot feedback but deliberately skip provider
-inference because their motion-coordinate adapters are not yet validated.  It
-never calls ``_start_next_plan`` or a motion phase.
+inference because their motion-coordinate adapters are not yet validated.  An
+opt-in table+side mode saves both fixed-camera views at their shared native
+1920x1080 size while still running inference on the table view only.  It never
+calls ``_start_next_plan`` or a motion phase.
 
-Only one RGB camera is requested per process.  The official client exposes one
-global RGB request size, while the pinned wrist calibration is 1280x720 and the
-fixed cameras are 1920x1080.  Separate captures avoid silently rescaling one
-camera through another camera's calibration.
+The official client exposes one global RGB request size.  The fixed table/side
+cameras share 1920x1080, while the pinned wrist calibration is 1280x720.  A
+mixed-size request is rejected rather than silently rescaling one stream
+through another camera's calibration.
 
 The official TCP protocol has no no-op.  Repeating the measured TCP/gripper row
 may still produce a small controller correction; this tool is not an emergency
@@ -77,8 +79,8 @@ def _capture_camera_spec(camera_id: str) -> dict[str, Any]:
 
     The official client exposes one global RGB size per observation request, so
     cameras with different native sizes cannot be requested together without
-    resampling at least one stream.  The diagnostic therefore captures exactly
-    one camera at a time and asks for the size pinned by ``cameras.json``.
+    resampling at least one stream.  This helper exposes each pinned size; the
+    group validator permits only single-camera capture or compatible table+side.
     """
 
     if camera_id not in _CAPTURE_CAMERA_IDS:
@@ -112,6 +114,41 @@ def _capture_camera_spec(camera_id: str) -> dict[str, Any]:
         "trusted_for_motion_coordinates": camera_id == "table",
         "provider_inference_enabled": camera_id == "table",
     }
+
+
+def _capture_camera_specs(camera_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
+    """Return one compatible native-resolution contract per requested camera.
+
+    Single-camera table/side/wrist capture remains supported.  The only
+    multi-camera evidence mode is table+side: both fixed cameras have the same
+    pinned native size, and only table is allowed to feed the provider.
+    """
+
+    selected = tuple(str(camera_id) for camera_id in camera_ids)
+    if not selected:
+        raise ValueError("at least one capture camera is required")
+    if len(set(selected)) != len(selected):
+        raise ValueError("capture cameras must be unique")
+    if len(selected) > 1 and selected != ("table", "side"):
+        raise ValueError(
+            "the only supported paired capture is table+side; wrist must be "
+            "captured separately at its pinned native resolution"
+        )
+    specs = {camera_id: _capture_camera_spec(camera_id) for camera_id in selected}
+    sizes = {tuple(spec["image_size_wh"]) for spec in specs.values()}
+    if len(sizes) != 1:
+        raise ValueError(
+            "requested cameras have different native RGB sizes; capture them "
+            "separately rather than rescaling calibration"
+        )
+    inference_cameras = tuple(
+        camera_id
+        for camera_id, spec in specs.items()
+        if bool(spec["provider_inference_enabled"])
+    )
+    if len(selected) > 1 and inference_cameras != ("table",):
+        raise ValueError("paired capture must keep table as the sole inference camera")
+    return specs
 
 
 def _git_value(*arguments: str) -> str | None:
@@ -241,6 +278,7 @@ class SnapshotRecorder:
         cube_edge_mm: int,
         provenance: Mapping[str, Any] | None = None,
         capture_camera_spec: Mapping[str, Any] | None = None,
+        capture_camera_specs: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         if not 1 <= int(maximum_snapshots) <= _MAXIMUM_SNAPSHOTS:
             raise ValueError(
@@ -252,12 +290,51 @@ class SnapshotRecorder:
         self.maximum_snapshots = int(maximum_snapshots)
         self.cube_edge_mm = cube_edge_mm
         self.provenance = dict(provenance or _repository_provenance())
+        if capture_camera_spec is not None and capture_camera_specs is not None:
+            raise ValueError(
+                "capture_camera_spec and capture_camera_specs are mutually exclusive"
+            )
+        if capture_camera_specs is not None:
+            self.capture_camera_specs = {
+                str(camera_id): dict(spec)
+                for camera_id, spec in capture_camera_specs.items()
+            }
+        elif capture_camera_spec is not None:
+            single_spec = dict(capture_camera_spec)
+            camera_id = str(single_spec.get("camera_id", ""))
+            if not camera_id:
+                raise ValueError("capture camera specification requires camera_id")
+            self.capture_camera_specs = {camera_id: single_spec}
+        else:
+            self.capture_camera_specs = {}
+        # Preserve the historical attribute for single-camera callers/tests.
         self.capture_camera_spec = (
-            None if capture_camera_spec is None else dict(capture_camera_spec)
+            next(iter(self.capture_camera_specs.values()))
+            if len(self.capture_camera_specs) == 1
+            else None
         )
+        for camera_id, spec in self.capture_camera_specs.items():
+            if str(spec.get("camera_id")) != camera_id:
+                raise ValueError(
+                    "capture camera specification key does not match camera_id: "
+                    f"{camera_id!r} != {spec.get('camera_id')!r}"
+                )
+        self.provider_inference_camera_ids = tuple(
+            camera_id
+            for camera_id, spec in self.capture_camera_specs.items()
+            if bool(spec.get("provider_inference_enabled", False))
+        )
+        if self.capture_camera_specs and self.provider_inference_camera_ids not in {
+            (),
+            ("table",),
+        }:
+            raise ValueError(
+                "only the table camera may be enabled for provider inference"
+            )
         self.provider_inference_enabled = bool(
-            self.capture_camera_spec is None
-            or self.capture_camera_spec.get("provider_inference_enabled", True)
+            self.provider_inference_camera_ids
+            if self.capture_camera_specs
+            else True
         )
         self.attempts = 0
         self.failures = 0
@@ -269,23 +346,30 @@ class SnapshotRecorder:
         images = obs.get("images")
         if not isinstance(images, Mapping):
             raise ValueError("obs['images'] must be a mapping")
-        records: list[dict[str, Any]] = []
-        for camera_id in tuple(policy.CAMERAS):
-            if camera_id not in images:
-                raise ValueError(f"missing configured RGB camera {camera_id!r}")
+        configured_camera_ids = tuple(policy.CAMERAS)
+        missing_camera_ids = [
+            camera_id
+            for camera_id in configured_camera_ids
+            if camera_id not in images
+        ]
+        if missing_camera_ids:
+            raise ValueError(
+                "missing configured RGB cameras: " + ", ".join(missing_camera_ids)
+            )
+        validated_frames: list[tuple[str, np.ndarray, Mapping[str, Any] | None]] = []
+        for camera_id in configured_camera_ids:
             rgb = np.asarray(images[camera_id])
             if rgb.ndim != 3 or rgb.shape[2] != 3 or rgb.dtype != np.uint8:
                 raise ValueError(
                     f"camera {camera_id!r} must be HxWx3 uint8 RGB, got "
                     f"{rgb.dtype} {rgb.shape}"
                 )
-            camera_spec = self.capture_camera_spec
+            camera_spec = self.capture_camera_specs.get(str(camera_id))
+            if self.capture_camera_specs and camera_spec is None:
+                raise ValueError(
+                    f"missing capture camera specification for {camera_id!r}"
+                )
             if camera_spec is not None:
-                if str(camera_spec.get("camera_id")) != str(camera_id):
-                    raise ValueError(
-                        "capture camera specification does not match the policy "
-                        f"camera: {camera_spec.get('camera_id')!r} != {camera_id!r}"
-                    )
                 expected_width, expected_height = camera_spec["image_size_wh"]
                 expected_shape = (int(expected_height), int(expected_width), 3)
                 if rgb.shape != expected_shape:
@@ -294,6 +378,10 @@ class SnapshotRecorder:
                         f"RGB calibration size {expected_width}x{expected_height}, got "
                         f"{rgb.shape[1]}x{rgb.shape[0]}"
                     )
+            validated_frames.append((str(camera_id), rgb, camera_spec))
+
+        records: list[dict[str, Any]] = []
+        for camera_id, rgb, camera_spec in validated_frames:
             safe_camera_id = "".join(
                 character if character.isalnum() or character in "-_" else "_"
                 for character in str(camera_id)
@@ -333,6 +421,9 @@ class SnapshotRecorder:
                     "moving_camera": bool(camera_spec["moving_camera"]),
                     "trusted_for_motion_coordinates": bool(
                         camera_spec["trusted_for_motion_coordinates"]
+                    ),
+                    "provider_inference_enabled": bool(
+                        camera_spec["provider_inference_enabled"]
                     ),
                 }
             records.append(frame_record)
@@ -393,8 +484,14 @@ class SnapshotRecorder:
 
             proxy = _CapturingProvider(provider)
             policy._perception_provider = proxy
+        original_policy_cameras = tuple(getattr(policy, "CAMERAS", ()))
         if self.provider_inference_enabled:
             try:
+                if self.provider_inference_camera_ids:
+                    # The hardware observation may contain capture-only views.
+                    # Keep them out of the provider request so the checked-in
+                    # table-only profile and provenance remain exact.
+                    policy.CAMERAS = self.provider_inference_camera_ids
                 # This is the narrow private integration described in the module
                 # docstring. It builds/validates the provider request *and* applies
                 # the cube task's diagnostic partitioning. A task-partition error can
@@ -419,6 +516,7 @@ class SnapshotRecorder:
                     failure_stage = "provider_or_request_boundary"
                 self.failures += 1
             finally:
+                policy.CAMERAS = original_policy_cameras
                 if proxy is not None:
                     policy._perception_provider = provider
         latency_ms = (time.perf_counter() - started) * 1000.0
@@ -513,14 +611,30 @@ def diagnostic_policy_class(
     recorder: SnapshotRecorder,
     *,
     capture_camera_id: str = "table",
+    capture_camera_ids: Sequence[str] | None = None,
     capture_image_size: tuple[int, int] | None = None,
 ) -> type:
     """Return a Policy subclass that preserves hold output byte-for-byte."""
 
-    if capture_camera_id not in _CAPTURE_CAMERA_IDS:
+    selected_camera_ids = (
+        (capture_camera_id,)
+        if capture_camera_ids is None
+        else tuple(str(camera_id) for camera_id in capture_camera_ids)
+    )
+    if capture_camera_ids is not None and capture_camera_id != "table":
         raise ValueError(
-            f"capture_camera_id must be one of {', '.join(_CAPTURE_CAMERA_IDS)}"
+            "capture_camera_id cannot be combined with capture_camera_ids"
         )
+    if not selected_camera_ids or any(
+        camera_id not in _CAPTURE_CAMERA_IDS for camera_id in selected_camera_ids
+    ):
+        raise ValueError(
+            f"capture cameras must be selected from {', '.join(_CAPTURE_CAMERA_IDS)}"
+        )
+    if len(set(selected_camera_ids)) != len(selected_camera_ids):
+        raise ValueError("capture cameras must be unique")
+    if len(selected_camera_ids) > 1 and selected_camera_ids != ("table", "side"):
+        raise ValueError("the only supported paired capture is table+side")
     if capture_image_size is None:
         capture_image_size = tuple(
             int(value)
@@ -593,16 +707,16 @@ def diagnostic_policy_class(
     LiveNoMotionDiagnosticPolicy.__name__ = "LiveNoMotionDiagnosticPolicy"
     LiveNoMotionDiagnosticPolicy.__qualname__ = "LiveNoMotionDiagnosticPolicy"
     # The official client reads these attributes from the replacement class.
-    # Exactly one stream is requested because it exposes only one global RGB
-    # size per observation and the wrist camera has a different native size.
-    LiveNoMotionDiagnosticPolicy.CAMERAS = (capture_camera_id,)
+    # Table+side may be requested together because both fixed cameras have the
+    # same pinned native size. Wrist remains a separate single-camera capture.
+    LiveNoMotionDiagnosticPolicy.CAMERAS = selected_camera_ids
     LiveNoMotionDiagnosticPolicy.IMAGE_SIZE = tuple(
         int(value) for value in capture_image_size
     )
     # If the base hardware policy uses reduced queue-poll previews, keep them
     # on the same explicitly selected stream. In particular, a wrist/side-only
     # approved diagnostic must never inherit the base policy's table preview.
-    LiveNoMotionDiagnosticPolicy.QUEUE_POLL_CAMERAS = (capture_camera_id,)
+    LiveNoMotionDiagnosticPolicy.QUEUE_POLL_CAMERAS = (selected_camera_ids[0],)
     return LiveNoMotionDiagnosticPolicy
 
 
@@ -674,6 +788,14 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--aux-camera",
+        choices=("side", "wrist"),
+        help=(
+            "optional capture-only view; only --capture-camera table with side "
+            "is supported because wrist has a different native resolution"
+        ),
+    )
+    parser.add_argument(
         "--vision",
         choices=("hybrid-geometry", "yolo11n"),
         default="hybrid-geometry",
@@ -731,7 +853,23 @@ def main(
 ) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
-    camera_spec = _capture_camera_spec(args.capture_camera)
+    capture_camera_ids = (
+        (args.capture_camera,)
+        if args.aux_camera is None
+        else (args.capture_camera, args.aux_camera)
+    )
+    try:
+        camera_specs = _capture_camera_specs(capture_camera_ids)
+    except ValueError as exc:
+        parser.error(str(exc))
+    capture_image_size = tuple(
+        next(iter(camera_specs.values()))["image_size_wh"]
+    )
+    inference_camera_ids = tuple(
+        camera_id
+        for camera_id, spec in camera_specs.items()
+        if bool(spec["provider_inference_enabled"])
+    )
     if args.capture_camera != "table" and (
         args.vision != "hybrid-geometry" or args.vision_checkpoint is not None
     ):
@@ -760,13 +898,24 @@ def main(
                     **environment_summary,
                     "vision": args.vision,
                     "capture_camera": args.capture_camera,
-                    "capture_image_size_wh": list(camera_spec["image_size_wh"]),
-                    "provider_inference_enabled": camera_spec[
-                        "provider_inference_enabled"
+                    "capture_cameras": list(capture_camera_ids),
+                    "auxiliary_capture_only_cameras": [
+                        camera_id
+                        for camera_id in capture_camera_ids
+                        if camera_id not in inference_camera_ids
                     ],
-                    "trusted_for_motion_coordinates": camera_spec[
-                        "trusted_for_motion_coordinates"
+                    "capture_image_size_wh": list(capture_image_size),
+                    "provider_inference_enabled": bool(inference_camera_ids),
+                    "provider_inference_cameras": list(inference_camera_ids),
+                    "trusted_for_motion_coordinate_cameras": [
+                        camera_id
+                        for camera_id, spec in camera_specs.items()
+                        if bool(spec["trusted_for_motion_coordinates"])
                     ],
+                    "trusted_for_motion_coordinates": all(
+                        bool(spec["trusted_for_motion_coordinates"])
+                        for spec in camera_specs.values()
+                    ),
                     "maximum_snapshots": args.max_snapshots,
                     "output_dir": str(args.output_dir.expanduser().resolve()),
                 },
@@ -780,7 +929,7 @@ def main(
         maximum_snapshots=args.max_snapshots,
         cube_edge_mm=args.cube_mm,
         provenance=_repository_provenance(profile_path),
-        capture_camera_spec=camera_spec,
+        capture_camera_specs=camera_specs,
     )
     official_run = (
         _load_official_run(profile_path)
@@ -791,8 +940,8 @@ def main(
     official_run.Policy = diagnostic_policy_class(
         original_policy,
         recorder,
-        capture_camera_id=args.capture_camera,
-        capture_image_size=tuple(camera_spec["image_size_wh"]),
+        capture_camera_ids=capture_camera_ids,
+        capture_image_size=capture_image_size,
     )
     previous_argv = sys.argv
     try:

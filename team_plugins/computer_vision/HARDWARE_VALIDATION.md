@@ -167,6 +167,34 @@ pose in millimetres/WPR degrees. Their source timestamp is the backend
 observation time copied into the adapter, **not** a measured camera exposure
 time. Use it for replay/provenance, not as proof of camera/robot synchronization.
 
+### Paired table and side evidence
+
+When the blue cable or robot blocks the table view, collect the fixed side view
+in the same no-motion observation without giving it pose or motion authority:
+
+```bash
+uv run --project hardware/fanuc_cell python -m \
+  team_plugins.computer_vision.live_no_motion_diagnostic \
+  --output-dir /mnt/c/path/outside-the-repository/live-table-side-01 \
+  --cube-mm 16 --capture-camera table --aux-camera side \
+  --max-snapshots 10
+```
+
+Both fixed cameras are requested at their pinned 1920x1080 size. The selected
+provider receives **table only**; side is saved as capture-only evidence with
+its own calibration ID and is not used to create, average, or repair a grasp
+pose. A missing table or side frame makes that snapshot an explicit recording
+failure while preserving the already-constructed measured hold row.
+
+Do not pair wrist with table in this command. Wrist is pinned at 1280x720, the
+client exposes one RGB request size, and the diagnostic rejects that mixed-size
+pair instead of rescaling calibration. Capture wrist separately with
+`--capture-camera wrist` while the arm is settled. The backend timestamp is not
+an exposure timestamp, so even paired table/side files are evidence from one
+backend observation—not proof of sensor synchronization. Do not enable side or
+wrist coordinates for motion until their bias, timing, and pose error are
+measured independently.
+
 For table, side, and wrist cameras, save:
 
 - decoded full-frame RGB at the requested resolution, and separately record

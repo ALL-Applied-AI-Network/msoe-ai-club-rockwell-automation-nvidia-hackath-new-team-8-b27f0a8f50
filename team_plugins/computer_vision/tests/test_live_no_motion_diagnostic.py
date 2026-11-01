@@ -119,6 +119,17 @@ class LiveNoMotionDiagnosticTests(unittest.TestCase):
         self.assertTrue(table["trusted_for_motion_coordinates"])
         self.assertFalse(side["trusted_for_motion_coordinates"])
 
+    def test_paired_capture_accepts_table_side_and_rejects_wrist(self):
+        specs = diagnostic._capture_camera_specs(("table", "side"))
+
+        self.assertEqual(tuple(specs), ("table", "side"))
+        self.assertEqual(specs["table"]["image_size_wh"], (1920, 1080))
+        self.assertEqual(specs["side"]["image_size_wh"], (1920, 1080))
+        self.assertTrue(specs["table"]["provider_inference_enabled"])
+        self.assertFalse(specs["side"]["provider_inference_enabled"])
+        with self.assertRaisesRegex(ValueError, "table\+side"):
+            diagnostic._capture_camera_specs(("table", "wrist"))
+
     def test_loaded_profile_validation_rejects_cached_wrong_profile(self):
         wrong_profile = SimpleNamespace(
             source_path=str(diagnostic.REPOSITORY_ROOT / "wrong-profile.json"),
@@ -355,6 +366,127 @@ class LiveNoMotionDiagnosticTests(unittest.TestCase):
                 ]
             )
 
+    def test_paired_table_side_capture_runs_table_inference_only(self):
+        class _CameraRecordingPolicy(_FakePolicy):
+            def __init__(self):
+                super().__init__()
+                self.inference_camera_sets = []
+
+            def _detect_scene_views(self, obs):
+                self.inference_camera_sets.append(tuple(self.CAMERAS))
+                return super()._detect_scene_views(obs)
+
+        def spec(camera_id: str, *, inference: bool, trusted: bool) -> dict:
+            return {
+                "camera_id": camera_id,
+                "image_size_wh": (8, 6),
+                "calibration_id": f"sidclab-cameras.json:{camera_id}",
+                "calibration_solved": "2026-10-07",
+                "calibration_rms_px": 0.5 if camera_id == "table" else 3.99,
+                "transform_semantics": "T_base_cam: camera -> base",
+                "moving_camera": False,
+                "trusted_for_motion_coordinates": trusted,
+                "provider_inference_enabled": inference,
+            }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            recorder = diagnostic.SnapshotRecorder(
+                Path(temporary),
+                maximum_snapshots=1,
+                cube_edge_mm=16,
+                provenance={},
+                capture_camera_specs={
+                    "table": spec("table", inference=True, trusted=True),
+                    "side": spec("side", inference=False, trusted=False),
+                },
+            )
+            policy_class = diagnostic.diagnostic_policy_class(
+                _CameraRecordingPolicy,
+                recorder,
+                capture_camera_ids=("table", "side"),
+                capture_image_size=(8, 6),
+            )
+            policy = policy_class()
+            obs = _observation()
+            obs["images"]["side"] = np.full((6, 8, 3), 127, dtype=np.uint8)
+
+            result = policy.act(obs)
+
+            self.assertIs(result, policy.hold_action)
+            self.assertEqual(policy.CAMERAS, ("table", "side"))
+            self.assertEqual(policy.QUEUE_POLL_CAMERAS, ("table",))
+            self.assertEqual(policy.inference_camera_sets, [("table",)])
+            self.assertEqual(policy.perception_calls, 1)
+            record = json.loads(
+                (Path(temporary) / "snapshot-000-record.json").read_text()
+            )
+            self.assertEqual(record["status"], "ok")
+            self.assertTrue(record["provider_inference_ran"])
+            self.assertEqual(
+                [frame["camera_id"] for frame in record["frames"]],
+                ["table", "side"],
+            )
+            self.assertTrue(
+                record["frames"][0]["calibration"][
+                    "trusted_for_motion_coordinates"
+                ]
+            )
+            self.assertFalse(
+                record["frames"][1]["calibration"][
+                    "trusted_for_motion_coordinates"
+                ]
+            )
+            self.assertTrue(
+                record["frames"][0]["calibration"]["provider_inference_enabled"]
+            )
+            self.assertFalse(
+                record["frames"][1]["calibration"]["provider_inference_enabled"]
+            )
+            self.assertTrue((Path(temporary) / "snapshot-000-table.png").is_file())
+            self.assertTrue((Path(temporary) / "snapshot-000-side.png").is_file())
+
+    def test_paired_capture_requires_both_frames_without_partial_files(self):
+        table_spec = {
+            "camera_id": "table",
+            "image_size_wh": (8, 6),
+            "calibration_id": "sidclab-cameras.json:table",
+            "calibration_solved": "test",
+            "calibration_rms_px": 0.5,
+            "transform_semantics": "T_base_cam: camera -> base",
+            "moving_camera": False,
+            "trusted_for_motion_coordinates": True,
+            "provider_inference_enabled": True,
+        }
+        side_spec = {
+            **table_spec,
+            "camera_id": "side",
+            "calibration_id": "sidclab-cameras.json:side",
+            "trusted_for_motion_coordinates": False,
+            "provider_inference_enabled": False,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            recorder = diagnostic.SnapshotRecorder(
+                Path(temporary),
+                maximum_snapshots=1,
+                cube_edge_mm=16,
+                provenance={},
+                capture_camera_specs={"table": table_spec, "side": side_spec},
+            )
+            policy_class = diagnostic.diagnostic_policy_class(
+                _FakePolicy,
+                recorder,
+                capture_camera_ids=("table", "side"),
+                capture_image_size=(8, 6),
+            )
+            policy = policy_class()
+
+            result = policy.act(_observation())
+
+            self.assertIs(result, policy.hold_action)
+            self.assertEqual(recorder.failures, 1)
+            self.assertFalse((Path(temporary) / "snapshot-000-table.png").exists())
+            self.assertFalse((Path(temporary) / "snapshot-000-side.png").exists())
+
     def test_provider_failure_is_recorded_and_hold_is_still_returned(self):
         with tempfile.TemporaryDirectory() as temporary:
             recorder = _recorder(Path(temporary))
@@ -533,6 +665,59 @@ class LiveNoMotionDiagnosticTests(unittest.TestCase):
             self.assertFalse(summary["provider_inference_enabled"])
             self.assertFalse(summary["trusted_for_motion_coordinates"])
 
+    def test_table_side_dry_run_reports_table_only_inference(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = diagnostic.main(
+                    [
+                        "--output-dir",
+                        temporary,
+                        "--cube-mm",
+                        "16",
+                        "--capture-camera",
+                        "table",
+                        "--aux-camera",
+                        "side",
+                        "--dry-run",
+                    ],
+                    official_run_loader=lambda: self.fail(
+                        "dry-run must not load the official client"
+                    ),
+                )
+
+            self.assertEqual(result, 0)
+            summary = json.loads(output.getvalue())
+            self.assertEqual(summary["capture_cameras"], ["table", "side"])
+            self.assertEqual(summary["provider_inference_cameras"], ["table"])
+            self.assertEqual(summary["auxiliary_capture_only_cameras"], ["side"])
+            self.assertEqual(
+                summary["trusted_for_motion_coordinate_cameras"], ["table"]
+            )
+            self.assertFalse(summary["trusted_for_motion_coordinates"])
+            self.assertEqual(summary["capture_image_size_wh"], [1920, 1080])
+
+    def test_table_wrist_pair_is_rejected_before_loading_client(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    diagnostic.main(
+                        [
+                            "--output-dir",
+                            temporary,
+                            "--cube-mm",
+                            "16",
+                            "--capture-camera",
+                            "table",
+                            "--aux-camera",
+                            "wrist",
+                            "--dry-run",
+                        ],
+                        official_run_loader=lambda: self.fail(
+                            "invalid camera pairing must not load the client"
+                        ),
+                    )
+
     def test_main_selects_profile_before_loader_and_restores_policy(self):
         with tempfile.TemporaryDirectory() as temporary:
             fake_run = SimpleNamespace(Policy=_FakePolicy)
@@ -556,17 +741,19 @@ class LiveNoMotionDiagnosticTests(unittest.TestCase):
             ):
                 with patch.object(
                     diagnostic,
-                    "_capture_camera_spec",
+                    "_capture_camera_specs",
                     return_value={
-                        "camera_id": "table",
-                        "image_size_wh": (8, 6),
-                        "calibration_id": "sidclab-cameras.json:table",
-                        "calibration_solved": "test",
-                        "calibration_rms_px": 0.5,
-                        "transform_semantics": "T_base_cam: camera -> base",
-                        "moving_camera": False,
-                        "trusted_for_motion_coordinates": True,
-                        "provider_inference_enabled": True,
+                        "table": {
+                            "camera_id": "table",
+                            "image_size_wh": (8, 6),
+                            "calibration_id": "sidclab-cameras.json:table",
+                            "calibration_solved": "test",
+                            "calibration_rms_px": 0.5,
+                            "transform_semantics": "T_base_cam: camera -> base",
+                            "moving_camera": False,
+                            "trusted_for_motion_coordinates": True,
+                            "provider_inference_enabled": True,
+                        }
                     },
                 ):
                     result = diagnostic.main(

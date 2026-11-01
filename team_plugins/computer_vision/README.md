@@ -348,8 +348,17 @@ Use `--capture-camera side` or `--capture-camera wrist` for a separate
 native-calibration-resolution evidence run. Those auxiliary modes are
 explicitly `capture_only`: they save decoded RGB plus calibration and measured
 robot-state provenance, but do not run the table provider, publish an object
-pose, or fuse cameras. The official client has one RGB request size, so the
-tool intentionally requests one camera per process. See
+pose, or fuse cameras. For a stationary cable-occlusion experiment, add
+`--aux-camera side` to the default table command. Table and side share the
+pinned 1920x1080 request size, so both views are saved in one record; only table
+enters provider inference and remains the sole motion-coordinate source. Both
+images are required before any files for that snapshot are written.
+
+The official client has one RGB request size. Table+wrist pairing is therefore
+rejected because wrist is pinned at 1280x720; use the separate wrist command
+instead. Paired backend observations still lack independent camera exposure
+timestamps, so this mode measures coverage/dropout evidence, not synchronized
+fusion. See
 `HARDWARE_VALIDATION.md` for commands and the still-unverified approved-camera
 backend requirement.
 

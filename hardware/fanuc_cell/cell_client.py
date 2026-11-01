@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import time
 
@@ -145,6 +146,22 @@ def _use_queue_preview(policy, last_chunk_rows: int) -> bool:
     return int(last_chunk_rows) >= minimum_rows
 
 
+def _emit_client_event(event: str, **fields) -> None:
+    """Emit machine-readable client telemetry beside the policy event stream."""
+
+    print(
+        json.dumps(
+            {
+                "event": event,
+                "event_wall_time_s": time.time(),
+                **fields,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
+
 def run_trial(cell: CellClient, policy, trial: dict) -> None:
     offset, rtt = cell.clock()
     log.info("cell clock offset %+.3f s, round trip %.0f ms", offset, rtt * 1000)
@@ -153,22 +170,28 @@ def run_trial(cell: CellClient, policy, trial: dict) -> None:
     log.info("trial %s (layout %s) running", trial["trial_id"], trial["layout"])
     dt = getattr(policy, "DT", 0.1)
     prefetch = getattr(policy, "PREFETCH", False)
-    took = None  # seconds from an observation to its actions reaching the cell (act + network), measured
+    # Measured end-to-end time for an action-producing iteration: final queue
+    # preview (when used), full policy observation, inference, and action POST.
+    # Queue-only polling iterations are intentionally excluded.
+    took = None
     last = 0  # actions in the last chunk
     while True:
+        pipeline_started = time.monotonic()
         used_queue_preview = _use_queue_preview(policy, last)
         obs = _observe_policy(cell, policy, queue_poll=used_queue_preview)
         if obs["trial"] is None or obs["trial"]["status"] != "running":
             log.info("trial %s ended", trial["trial_id"])
             return
-        # PREFETCH: plan the next actions while the last ones still play. True starts when what is left covers
-        # the time act() takes (measured); a number starts when that many actions are left.
+        # PREFETCH: plan the next actions while the last ones still play. True
+        # starts when what is left covers the measured end-to-end dispatch
+        # pipeline; a number starts when that many actions are left.
         if prefetch is True:
             lead = 0 if took is None else int(np.ceil(took / dt)) + 2
             if last < 2 * lead:  # too few actions to cover act(): planning ahead would only cut them short
                 lead = 0
         else:
             lead = int(prefetch or 0)
+        preview_queue_depth = int(obs["queued"]) if used_queue_preview else None
         if obs["status"] != "running" or obs["queued"] > lead:
             time.sleep(0.01)  # wait until the last actions have (almost) played out
             continue
@@ -183,23 +206,42 @@ def run_trial(cell: CellClient, policy, trial: dict) -> None:
             if obs["status"] != "running" or obs["queued"] > lead:
                 time.sleep(0.01)
                 continue
-        t0 = time.time()
         chunk = np.asarray(policy.act(obs), dtype=float)
         if chunk.ndim == 1:  # one target
             chunk = chunk[None]
         obs_t = obs["t"] if lead else None  # the cell drops what is left and skips rows already in the past
-        last = len(chunk)
-        PREFETCH_STATS["chunks"] += 1
-        PREFETCH_STATS["ahead"] += bool(lead)
-        PREFETCH_STATS["short"] += bool(prefetch is True and took is not None and lead == 0)
+        had_timing_sample = took is not None
         try:
             if getattr(policy, "ACTION", "joints") == "tcp":
                 cell.act_tcp(chunk, dt, obs_t)
             else:
                 cell.act(chunk, dt, obs_t)
-            took = time.time() - t0 if took is None else 0.7 * took + 0.3 * (time.time() - t0)
         except RuntimeError as e:  # the trial can end between observe and act
             log.warning("%s", e)
+            continue
+        pipeline_elapsed = time.monotonic() - pipeline_started
+        took = (
+            pipeline_elapsed
+            if took is None
+            else 0.7 * took + 0.3 * pipeline_elapsed
+        )
+        last = len(chunk)
+        PREFETCH_STATS["chunks"] += 1
+        PREFETCH_STATS["ahead"] += bool(lead)
+        PREFETCH_STATS["short"] += bool(
+            prefetch is True and had_timing_sample and lead == 0
+        )
+        _emit_client_event(
+            "client_action_dispatch",
+            action_rows=last,
+            dispatch_pipeline_ewma_s=round(float(took), 6),
+            dispatch_pipeline_s=round(float(pipeline_elapsed), 6),
+            full_observation_queue_depth=int(obs["queued"]),
+            prefetch_lead_rows=int(lead),
+            preview_queue_depth=preview_queue_depth,
+            queue_preview_used=bool(used_queue_preview),
+            replacement_used=obs_t is not None,
+        )
 
 
 def run_all(cell: CellClient, policy) -> None:

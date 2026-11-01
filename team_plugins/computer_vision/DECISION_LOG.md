@@ -319,3 +319,42 @@
 - Decision: retain the option for live no-motion evidence collection. Do not
   proceed to hover/contact motion until native live records show complete,
   stable one-to-one detections and calibrated poses within the grasp budget.
+
+## 2026-11-01 — Full Rollout 5 YOLO11n shadow replay
+
+- Hypothesis: the seed-55 YOLO11n profile can corroborate the existing
+  calibrated-geometry provider continuously enough to justify promotion from
+  no-motion evidence collection.
+- Setup: replay every one of 3,389 frames from the hand-free compressed
+  `Rollout5TableCam.mp4` recording through both providers at clean commit
+  `7538013`. Both runs used the same capture SHA-256, calibration SHA-256,
+  decoded frame indices, timestamps, 16 mm cube profile, and per-frame RGB
+  hashes. The YOLO replay pinned checkpoint SHA-256
+  `010bb71b...788fbb` and recorded provider disagreements as explicit
+  abstentions.
+- Result: the baseline returned a validated scene on 3,389/3,389 frames. The
+  strict YOLO+geometry profile accepted 2,199/3,389 frames (64.89%) and
+  abstained on 1,190 (35.11%), across 125 streaks with a maximum streak of 86
+  consecutive processed frames (8.6 seconds at the decoded 10 Hz rate).
+- Timing: local CPU replay latency was 194.78 ms mean for the baseline and
+  104.30 ms mean for the YOLO profile; YOLO median/p95 were 80.32/196.36 ms.
+  These timings exclude camera/network/controller latency and do not establish
+  accuracy.
+- Provider disagreement: on accepted frames, the two providers had different
+  object counts on 124 frames and left 126 objects unmatched. Matched position
+  deltas were exactly zero because the YOLO profile deliberately retains the
+  existing calibrated geometry for pose; this is not independent pose
+  validation.
+- Baseline caution: the cube-only rollout also produced 75 screw-class
+  observations, all outside the pickup region, plus substantial off-region
+  component/track churn. The current cube task adapter excludes those screw
+  observations, so they did not become executable targets.
+- Evidence limit: the input is a resized/compressed visualization video with
+  no independent object or robot-base pose truth. Acceptance is availability,
+  not recall, and provider agreement is not correctness.
+- Decision: do not promote YOLO11n to physical motion authority. Keep the
+  geometry baseline as the current hardware default and YOLO11n as an
+  experimental shadow/no-motion profile. Before reconsidering, evaluate native
+  lossless frames with reviewed cube references and a separate real-screw
+  positive/negative set, then measure dropout duration and robot-base pose
+  error against independent truth.

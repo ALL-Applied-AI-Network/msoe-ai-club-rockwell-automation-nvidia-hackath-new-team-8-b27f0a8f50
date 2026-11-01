@@ -80,6 +80,14 @@ registered depth and should not be treated as the default.
   reconstructed held-out full-frame replay abstained because one YOLO box had
   no matching geometry detection. This validates the integration and its
   failure behavior, not physical pose accuracy or permission for motion.
+- A later exact-frame shadow replay covered all 3,389 frames of the hand-free
+  compressed Rollout 5 table video at clean commit `7538013`. The strict
+  YOLO+geometry profile accepted 2,199 frames (64.89%) and explicitly abstained
+  on 1,190 (35.11%); the longest abstention streak was 86 frames, or 8.6
+  seconds at the decoded 10 Hz rate. Its local CPU latency was 104.30 ms mean,
+  80.32 ms median, and 196.36 ms p95. This is strong evidence that the current
+  strict profile is not continuously available enough for motion, but it is
+  still not ground-truth detection or pose accuracy.
 
 - Before this experiment, rollout-4 compressed replay under the 16 mm cube
   profile found exactly one pickable cube of each color on 121/123 sampled
@@ -183,7 +191,7 @@ experiment are still required.
 | YOLOE-26s segmentation + calibrated geometry | Native tiled RGB; text or visual prompts; GPU preferred | Pretrained instance masks under appearance variation; could bootstrap labels | Severe measured sim-to-real dropout; eight-tile latency; AGPL/enterprise licensing | Rejected for runtime: 27/27 synthetic but at most 1/17 provisional real references |
 | FoundationPose | RGB, RGB-aligned metric depth, intrinsics, per-instance mask, and either CAD mesh or model-free RGB-D-mask references; NVIDIA GPU stack | Register/track object-to-camera pose plus model score | No archived depth; small/reflective screw; upstream mask source still required; current runtime compatibility unverified | Blocked pending depth/runtime audit |
 | FastSAM mask proposals | RGB plus optional box/point/text prompt; GPU preferred | High-coverage class-agnostic mask proposals; possible unknown-object or label bootstrap | No catalog identity or pose; 160 unmatched proposals at the 16/17-coverage setting; license ambiguity/Ultralytics terms | Separate experiment only; measured filter does not beat control |
-| Fine-tuned YOLO11n detector + calibrated geometry | Grouped reviewed boxes, pretrained checkpoint, GPU for training; ordinary geometry downstream | Fast closed-set cube/screw boxes; strongest tested neural transfer | 74.3% mean cube recall on provisional test; screw recall and physical pose unmeasured; strict corroboration can abstain on false boxes; AGPL/Enterprise gate | Experimental opt-in no-motion evidence profile; baseline remains default and motion is not yet justified |
+| Fine-tuned YOLO11n detector + calibrated geometry | Grouped reviewed boxes, pretrained checkpoint, GPU for training; ordinary geometry downstream | Fast closed-set cube/screw boxes; strongest tested neural transfer | 74.3% mean cube recall on provisional test; screw recall and physical pose unmeasured; strict full-video corroboration abstained on 35.11% of frames with an 86-frame worst streak; AGPL/Enterprise gate | Experimental shadow/no-motion profile; baseline remains default and motion is not justified |
 | GigaPose RGB+CAD | Detection/mask/ROI, CAD templates, older pinned stack | RGB-only novel-object pose | Still needs detection; unnecessary unique 6D pose; integration burden | No branch before planar model fails |
 
 ## FoundationPose: verified prerequisite gate
