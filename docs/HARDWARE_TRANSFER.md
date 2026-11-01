@@ -159,6 +159,19 @@ The policy cannot declare the rollout complete. After verifying the task, it
 must hold still by returning the current safe pose until the operator scores or
 stops the rollout.
 
+Action generation is stateful: producing a chunk can advance phase, dwell, and
+gripper-command state before the HTTP action request returns. The client
+therefore retries connection failures only for read-only `GET` requests. A
+failed or ambiguous action `POST` triggers one read-only run-status query and
+never another `Policy.act()` call. If that exact trial is definitively no longer
+running, the client treats it as the normal end-of-trial race and returns so
+later trials can proceed. If the trial is still running, absent, malformed, or
+the status query fails, the client terminates; restart it so `Policy.reset()`
+runs before another hardware action. The current API exposes no action sequence
+ID or idempotency key, so silently retrying a `POST` could duplicate an accepted
+command whose response was lost, while regenerating a chunk could skip state
+already advanced inside the policy.
+
 ### Enforced mock limits
 
 The pinned upstream

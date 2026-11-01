@@ -375,10 +375,21 @@ def _verify_replay(
     }
     if components != [expected_component]:
         raise AnnotationBundleError("evaluation provider does not match replay report")
-    if evaluation_provenance.get("source_run_ids") != [
-        f"capture-sha256:{capture_sha256}"
-    ]:
-        raise AnnotationBundleError("evaluation capture does not match replay report")
+    source_run_ids = _required_list(
+        evaluation_provenance.get("source_run_ids"),
+        "evaluation.provenance.source_run_ids",
+    )
+    expected_capture_source = f"capture-sha256:{capture_sha256}"
+    legacy_source_run_ids = [expected_capture_source]
+    current_source_run_ids = [
+        expected_capture_source,
+        f"calibration-sha256:{calibration_sha256}",
+    ]
+    if source_run_ids not in (legacy_source_run_ids, current_source_run_ids):
+        raise AnnotationBundleError(
+            "evaluation source-run provenance does not exactly match replay "
+            "capture/calibration"
+        )
 
     if verify_local_artifacts:
         report_profile = _required_mapping(

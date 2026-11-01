@@ -337,6 +337,75 @@ class AnnotationBundleTests(unittest.TestCase):
                 self._prepare(fixture, output)
             self.assertFalse(output.exists())
 
+    def test_current_capture_and_calibration_source_provenance_is_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = self._fixture(root)
+            evaluation_path = fixture["replay"] / "evaluation-result.v1.json"
+            evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+            evaluation["provenance"]["source_run_ids"] = [
+                f"capture-sha256:{_sha256(fixture['capture'])}",
+                f"calibration-sha256:{_sha256(fixture['calibration'])}",
+            ]
+            evaluation_path.write_text(
+                json.dumps(evaluation, sort_keys=True), encoding="utf-8"
+            )
+
+            report = self._prepare(fixture, root / "bundle")
+
+            self.assertEqual(report["selected_frame_indices"], [0])
+
+    def test_source_provenance_rejects_wrong_extra_duplicate_and_reordered_ids(self):
+        cases = {
+            "wrong calibration": lambda capture_id, calibration_id: [
+                capture_id,
+                "calibration-sha256:" + "f" * 64,
+            ],
+            "extra": lambda capture_id, calibration_id: [
+                capture_id,
+                calibration_id,
+                "unexpected-source",
+            ],
+            "duplicate": lambda capture_id, calibration_id: [
+                capture_id,
+                capture_id,
+            ],
+            "reordered": lambda capture_id, calibration_id: [
+                calibration_id,
+                capture_id,
+            ],
+        }
+        for label, build_ids in cases.items():
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    fixture = self._fixture(root)
+                    capture_id = f"capture-sha256:{_sha256(fixture['capture'])}"
+                    calibration_id = (
+                        "calibration-sha256:"
+                        f"{_sha256(fixture['calibration'])}"
+                    )
+                    evaluation_path = (
+                        fixture["replay"] / "evaluation-result.v1.json"
+                    )
+                    evaluation = json.loads(
+                        evaluation_path.read_text(encoding="utf-8")
+                    )
+                    evaluation["provenance"]["source_run_ids"] = build_ids(
+                        capture_id, calibration_id
+                    )
+                    evaluation_path.write_text(
+                        json.dumps(evaluation, sort_keys=True), encoding="utf-8"
+                    )
+                    output = root / "bundle"
+
+                    with self.assertRaisesRegex(
+                        AnnotationBundleError,
+                        "source-run provenance does not exactly match",
+                    ):
+                        self._prepare(fixture, output)
+                    self.assertFalse(output.exists())
+
     def test_redecoded_pixels_must_match_the_replay_input_hash(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

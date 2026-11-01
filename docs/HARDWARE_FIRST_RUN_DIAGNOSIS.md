@@ -212,12 +212,25 @@ uv run --project hardware/fanuc_cell python \
 The report groups action rows by phase, action kind, and motion profile;
 summarizes terminal target padding and observed queue depths; counts camera
 visibility retries; preserves blocked reasons; and shows how much of the new
-telemetry was actually present. Its `possible_queue_starvation` and
+telemetry was actually present. The `client_dispatches` section separately
+summarizes the complete camera-preview/full-frame/inference/POST pipeline,
+EWMA timing, action interval, action rows, prefetch lead, queue depths, and
+preview/replacement usage. New client logs record `action_interval_s`, so the
+analyzer can compare measured pipeline seconds with the queue time observed at
+the preview response. It reports a conservative `approached` indicator at 80%
+and an `exceeded` indicator at 100%; older logs without the interval remain
+explicitly unassessable instead of assuming 0.1 seconds per action row.
+
+Its `possible_queue_starvation` and
 `repeated_micro_corrections` fields are diagnostic leads, not conclusions:
 camera/grasp/release boundaries intentionally allow the queue to drain. Compare
 each flagged phase occurrence's source, line range, and parsed timestamp prefix
 with the recorded video before changing a motion profile. Reusing a phase name
-for another cube does not combine those occurrences. The analyzer verifies each
-input's hash before and after parsing, rejects a changing source, and creates an
-explicit output path exclusively instead of overwriting it. Older logs remain
-readable, but missing telemetry stays explicit rather than being guessed.
+for another cube does not combine those occurrences. The dispatch budget is
+also a diagnostic lead: it compares the whole pipeline with queue time
+remaining after the preview request, so it is conservative and does not prove
+the controller paused. Correlate its exact source line with video and phase
+events. The analyzer verifies each input's hash before and after parsing,
+rejects a changing source, and creates an explicit output path exclusively
+instead of overwriting it. Older logs remain readable, but missing telemetry
+stays explicit rather than being guessed.

@@ -136,6 +136,142 @@ class HardwareMotionLogAnalyzerTests(unittest.TestCase):
         )
         self.assertFalse(report["indicators"]["possible_queue_starvation"])
         self.assertFalse(report["indicators"]["repeated_micro_corrections"])
+        self.assertEqual(report["client_dispatches"]["events"], 0)
+        self.assertEqual(
+            report["client_dispatches"]["dispatch_pipeline_s"]["observations"],
+            0,
+        )
+        self.assertEqual(
+            report["client_dispatches"]["indicators"]["latency_budget"],
+            {
+                "preview_events": 0,
+                "evaluated_events": 0,
+                "unassessable_events": 0,
+                "approached_events": 0,
+                "exceeded_events": 0,
+                "threshold_fraction": 0.8,
+                "evidence": [],
+            },
+        )
+
+    def test_dispatch_pipeline_and_queue_budget_are_measured_without_guessing(self) -> None:
+        events = [
+            {
+                "event": "client_action_dispatch",
+                "action_rows": 32,
+                "action_interval_s": 0.1,
+                "dispatch_pipeline_s": 0.2,
+                "dispatch_pipeline_ewma_s": 0.2,
+                "prefetch_lead_rows": 0,
+                "preview_queue_depth": None,
+                "full_observation_queue_depth": 0,
+                "queue_preview_used": False,
+                "replacement_used": False,
+            },
+            {
+                "event": "client_action_dispatch",
+                "action_rows": 32,
+                "action_interval_s": 0.1,
+                "dispatch_pipeline_s": 0.45,
+                "dispatch_pipeline_ewma_s": 0.3,
+                "prefetch_lead_rows": 5,
+                "preview_queue_depth": 5,
+                "full_observation_queue_depth": 4,
+                "queue_preview_used": True,
+                "replacement_used": True,
+            },
+            {
+                "event": "client_action_dispatch",
+                "action_rows": 32,
+                "action_interval_s": 0.1,
+                "dispatch_pipeline_s": 0.25,
+                "dispatch_pipeline_ewma_s": 0.32,
+                "prefetch_lead_rows": 0,
+                "preview_queue_depth": 2,
+                "full_observation_queue_depth": 1,
+                "queue_preview_used": True,
+                "replacement_used": False,
+            },
+            {
+                "event": "client_action_dispatch",
+                "action_rows": 16,
+                "dispatch_pipeline_s": 0.3,
+                "dispatch_pipeline_ewma_s": 0.3,
+                "prefetch_lead_rows": 3,
+                "preview_queue_depth": 3,
+                "full_observation_queue_depth": 2,
+                "queue_preview_used": True,
+                "replacement_used": True,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "dispatches.jsonl"
+            path.write_text(
+                "".join(json.dumps(event) + "\n" for event in events),
+                encoding="utf-8",
+            )
+
+            report = analyze_logs([path])
+
+        dispatches = report["client_dispatches"]
+        self.assertEqual(dispatches["events"], 4)
+        self.assertEqual(dispatches["action_rows"]["mean"], 28.0)
+        self.assertEqual(
+            dispatches["dispatch_pipeline_s"],
+            {
+                "observations": 4,
+                "minimum": 0.2,
+                "maximum": 0.45,
+                "mean": 0.3,
+                "median": 0.275,
+                "p95_nearest_rank": 0.45,
+            },
+        )
+        self.assertEqual(dispatches["action_interval_s"]["observations"], 3)
+        self.assertEqual(
+            dispatches["prefetch_lead_rows"]["histogram"],
+            {"0": 2, "3": 1, "5": 1},
+        )
+        self.assertEqual(
+            dispatches["queue_preview_used"],
+            {"true": 3, "false": 1, "missing_or_invalid": 0},
+        )
+        self.assertEqual(
+            dispatches["replacement_used"],
+            {"true": 2, "false": 2, "missing_or_invalid": 0},
+        )
+        self.assertEqual(
+            dispatches["telemetry_coverage"]["action_interval_s"],
+            {"events": 3, "of": 4},
+        )
+        indicators = dispatches["indicators"]
+        self.assertEqual(indicators["zero_lead_long_dispatches"], 1)
+        self.assertEqual(
+            indicators["zero_lead_long_dispatch_minimum_action_rows"], 8
+        )
+        self.assertEqual(
+            indicators["zero_lead_long_dispatch_evidence"][0]["line"], 3
+        )
+        budget = indicators["latency_budget"]
+        self.assertEqual(budget["preview_events"], 3)
+        self.assertEqual(budget["evaluated_events"], 2)
+        self.assertEqual(budget["unassessable_events"], 1)
+        self.assertEqual(budget["approached_events"], 1)
+        self.assertEqual(budget["exceeded_events"], 1)
+        self.assertEqual(
+            [row["classification"] for row in budget["evidence"]],
+            ["approached", "exceeded"],
+        )
+        self.assertEqual(
+            budget["evidence"][0]["pipeline_fraction_of_available_time"],
+            0.9,
+        )
+        self.assertEqual(
+            budget["evidence"][1]["pipeline_fraction_of_available_time"],
+            1.25,
+        )
+        self.assertIn("not proof", indicators["interpretation"])
+        self.assertIn("without action_interval_s", indicators["interpretation"])
 
     def test_three_distinct_carry_occurrences_do_not_combine_into_a_flag(self) -> None:
         events = [

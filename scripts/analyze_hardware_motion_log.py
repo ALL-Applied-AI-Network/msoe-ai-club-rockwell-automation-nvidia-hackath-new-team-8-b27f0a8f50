@@ -20,10 +20,12 @@ import re
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SHORT_MOTION_MAX_GEOMETRIC_ROWS = 3
 REPEATED_SHORT_MOTION_CALLS_PER_OCCURRENCE = 2
 ZERO_QUEUE_MOTION_CALLS_PER_OCCURRENCE = 3
+LONG_DISPATCH_MIN_ACTION_ROWS = 8
+LATENCY_BUDGET_APPROACH_FRACTION = 0.8
 VISIBILITY_RETRY_EVENTS = (
     "pre_descent_visibility_retry",
     "post_place_visibility_retry",
@@ -161,6 +163,24 @@ def _nonnegative_int(value: Any) -> int | None:
     return int(number)
 
 
+def _positive_number(value: Any) -> float | None:
+    number = _finite_number(value)
+    if number is None or number <= 0:
+        return None
+    return number
+
+
+def _nonnegative_number(value: Any) -> float | None:
+    number = _finite_number(value)
+    if number is None or number < 0:
+        return None
+    return number
+
+
+def _boolean(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
 def _event_from_line(line: str) -> tuple[dict[str, Any] | None, bool]:
     """Return the first JSON event object and whether malformed JSON was seen."""
 
@@ -217,6 +237,71 @@ def _depth_summary(depths: Iterable[int]) -> dict[str, Any]:
     }
 
 
+def _number_summary(values: Iterable[float]) -> dict[str, Any]:
+    samples = sorted(float(value) for value in values)
+    if not samples:
+        return {
+            "observations": 0,
+            "minimum": None,
+            "maximum": None,
+            "mean": None,
+            "median": None,
+            "p95_nearest_rank": None,
+        }
+    middle = len(samples) // 2
+    if len(samples) % 2:
+        median = samples[middle]
+    else:
+        median = (samples[middle - 1] + samples[middle]) / 2.0
+    p95_index = max(0, math.ceil(0.95 * len(samples)) - 1)
+    return {
+        "observations": len(samples),
+        "minimum": round(samples[0], 6),
+        "maximum": round(samples[-1], 6),
+        "mean": round(sum(samples) / len(samples), 6),
+        "median": round(median, 6),
+        "p95_nearest_rank": round(samples[p95_index], 6),
+    }
+
+
+def _boolean_summary(values: Iterable[bool], total_events: int) -> dict[str, int]:
+    samples = list(values)
+    true_count = sum(samples)
+    return {
+        "true": true_count,
+        "false": len(samples) - true_count,
+        "missing_or_invalid": total_events - len(samples),
+    }
+
+
+def _dispatch_evidence(
+    *,
+    source_index: int,
+    source_path: Path,
+    line_number: int,
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    """Return bounded, directly observed fields for one dispatch indicator."""
+
+    keys = (
+        "action_rows",
+        "dispatch_pipeline_s",
+        "dispatch_pipeline_ewma_s",
+        "action_interval_s",
+        "prefetch_lead_rows",
+        "preview_queue_depth",
+        "full_observation_queue_depth",
+        "queue_preview_used",
+        "replacement_used",
+    )
+    return {
+        "source_index": source_index,
+        "source": str(source_path),
+        "line": line_number,
+        "observed": {key: event.get(key) for key in keys},
+    }
+
+
 def _counter_summary(counter: Counter[str]) -> dict[str, int]:
     return dict(sorted(counter.items()))
 
@@ -251,6 +336,20 @@ def analyze_logs(paths: Iterable[Path]) -> dict[str, Any]:
     short_motion_calls = 0
     telemetry_coverage: Counter[str] = Counter()
     occurrences: list[_PhaseOccurrence] = []
+    dispatch_events = 0
+    dispatch_coverage: Counter[str] = Counter()
+    dispatch_action_rows: list[int] = []
+    dispatch_pipeline_s: list[float] = []
+    dispatch_pipeline_ewma_s: list[float] = []
+    dispatch_action_interval_s: list[float] = []
+    dispatch_lead_rows: list[int] = []
+    dispatch_preview_queue_depths: list[int] = []
+    dispatch_full_queue_depths: list[int] = []
+    dispatch_preview_used: list[bool] = []
+    dispatch_replacement_used: list[bool] = []
+    zero_lead_long_dispatches: list[dict[str, Any]] = []
+    latency_budget_evidence: list[dict[str, Any]] = []
+    latency_budget_unassessable = 0
 
     for source_index, path in enumerate(sources, start=1):
         active_occurrence: _PhaseOccurrence | None = None
@@ -271,6 +370,111 @@ def analyze_logs(paths: Iterable[Path]) -> dict[str, Any]:
                 if event_name == "policy_blocked":
                     reason = str(event.get("reason", "<missing reason>"))
                     blocked_reasons[reason] += 1
+                if event_name == "client_action_dispatch":
+                    dispatch_events += 1
+                    action_rows = _nonnegative_int(event.get("action_rows"))
+                    pipeline_s = _nonnegative_number(
+                        event.get("dispatch_pipeline_s")
+                    )
+                    pipeline_ewma_s = _nonnegative_number(
+                        event.get("dispatch_pipeline_ewma_s")
+                    )
+                    action_interval_s = _positive_number(
+                        event.get("action_interval_s")
+                    )
+                    lead_rows = _nonnegative_int(
+                        event.get("prefetch_lead_rows")
+                    )
+                    preview_queue_depth = _nonnegative_int(
+                        event.get("preview_queue_depth")
+                    )
+                    full_queue_depth = _nonnegative_int(
+                        event.get("full_observation_queue_depth")
+                    )
+                    preview_used = _boolean(event.get("queue_preview_used"))
+                    replacement_used = _boolean(event.get("replacement_used"))
+                    parsed_fields = (
+                        ("action_rows", action_rows, dispatch_action_rows),
+                        ("dispatch_pipeline_s", pipeline_s, dispatch_pipeline_s),
+                        (
+                            "dispatch_pipeline_ewma_s",
+                            pipeline_ewma_s,
+                            dispatch_pipeline_ewma_s,
+                        ),
+                        (
+                            "action_interval_s",
+                            action_interval_s,
+                            dispatch_action_interval_s,
+                        ),
+                        ("prefetch_lead_rows", lead_rows, dispatch_lead_rows),
+                        (
+                            "preview_queue_depth",
+                            preview_queue_depth,
+                            dispatch_preview_queue_depths,
+                        ),
+                        (
+                            "full_observation_queue_depth",
+                            full_queue_depth,
+                            dispatch_full_queue_depths,
+                        ),
+                    )
+                    for field, value, values in parsed_fields:
+                        if value is not None:
+                            dispatch_coverage[field] += 1
+                            values.append(value)
+                    if preview_used is not None:
+                        dispatch_coverage["queue_preview_used"] += 1
+                        dispatch_preview_used.append(preview_used)
+                    if replacement_used is not None:
+                        dispatch_coverage["replacement_used"] += 1
+                        dispatch_replacement_used.append(replacement_used)
+
+                    evidence = _dispatch_evidence(
+                        source_index=source_index,
+                        source_path=path,
+                        line_number=line_number,
+                        event=event,
+                    )
+                    if (
+                        preview_used is True
+                        and action_rows is not None
+                        and action_rows >= LONG_DISPATCH_MIN_ACTION_ROWS
+                        and lead_rows == 0
+                    ):
+                        zero_lead_long_dispatches.append(evidence)
+
+                    if preview_used is True:
+                        if (
+                            pipeline_s is None
+                            or action_interval_s is None
+                            or preview_queue_depth is None
+                        ):
+                            latency_budget_unassessable += 1
+                        else:
+                            available_s = preview_queue_depth * action_interval_s
+                            if available_s == 0:
+                                fraction = math.inf if pipeline_s > 0 else 0.0
+                            else:
+                                fraction = pipeline_s / available_s
+                            if fraction >= LATENCY_BUDGET_APPROACH_FRACTION:
+                                latency_budget_evidence.append(
+                                    {
+                                        **evidence,
+                                        "available_preview_queue_time_s": round(
+                                            available_s, 6
+                                        ),
+                                        "pipeline_fraction_of_available_time": (
+                                            None
+                                            if not math.isfinite(fraction)
+                                            else round(fraction, 6)
+                                        ),
+                                        "classification": (
+                                            "exceeded"
+                                            if fraction >= 1.0
+                                            else "approached"
+                                        ),
+                                    }
+                                )
                 if event_name != "phase_action":
                     if event_name == "phase_complete" and active_occurrence:
                         occurrences.append(active_occurrence)
@@ -424,6 +628,14 @@ def analyze_logs(paths: Iterable[Path]) -> dict[str, Any]:
             row["maximum_motion_call_index"] = phase_motion_call_max[phase]
         phases[phase] = row
 
+    latency_budget_classifications = Counter(
+        evidence["classification"] for evidence in latency_budget_evidence
+    )
+    preview_true_events = sum(dispatch_preview_used)
+    latency_budget_evaluated = (
+        preview_true_events - latency_budget_unassessable
+    )
+
     return {
         "schema_version": SCHEMA_VERSION,
         "sources": [
@@ -462,6 +674,81 @@ def analyze_logs(paths: Iterable[Path]) -> dict[str, Any]:
             "by_motion_profile": {
                 key: _counter_summary(value)
                 for key, value in sorted(profile_rows.items())
+            },
+        },
+        "client_dispatches": {
+            "events": dispatch_events,
+            "action_rows": _depth_summary(dispatch_action_rows),
+            "dispatch_pipeline_s": _number_summary(dispatch_pipeline_s),
+            "dispatch_pipeline_ewma_s": _number_summary(
+                dispatch_pipeline_ewma_s
+            ),
+            "action_interval_s": _number_summary(dispatch_action_interval_s),
+            "prefetch_lead_rows": _depth_summary(dispatch_lead_rows),
+            "preview_queue_depth": _depth_summary(
+                dispatch_preview_queue_depths
+            ),
+            "full_observation_queue_depth": _depth_summary(
+                dispatch_full_queue_depths
+            ),
+            "queue_preview_used": _boolean_summary(
+                dispatch_preview_used, dispatch_events
+            ),
+            "replacement_used": _boolean_summary(
+                dispatch_replacement_used, dispatch_events
+            ),
+            "telemetry_coverage": {
+                key: {
+                    "events": dispatch_coverage.get(key, 0),
+                    "of": dispatch_events,
+                }
+                for key in (
+                    "action_rows",
+                    "dispatch_pipeline_s",
+                    "dispatch_pipeline_ewma_s",
+                    "action_interval_s",
+                    "prefetch_lead_rows",
+                    "preview_queue_depth",
+                    "full_observation_queue_depth",
+                    "queue_preview_used",
+                    "replacement_used",
+                )
+            },
+            "indicators": {
+                "zero_lead_long_dispatches": len(
+                    zero_lead_long_dispatches
+                ),
+                "zero_lead_long_dispatch_minimum_action_rows": (
+                    LONG_DISPATCH_MIN_ACTION_ROWS
+                ),
+                "zero_lead_long_dispatch_evidence": (
+                    zero_lead_long_dispatches
+                ),
+                "latency_budget": {
+                    "preview_events": preview_true_events,
+                    "evaluated_events": latency_budget_evaluated,
+                    "unassessable_events": latency_budget_unassessable,
+                    "approached_events": latency_budget_classifications.get(
+                        "approached", 0
+                    ),
+                    "exceeded_events": latency_budget_classifications.get(
+                        "exceeded", 0
+                    ),
+                    "threshold_fraction": LATENCY_BUDGET_APPROACH_FRACTION,
+                    "evidence": latency_budget_evidence,
+                },
+                "interpretation": (
+                    "Dispatch indicators are diagnostic leads, not proof of a "
+                    "controller pause. A zero-lead long dispatch is reported "
+                    "only after a queue preview was used. Latency-budget rows "
+                    "compare the complete measured dispatch pipeline with the "
+                    "queue time remaining at the preview response; because the "
+                    "pipeline measurement also includes the preview request, "
+                    "this is a conservative pressure indicator. Camera and "
+                    "semantic checkpoints may intentionally drain the queue. "
+                    "Logs without action_interval_s remain unassessable rather "
+                    "than assuming 0.1 seconds per row."
+                ),
             },
         },
         "visibility_retries": dict(sorted(retry_counts.items())),

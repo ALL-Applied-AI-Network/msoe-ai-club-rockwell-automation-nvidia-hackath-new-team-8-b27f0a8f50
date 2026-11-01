@@ -404,6 +404,9 @@ policy changes.
   official policy returns its measured-pose hold.
 - `prepare_annotation_bundle.py`: exact-frame, lossless, provenance-pinned
   replay-to-annotation bridge with clean images and separate review overlays.
+  Its verifier accepts the legacy capture-only source identity and the current
+  exact capture-plus-calibration identity emitted by `replay_camera.py`; wrong,
+  reordered, duplicate, or extra source identities are rejected.
 - `tests/`: team-owned contract and edge-case tests.
 - `MODEL_EVALUATION.md`: model comparison and measured evidence.
 - `DECISION_LOG.md`: hypotheses, results, and next experiments.

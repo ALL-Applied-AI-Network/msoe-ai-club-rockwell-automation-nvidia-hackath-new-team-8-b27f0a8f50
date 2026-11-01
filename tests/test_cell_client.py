@@ -343,8 +343,12 @@ class CellClientQueuePreviewTests(unittest.TestCase):
             [event["dispatch_pipeline_ewma_s"] for event in telemetry],
             [0.375, 0.45, 0.5025],
         )
+        self.assertEqual(
+            [event["action_interval_s"] for event in telemetry],
+            [0.125, 0.125, 0.125],
+        )
 
-    def test_failed_post_does_not_enable_preview_or_increment_stats(self) -> None:
+    def test_failed_post_aborts_without_retrying_advanced_policy_state(self) -> None:
         class FailingOnceCell(_TrialCell):
             def __init__(self) -> None:
                 super().__init__(
@@ -355,12 +359,17 @@ class CellClientQueuePreviewTests(unittest.TestCase):
                     )
                 )
                 self.fail_next_post = True
+                self.status_queries = 0
 
             def act_tcp(self, rows, dt=0.1, obs_t=None) -> None:
                 if self.fail_next_post:
                     self.fail_next_post = False
                     raise RuntimeError("simulated rejected POST")
                 super().act_tcp(rows, dt, obs_t)
+
+            def trials(self):
+                self.status_queries += 1
+                return [{"trial_id": "test-t00", "status": "running"}]
 
         class LongChunkPolicy(_PreviewPolicy):
             PREFETCH = True
@@ -386,16 +395,108 @@ class CellClientQueuePreviewTests(unittest.TestCase):
                 clear=True,
             ),
         ):
-            run_trial(cell, policy, {"trial_id": "test-t00", "layout": "L1"})
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "action POST failed after Policy.act; refusing to retry",
+            ):
+                run_trial(cell, policy, {"trial_id": "test-t00", "layout": "L1"})
             stats = dict(cell_client.PREFETCH_STATS)
 
         self.assertEqual(
             [call["size"] for call in cell.calls],
-            [(1920, 1080), (1920, 1080), (160, 90)],
+            [(1920, 1080)],
         )
-        self.assertEqual(len(cell.actions), 1)
-        self.assertEqual(len(telemetry), 1)
-        self.assertEqual(stats, {"chunks": 1, "ahead": 0, "short": 0})
+        self.assertEqual(policy.observation_sizes, [(1920, 1080)])
+        self.assertEqual(len(cell.actions), 0)
+        self.assertEqual(len(telemetry), 0)
+        self.assertEqual(stats, {"chunks": 0, "ahead": 0, "short": 0})
+        self.assertEqual(cell.status_queries, 1)
+
+    def test_failed_final_post_returns_when_exact_trial_has_ended(self) -> None:
+        class EndedCell(_TrialCell):
+            def __init__(self) -> None:
+                super().__init__(observations=(("running", 0),))
+                self.status_queries = 0
+
+            def act_tcp(self, rows, dt=0.1, obs_t=None) -> None:
+                raise RuntimeError("trial ended before final POST")
+
+            def trials(self):
+                self.status_queries += 1
+                return [{"trial_id": "test-t00", "status": "done"}]
+
+        cell = EndedCell()
+        policy = _PreviewPolicy()
+
+        with patch("cell_client._emit_client_event") as emit:
+            run_trial(cell, policy, {"trial_id": "test-t00", "layout": "L1"})
+
+        self.assertEqual(policy.observation_sizes, [(1920, 1080)])
+        self.assertEqual(cell.status_queries, 1)
+        emit.assert_not_called()
+
+    def test_failed_post_with_missing_trial_requires_fresh_reset(self) -> None:
+        class MissingTrialCell(_TrialCell):
+            def act_tcp(self, rows, dt=0.1, obs_t=None) -> None:
+                raise RuntimeError("simulated rejected POST")
+
+            def trials(self):
+                return [{"trial_id": "another-t00", "status": "done"}]
+
+        cell = MissingTrialCell(observations=(("running", 0),))
+        policy = _PreviewPolicy()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "trial status could not be confirmed",
+        ) as raised:
+            run_trial(cell, policy, {"trial_id": "test-t00", "layout": "L1"})
+
+        self.assertEqual(str(raised.exception.__cause__), "simulated rejected POST")
+        self.assertEqual(policy.observation_sizes, [(1920, 1080)])
+
+    def test_failed_post_and_failed_status_probe_preserves_original_failure(self) -> None:
+        class ProbeFailingCell(_TrialCell):
+            def act_tcp(self, rows, dt=0.1, obs_t=None) -> None:
+                raise RuntimeError("original action failure")
+
+            def trials(self):
+                raise cell_client.requests.ConnectionError("status probe failed")
+
+        cell = ProbeFailingCell(observations=(("running", 0),))
+        policy = _PreviewPolicy()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "trial status could not be confirmed",
+        ) as raised:
+            run_trial(cell, policy, {"trial_id": "test-t00", "layout": "L1"})
+
+        self.assertEqual(str(raised.exception.__cause__), "original action failure")
+        self.assertEqual(policy.observation_sizes, [(1920, 1080)])
+
+    def test_connection_failure_during_action_aborts_without_policy_retry(self) -> None:
+        class ConnectionFailingCell(_TrialCell):
+            def act_tcp(self, rows, dt=0.1, obs_t=None) -> None:
+                raise cell_client.requests.ConnectionError("response was lost")
+
+            def trials(self):
+                return [{"trial_id": "test-t00", "status": "running"}]
+
+        cell = ConnectionFailingCell(observations=(("running", 0),))
+        policy = _PreviewPolicy()
+
+        with (
+            patch("cell_client._emit_client_event") as emit,
+            self.assertRaisesRegex(
+                RuntimeError,
+                "Start a fresh process so Policy.reset\(\) runs",
+            ),
+        ):
+            run_trial(cell, policy, {"trial_id": "test-t00", "layout": "L1"})
+
+        self.assertEqual(policy.observation_sizes, [(1920, 1080)])
+        emit.assert_not_called()
 
     def test_numeric_prefetch_remains_fixed(self) -> None:
         class FixedPrefetchPolicy(_PreviewPolicy):
@@ -408,6 +509,56 @@ class CellClientQueuePreviewTests(unittest.TestCase):
             run_trial(cell, policy, {"trial_id": "test-t00", "layout": "L1"})
 
         self.assertEqual(cell.action_observation_times, [1.0])
+
+
+class CellClientRequestRetryTests(unittest.TestCase):
+    class _Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"ok": True}
+
+    class _FlakySession:
+        def __init__(self, failures: int) -> None:
+            self.headers: dict[str, str] = {}
+            self.failures = failures
+            self.calls: list[tuple[str, str]] = []
+
+        def request(self, method, url, **kwargs):
+            del kwargs
+            self.calls.append((method, url))
+            if len(self.calls) <= self.failures:
+                raise cell_client.requests.ConnectionError("synthetic disconnect")
+            return CellClientRequestRetryTests._Response()
+
+    def _client_with_session(self, session):
+        with patch("cell_client.requests.Session", return_value=session):
+            return cell_client.CellClient("https://cell.invalid", "test-token")
+
+    def test_get_retries_connection_failure(self) -> None:
+        session = self._FlakySession(failures=2)
+        client = self._client_with_session(session)
+
+        with patch("cell_client.time.sleep") as sleep:
+            result = client._call("GET", "time")
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(session.calls), 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_post_never_retries_ambiguous_connection_failure(self) -> None:
+        session = self._FlakySession(failures=1)
+        client = self._client_with_session(session)
+
+        with (
+            patch("cell_client.time.sleep") as sleep,
+            self.assertRaises(cell_client.requests.ConnectionError),
+        ):
+            client._call("POST", "actions", json={"tcp": []})
+
+        self.assertEqual(len(session.calls), 1)
+        sleep.assert_not_called()
 
 
 if __name__ == "__main__":

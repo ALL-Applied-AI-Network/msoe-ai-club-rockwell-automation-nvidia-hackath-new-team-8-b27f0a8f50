@@ -24,12 +24,16 @@ class CellClient:
             self.s.verify = ca
 
     def _call(self, method: str, path: str, **kw) -> dict:
-        for attempt in range(3):
+        # GETs are safe to retry after a connection failure.  POSTs are not:
+        # the server may have applied a command even if its response was lost,
+        # and this API exposes no idempotency key or action sequence number.
+        attempts = 3 if method.upper() == "GET" else 1
+        for attempt in range(attempts):
             try:
                 r = self.s.request(method, f"{self.api}/{path}", timeout=10, **kw)
                 break
             except requests.ConnectionError:
-                if attempt == 2:
+                if attempt == attempts - 1:
                     raise
                 time.sleep(1)
         try:
@@ -216,9 +220,53 @@ def run_trial(cell: CellClient, policy, trial: dict) -> None:
                 cell.act_tcp(chunk, dt, obs_t)
             else:
                 cell.act(chunk, dt, obs_t)
-        except RuntimeError as e:  # the trial can end between observe and act
-            log.warning("%s", e)
-            continue
+        except (RuntimeError, requests.RequestException) as e:
+            # Policy.act() is stateful: it can advance dwell/phase counters and
+            # gripper intent before the POST is acknowledged.  The protocol has
+            # no transaction or idempotency token, so invoking it again could
+            # skip a command or duplicate an action whose response was lost.
+            failure = (
+                "action POST failed after Policy.act; refusing to retry with "
+                "advanced policy state. Start a fresh process so Policy.reset() "
+                "runs before another hardware action"
+            )
+            try:
+                trials = cell.trials()
+                if not isinstance(trials, list):
+                    raise ValueError("GET /run did not return a trial list")
+                matches = [
+                    candidate
+                    for candidate in trials
+                    if isinstance(candidate, dict)
+                    and candidate.get("trial_id") == trial["trial_id"]
+                ]
+                if len(matches) != 1:
+                    raise ValueError(
+                        f"GET /run returned {len(matches)} matches for "
+                        f"trial {trial['trial_id']}"
+                    )
+                status = matches[0].get("status")
+                if not isinstance(status, str) or not status:
+                    raise ValueError("matching trial has no valid status")
+            except Exception as probe_error:
+                log.error(
+                    "trial %s action failed and its read-only status probe failed: %s",
+                    trial["trial_id"],
+                    probe_error,
+                )
+                raise RuntimeError(f"{failure}; trial status could not be confirmed") from e
+            if status != "running":
+                # The normal end-of-trial race rejects a final chunk after the
+                # server has already made the trial non-running.  It is safe to
+                # return, but still unsafe to call Policy.act again.
+                log.info(
+                    "trial %s became %s while its final action was posted; "
+                    "not retrying the action",
+                    trial["trial_id"],
+                    status,
+                )
+                return
+            raise RuntimeError(f"{failure}; trial is still running") from e
         pipeline_elapsed = time.monotonic() - pipeline_started
         took = (
             pipeline_elapsed
@@ -234,6 +282,7 @@ def run_trial(cell: CellClient, policy, trial: dict) -> None:
         _emit_client_event(
             "client_action_dispatch",
             action_rows=last,
+            action_interval_s=float(dt),
             dispatch_pipeline_ewma_s=round(float(took), 6),
             dispatch_pipeline_s=round(float(pipeline_elapsed), 6),
             full_observation_queue_depth=int(obs["queued"]),
