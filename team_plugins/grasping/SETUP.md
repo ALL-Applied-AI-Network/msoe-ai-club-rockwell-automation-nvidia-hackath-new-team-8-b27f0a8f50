@@ -98,6 +98,131 @@ uv run --project hardware/fanuc_cell python scripts/check_team_plugin.py \
 The handoff run requires a clean tree. `--allow-dirty` is only for an
 in-progress development check.
 
+## Isolated pretrained services
+
+Pretrained selection is optional, simulation-only, and separate from the normal
+plugin environment. Do not install either model into the repository runtime,
+commit weights, or expose the services to an unauthenticated network.
+
+For Cosmos3-Nano, use the model snapshot and a dedicated Python 3.13 vLLM
+environment under the external workspace. The validated runtime is vLLM 0.21.0
+plus NVIDIA cosmos-framework commit
+55f0554d0bf167603432041c794a8babbac759b9:
+
+    /workspace/envs/uv-bootstrap/bin/uv venv \
+      --python 3.13 --seed --managed-python \
+      /workspace/envs/cosmos3-vllm
+
+    /workspace/envs/uv-bootstrap/bin/uv pip install \
+      --python /workspace/envs/cosmos3-vllm/bin/python \
+      --torch-backend=cu130 \
+      vllm==0.21.0 \
+      'vllm-cosmos3 @ git+https://github.com/NVIDIA/cosmos-framework.git@55f0554d0bf167603432041c794a8babbac759b9#subdirectory=packages/vllm-cosmos3' \
+      'transformers-cosmos3 @ git+https://github.com/NVIDIA/cosmos-framework.git@55f0554d0bf167603432041c794a8babbac759b9#subdirectory=packages/transformers-cosmos3' \
+      openai
+
+Download the exact model snapshot and verify its configuration before serving:
+
+    /workspace/envs/uv-bootstrap/bin/uvx --from huggingface-hub hf download \
+      nvidia/Cosmos3-Nano \
+      --revision e59a53c25979a090fa8706c9acc0c254a6e89b92 \
+      --local-dir /workspace/models/Cosmos3-Nano
+
+    printf '%s  %s\n' \
+      c32f2468a54542c21946bc8eab6172b911dcec9a7193a94c023ea2d4073bcda6 \
+      /workspace/models/Cosmos3-Nano/config.json | sha256sum -c -
+
+
+Start the reasoner inside the GPU container with a stable served-model alias.
+The native sampler flag is required on the validated container because it has
+no nvcc for FlashInfer JIT:
+
+    CUDA_VISIBLE_DEVICES=0 VLLM_USE_FLASHINFER_SAMPLER=0 \
+    /workspace/envs/cosmos3-vllm/bin/vllm serve \
+      /workspace/models/Cosmos3-Nano \
+      --served-model-name nvidia/Cosmos3-Nano \
+      --hf-overrides '{"architectures":["Cosmos3ReasonerForConditionalGeneration"]}' \
+      --tensor-parallel-size 1 \
+      --mm-encoder-tp-mode data \
+      --async-scheduling \
+      --max-model-len 8192 \
+      --gpu-memory-utilization 0.90 \
+      --host 127.0.0.1 \
+      --port 8001
+
+Keep the endpoint loopback-only. Use Cosmos3OpenAIProvider with the complete
+chat-completions URL, exact served alias, snapshot revision, total deadline,
+and no API key for loopback. If authentication is added, supply only the
+environment-variable name; query-string credentials and redirects are refused.
+A minimal construction is shown below. factory_context must be the validated
+simulation-only profile context, and receipt_path must be a new external file:
+
+    from team_plugins.grasping.ai_providers.cosmos3 import Cosmos3OpenAIProvider
+    from team_plugins.grasping.ai_selected_sim_runner import (
+        build_ai_selected_simulation_planner,
+    )
+
+    provider = Cosmos3OpenAIProvider(
+        endpoint="http://127.0.0.1:8001/v1/chat/completions",
+        model="nvidia/Cosmos3-Nano",
+        model_revision="e59a53c25979a090fa8706c9acc0c254a6e89b92",
+    )
+    planner = build_ai_selected_simulation_planner(
+        factory_context,
+        provider,
+        receipt_path=receipt_path,
+        mode="shadow",
+        timeout_s=30.0,
+    )
+    decision = planner.decide_for_target(scene, target, planning_context)
+
+Use build_ai_selected_offline_screw_planner with the same provider for supported
+M6x30 screw candidates; that facade always returns execution_supported=False.
+
+
+For GraspGenX, use a separate L40S instance and the official repository:
+
+    git clone https://github.com/NVlabs/GraspGenX.git /home/ubuntu/GraspGenX
+    cd /home/ubuntu/GraspGenX
+    git checkout --detach b9429097728cb1c430dd78b92edf17ba318aad03
+    git lfs install
+    git lfs pull
+    ~/.local/bin/uv sync
+    git -C ext/graspgenx_checkpoints checkout --detach \
+      7c834043c11a11417e31d6d5ea9355801e40a2c1
+    git -C ext/graspgenx_checkpoints lfs pull
+    git -C ext/gripper_descriptions checkout --detach \
+      19a03c00d19aeaf052d0f6801f0041982d676e8a
+    ~/.local/bin/uv sync --extra serve
+
+    printf '%s  %s\n' \
+      8b55f31cdb8340a573b4df27b027c15cff326bd6debcb389bf631d2aaab7ac44 \
+      ext/graspgenx_checkpoints/release/gen/epoch_736.pth \
+      cbf3f3bdb2e4c03fca8486ed24de0e6a8a859e6bd22bce2f1434a610335abd3e \
+      ext/graspgenx_checkpoints/release/dis/epoch_1056.pth \
+      357cc0b70064c24cf0f3aa3325a7b0839823f8cc1e3a30bfe0cea0f9d2c41127 \
+      ext/gripper_descriptions/gripper_descriptions/assets/x_grippers/robotiq_2f_140/config.json \
+      | sha256sum -c -
+
+Start its ZMQ service on loopback:
+
+    ~/.local/bin/uv run python client-server/graspgenx_server.py \
+      --config ext/graspgenx_checkpoints/release \
+      --assets_dir assets \
+      --default_gripper robotiq_2f_140 \
+      --host 127.0.0.1 \
+      --port 5556
+
+The lightweight wire protocol is one-frame msgpack over ZMQ REQ/REP with
+msgpack-numpy arrays. It has no authentication or encryption. Keep it on
+loopback or an authenticated tunnel. The current repository does not yet
+implement the capture resolver/ZMQ proposal source that converts infer_object
+responses into team8-graspgenx-proposals-v1; do not present the service-only
+smoke as an end-to-end planner result. Verify the source, checkpoint, and gripper
+pins and hashes listed in AI_SELECTION.md. A future source must also bind the
+capture digest, capture time, input frame, and an application-supplied
+calibration ID/hash before accepting proposals.
+
 ## Cube and screw scope
 
 Start with the existing cube path to prove plugin wiring. Then add the supplied

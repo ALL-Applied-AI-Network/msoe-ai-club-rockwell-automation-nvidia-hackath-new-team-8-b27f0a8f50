@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -22,6 +23,9 @@ from demos.scripted_cube_screw_bucket_sort import (
     validate_screw_model,
     verify_vertices_inside_bin,
 )
+from demos.scripted_cube_screw_bucket_sort import (
+    cube_screw_bucket_demo as demo_module,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +42,47 @@ class CubeScrewScenarioTests(unittest.TestCase):
     def setUpClass(cls):
         cls.config = load_scenario_config()
         cls.model = validate_screw_model(SCREW_STL, cls.config.screw)
+
+    def test_runner_shutdown_mode_defers_app_until_artifacts_are_written(self):
+        with patch.object(sys, "argv", ["demo", "--run", "fresh-run"]):
+            standalone = demo_module.parse_args()
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "demo",
+                "--run",
+                "fresh-run",
+                "--defer-shutdown",
+            ],
+        ):
+            embedded = demo_module.parse_args()
+
+        self.assertFalse(standalone.defer_shutdown)
+        self.assertTrue(embedded.defer_shutdown)
+        sentinel = object()
+        self.assertIsNone(demo_module._take_deferred_simulation_app())
+        demo_module._DEFERRED_SIMULATION_APP = sentinel
+        self.assertIs(
+            demo_module._take_deferred_simulation_app(),
+            sentinel,
+        )
+        self.assertIsNone(demo_module._take_deferred_simulation_app())
+
+    def test_embedded_failed_verification_remains_a_collectible_negative(self):
+        demo_module._enforce_standalone_success(
+            False,
+            defer_shutdown=True,
+        )
+        demo_module._enforce_standalone_success(
+            True,
+            defer_shutdown=False,
+        )
+        with self.assertRaisesRegex(RuntimeError, "verification failed"):
+            demo_module._enforce_standalone_success(
+                False,
+                defer_shutdown=False,
+            )
 
     def test_scene_inherits_three_cubes_and_adds_two_unique_red_screws(self):
         items = build_sort_items(self.config)
