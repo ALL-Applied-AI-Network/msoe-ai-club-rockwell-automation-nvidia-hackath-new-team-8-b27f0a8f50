@@ -379,6 +379,15 @@ The lead reviews both profiles and creates a new versioned combined profile
 under `team_plugins/profiles/`. Explicitly selected plugin failures fail closed;
 they do not silently fall back and continue robot motion.
 
+For the official FANUC client, prefer `hardware/fanuc_cell/supervised_run.py`
+over manually combining component variables. Its independent options are
+`--vision baseline|yolo11n` and `--grasp baseline|multigrasp`; an omitted axis
+defaults to baseline when the other is selected. Multigrasp requires an
+external strict-JSON model plus `--grasp-checkpoint-sha256`, and v1 supports
+only the configured 10 mm cube geometry. YOLO and grasp checkpoints remain
+separate. These options do not change the default fast `smooth` motion profile.
+See `docs/TEAM_INTEGRATION.md` for the 2x2 matrix and exact commands.
+
 Every handoff records:
 
 - Git commit and branch;

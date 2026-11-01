@@ -59,6 +59,12 @@ Run from the repository root unless a step says otherwise.
 
    Replace 16 with 10 only for a measured/operator-confirmed 10 mm cube.
 
+   The merged launcher also supports independent `--vision baseline|yolo11n`
+   and `--grasp baseline|multigrasp` choices. Multigrasp v1 is 10 mm only and
+   requires a reviewed external JSON model plus its SHA-256. These component
+   options do not change the default fast `smooth` motion profile. See
+   `docs/TEAM_INTEGRATION.md` for exact commands.
+
 3. Run the localhost-only mock:
 
    uv run supervised_run.py hover --cube-mm 16 --mock --trials 1 --trial-s 2

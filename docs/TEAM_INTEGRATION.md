@@ -130,6 +130,55 @@ constructed. An explicitly selected profile fails closed on malformed JSON,
 missing dependencies, factory errors, or wrong return types; it never silently
 falls back and continues execution.
 
+### Supervised hardware composition
+
+`hardware/fanuc_cell/supervised_run.py` exposes vision and grasping as
+independent choices while still loading one complete integration profile before
+the official client imports `Policy`:
+
+| `--vision` | `--grasp` | Runtime components |
+|---|---|---|
+| `baseline` | `baseline` | deterministic HSV/known-size geometry plus the legacy single grasp |
+| `yolo11n` | `baseline` | YOLO-assisted proposals plus deterministic geometry and the legacy grasp |
+| `baseline` | `multigrasp` | deterministic vision plus feasible-candidate generation and learned ranking |
+| `yolo11n` | `multigrasp` | YOLO-assisted vision plus the same multigrasp pipeline |
+
+If either option is present, the omitted option defaults to `baseline`. If both
+are absent, the launcher preserves the existing `ROCKWELL_INTEGRATION_PROFILE`
+workflow exactly. The default hardware motion profile remains `smooth`; vision
+or grasp selection does not change its 10 mm/0.1 s rows, 8-degree angular rows,
+32-row limit, or adaptive prefetch.
+
+The executable multigrasp factory requires an externally trained strict-JSON
+logistic model and its independently recorded SHA-256. No trained grasp model
+is committed to this repository. Multigrasp v1 is bound to the configured
+10 mm cube geometry and the launcher rejects `--cube-mm 16` for that mode. The
+launcher verifies the bytes, builds a
+complete temporary profile containing that digest, keeps it alive for the
+synchronous run, and sends the model only through
+`ROCKWELL_GRASP_CHECKPOINT`. YOLO weights travel separately through
+`ROCKWELL_VISION_CHECKPOINT`.
+
+```bash
+# New multigrasp pipeline with deterministic camera perception.
+uv run supervised_run.py hover --cube-mm 10 \
+  --vision baseline --grasp multigrasp \
+  --grasp-checkpoint /absolute/path/grasp-model.json \
+  --grasp-checkpoint-sha256 <64-hex-digest>
+
+# The same grasp system with AI-assisted YOLO11n proposals.
+uv run supervised_run.py hover --cube-mm 10 \
+  --vision yolo11n --vision-checkpoint /absolute/path/seed55-best.pt \
+  --grasp multigrasp \
+  --grasp-checkpoint /absolute/path/grasp-model.json \
+  --grasp-checkpoint-sha256 <64-hex-digest>
+```
+
+These commands expose the integration path; they do not make an unvalidated
+checkpoint hardware-ready. The merged Cosmos3 and GraspGenX rankers remain
+isolated simulation/offline experiments, and screw execution remains
+simulation/offline only.
+
 Factories use one stable context argument:
 
 ```python

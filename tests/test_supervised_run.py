@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -19,6 +21,29 @@ import supervised_run  # noqa: E402
 
 
 class SupervisedRunTests(unittest.TestCase):
+    @staticmethod
+    def _grasp_checkpoint(path: Path) -> tuple[Path, str]:
+        from team_plugins.grasping.multigrasp_pipeline import (
+            FEATURE_NAMES,
+            FEATURE_SCHEMA_ID,
+        )
+
+        payload = {
+            "schema_version": 1,
+            "model_type": "logistic_regression",
+            "feature_schema_id": FEATURE_SCHEMA_ID,
+            "feature_order": list(FEATURE_NAMES),
+            "means": [0.0] * len(FEATURE_NAMES),
+            "scales": [1.0] * len(FEATURE_NAMES),
+            "coefficients": [0.0] * len(FEATURE_NAMES),
+            "intercept": 0.0,
+            "model_version": "launcher-integration-test-v1",
+            "training_data_sha256": "1" * 64,
+        }
+        raw = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
+        path.write_bytes(raw)
+        return path, hashlib.sha256(raw).hexdigest()
+
     def _clean_environment(self):
         return mock.patch.dict(
             os.environ,
@@ -223,7 +248,9 @@ class SupervisedRunTests(unittest.TestCase):
         self.assertEqual(
             observed["profile"], str(supervised_run.YOLO11N_PROFILE_PATH)
         )
-        self.assertEqual(observed["checkpoint"], "seed55-best.pt")
+        self.assertEqual(
+            observed["checkpoint"], str(Path("seed55-best.pt").resolve())
+        )
         self.assertEqual(observed["arguments"], [])
 
     def test_yolo11n_requires_its_component_checkpoint(self):
@@ -238,7 +265,7 @@ class SupervisedRunTests(unittest.TestCase):
                 delegate=lambda _: None,
             )
 
-    def test_explicit_baseline_clears_inherited_vision_selection(self):
+    def test_explicit_baseline_selects_complete_baseline_profile(self):
         calls: list[list[str]] = []
         with mock.patch.dict(
             os.environ,
@@ -252,8 +279,12 @@ class SupervisedRunTests(unittest.TestCase):
                 ["--vision", "baseline"],
                 delegate=lambda args: calls.append(list(args)),
             )
-            self.assertNotIn(supervised_run.INTEGRATION_PROFILE_ENV, os.environ)
+            self.assertEqual(
+                os.environ[supervised_run.INTEGRATION_PROFILE_ENV],
+                str(supervised_run.BASELINE_PROFILE_PATH.resolve()),
+            )
             self.assertNotIn(supervised_run.VISION_CHECKPOINT_ENV, os.environ)
+            self.assertNotIn(supervised_run.GRASP_CHECKPOINT_ENV, os.environ)
         self.assertEqual(calls, [[]])
 
     def test_no_vision_option_preserves_inherited_profile_workflow(self):
@@ -262,6 +293,7 @@ class SupervisedRunTests(unittest.TestCase):
             {
                 supervised_run.INTEGRATION_PROFILE_ENV: "existing-profile.json",
                 supervised_run.VISION_CHECKPOINT_ENV: "existing-checkpoint.pt",
+                supervised_run.GRASP_CHECKPOINT_ENV: "existing-grasp.json",
             },
             clear=False,
         ):
@@ -273,6 +305,167 @@ class SupervisedRunTests(unittest.TestCase):
             self.assertEqual(
                 os.environ[supervised_run.VISION_CHECKPOINT_ENV],
                 "existing-checkpoint.pt",
+            )
+            self.assertEqual(
+                os.environ[supervised_run.GRASP_CHECKPOINT_ENV],
+                "existing-grasp.json",
+            )
+
+    def test_multigrasp_composes_complete_profile_for_both_vision_modes(self):
+        for vision in ("baseline", "yolo11n"):
+            with self.subTest(vision=vision), tempfile.TemporaryDirectory() as directory:
+                checkpoint, digest = self._grasp_checkpoint(
+                    Path(directory) / "grasp-model.json"
+                )
+                observed: dict[str, object] = {}
+
+                def delegate(arguments):
+                    from sorting_core.config import load_config
+                    from sorting_core.integration_plugins import (
+                        GraspFactoryContext,
+                        create_profile_grasp_pipeline,
+                        load_integration_profile,
+                    )
+
+                    profile_path = Path(
+                        os.environ[supervised_run.INTEGRATION_PROFILE_ENV]
+                    )
+                    observed["profile_path"] = profile_path
+                    observed["profile_exists"] = profile_path.is_file()
+                    observed["payload"] = json.loads(
+                        profile_path.read_text(encoding="utf-8")
+                    )
+                    observed["vision_checkpoint"] = os.environ.get(
+                        supervised_run.VISION_CHECKPOINT_ENV
+                    )
+                    observed["grasp_checkpoint"] = os.environ.get(
+                        supervised_run.GRASP_CHECKPOINT_ENV
+                    )
+                    observed["motion_profile"] = os.environ.get(
+                        supervised_run.MOTION_PROFILE_ENV
+                    )
+                    observed["max_actions"] = os.environ.get(
+                        supervised_run.MAX_ACTIONS_ENV
+                    )
+                    profile = load_integration_profile(profile_path)
+                    pipeline = create_profile_grasp_pipeline(
+                        profile,
+                        GraspFactoryContext(
+                            config=load_config(),
+                            checkpoint=os.environ[
+                                supervised_run.GRASP_CHECKPOINT_ENV
+                            ],
+                            options=profile.grasp.options,
+                            profile_id=profile.profile_id,
+                            profile_path=profile.source_path,
+                            profile_sha256=profile.source_sha256,
+                        ),
+                    )
+                    observed["scorer"] = pipeline.scorer.scorer_id
+                    observed["arguments"] = list(arguments)
+
+                arguments = [
+                    "hover",
+                    "--cube-mm",
+                    "10",
+                    "--vision",
+                    vision,
+                    "--grasp",
+                    "multigrasp",
+                    "--grasp-checkpoint",
+                    str(checkpoint),
+                    "--grasp-checkpoint-sha256",
+                    digest,
+                ]
+                if vision == "yolo11n":
+                    arguments.extend(
+                        ("--vision-checkpoint", str(Path(directory) / "vision.pt"))
+                    )
+                supervised_run.main(arguments, delegate=delegate)
+
+                payload = observed["payload"]
+                self.assertTrue(observed["profile_exists"])
+                self.assertEqual(
+                    payload["grasp"]["factory"],
+                    "team_plugins.grasping.multigrasp_pipeline:create",
+                )
+                self.assertEqual(
+                    payload["grasp"]["options"]["checkpoint_sha256"], digest
+                )
+                expected_vision_factory = (
+                    "team_plugins.computer_vision.yolo11n_provider:create"
+                    if vision == "yolo11n"
+                    else "team_plugins.computer_vision.baseline_provider:create"
+                )
+                self.assertEqual(payload["vision"]["factory"], expected_vision_factory)
+                self.assertEqual(
+                    observed["grasp_checkpoint"], str(checkpoint.resolve())
+                )
+                if vision == "baseline":
+                    self.assertIsNone(observed["vision_checkpoint"])
+                else:
+                    self.assertEqual(
+                        observed["vision_checkpoint"],
+                        str((Path(directory) / "vision.pt").resolve()),
+                    )
+                self.assertEqual(observed["arguments"], [])
+                self.assertEqual(observed["scorer"], "team8-json-logistic-v1")
+                self.assertEqual(observed["motion_profile"], "smooth")
+                self.assertEqual(observed["max_actions"], "32")
+                self.assertFalse(Path(observed["profile_path"]).exists())
+
+    def test_multigrasp_rejects_missing_or_mismatched_checkpoint_provenance(self):
+        with self.assertRaises(SystemExit):
+            supervised_run.main(
+                ["--grasp", "multigrasp"], delegate=lambda _: None
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint, _ = self._grasp_checkpoint(
+                Path(directory) / "grasp-model.json"
+            )
+            with self.assertRaises(SystemExit):
+                supervised_run.main(
+                    [
+                        "--grasp",
+                        "multigrasp",
+                        "--grasp-checkpoint",
+                        str(checkpoint),
+                        "--grasp-checkpoint-sha256",
+                        "0" * 64,
+                    ],
+                    delegate=lambda _: self.fail("must fail before delegation"),
+                )
+
+    def test_model_component_modes_reject_ambiguous_legacy_checkpoint(self):
+        with self.assertRaises(SystemExit):
+            supervised_run.main(
+                [
+                    "--vision",
+                    "yolo11n",
+                    "--vision-checkpoint",
+                    "vision.pt",
+                    "--checkpoint",
+                    "ambiguous.bin",
+                ],
+                delegate=lambda _: None,
+            )
+
+    def test_multigrasp_v1_rejects_sixteen_mm_geometry(self):
+        with self.assertRaises(SystemExit):
+            supervised_run.main(
+                [
+                    "hover",
+                    "--cube-mm",
+                    "16",
+                    "--grasp",
+                    "multigrasp",
+                    "--grasp-checkpoint",
+                    "model.json",
+                    "--grasp-checkpoint-sha256",
+                    "1" * 64,
+                ],
+                delegate=lambda _: None,
             )
 
     def test_yolo11n_dry_run_does_not_mutate_environment_or_delegate(self):

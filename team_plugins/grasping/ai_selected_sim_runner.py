@@ -25,6 +25,10 @@ from team_plugins.grasping.multigrasp_pipeline import (
 
 
 def _fsync_directory(path: Path) -> None:
+    # Windows does not expose directory handles through os.open. File contents
+    # are still fsynced above; directory-entry fsync is a POSIX durability step.
+    if os.name == "nt":
+        return
     flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
         flags |= os.O_DIRECTORY

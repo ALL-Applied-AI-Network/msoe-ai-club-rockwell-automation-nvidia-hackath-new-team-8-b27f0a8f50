@@ -232,7 +232,7 @@ def _case_command(
     run_dir: Path,
 ) -> list[str]:
     return [
-        str(isaac_python),
+        isaac_python.as_posix(),
         "-m",
         "team_plugins.grasping.isolated_sim_runner",
         "--scenario",

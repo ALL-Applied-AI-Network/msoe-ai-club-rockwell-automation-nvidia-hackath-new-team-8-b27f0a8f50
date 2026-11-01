@@ -176,6 +176,29 @@ it still fetches a fresh lossless 1920×1080 frame before every policy decision.
 The official localhost mock accepts this request pattern, but a real rollout is
 still needed to measure its effect on queue starvation and motion continuity.
 
+Vision and grasp selection are independent in the wrapper. `--vision baseline`
+uses deterministic HSV/known-size geometry; `--vision yolo11n` uses the pinned
+YOLO-assisted provider and requires `--vision-checkpoint`. `--grasp baseline`
+keeps the legacy single grasp. `--grasp multigrasp` activates the merged
+candidate-generation and highest-predicted-success pipeline and requires both
+an external strict-JSON model and its independently recorded SHA-256:
+
+```bash
+uv run supervised_run.py hover --cube-mm 10 \
+  --vision baseline \
+  --grasp multigrasp \
+  --grasp-checkpoint /absolute/path/grasp-model.json \
+  --grasp-checkpoint-sha256 <64-hex-digest>
+```
+
+Replace `--vision baseline` with `--vision yolo11n --vision-checkpoint
+/absolute/path/seed55-best.pt` to feed the same grasp system from AI-assisted
+vision. Either component defaults to `baseline` when the other is explicitly
+selected. No trained grasp model is committed, so multigrasp is not a valid
+physical mode until a collected model is reviewed. Multigrasp v1 supports only
+the configured 10 mm cube geometry; the wrapper rejects 16 mm for that mode.
+The default `smooth` motion profile is unchanged by these choices.
+
 At pre-descent and post-placement camera checkpoints, a transient unusable or
 ambiguous frame now causes at most three hold-and-reobserve cycles. Motion does
 not advance on those frames, and a fourth failure latches the policy into its

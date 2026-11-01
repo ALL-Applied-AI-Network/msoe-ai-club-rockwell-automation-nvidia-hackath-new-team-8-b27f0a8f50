@@ -124,6 +124,13 @@ Use `10` only for a measured/operator-confirmed 10 mm cube. Compressed rollout
 video suggested approximately 16 mm silhouettes, but video is not a dimensional
 measurement.
 
+This baseline command leaves the merged multigrasp system disabled. A reviewed
+10 mm multigrasp model can be selected independently with `--grasp multigrasp`
+and its checkpoint/hash; choose deterministic or YOLO-assisted perception with
+`--vision baseline|yolo11n`. See `docs/TEAM_INTEGRATION.md`. Multigrasp v1 does
+not support the 16 mm hardware profile, and component selection does not change
+the default `smooth` motion settings.
+
 ### 4. Pass the localhost-only official mock
 
 ```bash

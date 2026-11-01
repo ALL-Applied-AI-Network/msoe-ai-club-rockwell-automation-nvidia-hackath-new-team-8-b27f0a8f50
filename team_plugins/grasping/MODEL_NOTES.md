@@ -83,8 +83,13 @@ Use `train_success_model.py` on grouped Isaac episodes. Dataset rows require
 `group_id` and `candidate_id`; groups crossing train/test are rejected and
 group-level selection metrics are reported. Model versions bind the trainer
 version, feature schema, full dataset hash, and hyperparameters; the separate
-checkpoint SHA-256 binds the final bytes. Then set
-`ROCKWELL_GRASP_CHECKPOINT` and create a matching calibrated profile.
+checkpoint SHA-256 binds the final bytes. For supervised FANUC composition,
+pass the external model and its independently recorded digest through
+`supervised_run.py --grasp multigrasp --grasp-checkpoint PATH
+--grasp-checkpoint-sha256 HEX`. The launcher verifies the bytes and materializes
+a complete temporary vision+grasp profile. Direct Isaac or advanced profile
+users may still set `ROCKWELL_GRASP_CHECKPOINT` and provide a matching versioned
+profile.
 
 The 12-attempt isolated screw matrix is a diagnostic pilot only and its
 collector always reports `trainer_ready: false`. In particular, a
