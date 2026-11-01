@@ -135,3 +135,20 @@ because synchronized cube retention truth is not recorded throughout carry.
 The supported project "blocks" are the configured 10 mm square cube class;
 arbitrary rectangular or tilted blocks fail closed. Cube/block smoke results
 are never emitted as complete-grasp trainer labels.
+
+## AI recommendations are not labels
+
+A Cosmos3 ranking, GraspGenX discriminator score, selected candidate, fallback,
+or abstention is decision evidence only. None is a success label. Do not train
+the logistic scorer on model confidence, proposal rank, a simulation plan, jaw
+closure, contact, or a brief lift.
+
+Only the resolved complete-retention outcome defined above may become a label.
+Provider errors, stale hashes, and malformed responses remain decision
+provenance and force deterministic fallback. If that fallback executes and the
+complete-retention outcome is observed, the success label can still resolve
+independently. A receipt failure returns no plan and is unresolved. Simulator
+crashes and missing phase or outcome evidence also remain unresolved
+infrastructure outcomes.
+Keep the full hash-chained AI receipt beside the run so selection source and
+fallback reason can be audited without contaminating the training target.

@@ -20,26 +20,45 @@ success and candidate-ranking accuracy.
 
 ## Pretrained-model decision
 
-The Brev setup pins and validates the pretrained NVIDIA Cosmos3-Nano model,
-which is available to the vision integration for visual/semantic perception.
-The grasp-only simulation profile does not itself enable a vision plugin, and
-quantitative geometry remains camera-derived. We
-reviewed general pretrained grasp models before implementing this selector:
+This branch supports two separately pinned pretrained providers for isolated
+simulation. Neither provider is a calibrated complete-grasp success model, and
+neither is reachable through the standard executable factory.
 
-- AnyGrasp is the most plausible future proposal source, but its official SDK
-  consumes a calibrated point cloud, returns general 6-DoF grasps, and requires
-  machine licensing. The current FANUC executor supports top-down XYZ plus yaw.
-- Contact-GraspNet and the GraspNet baseline also consume RGB-D/point clouds and
-  return 6-DoF proposals through older, conflicting CUDA/Python stacks.
-- FoundationPose estimates object pose; it is not a grasp-success selector.
+NVIDIA Cosmos3-Nano is used as a constrained-JSON ranker over candidates that
+already passed deterministic feasibility. The validated snapshot revision is
+e59a53c25979a090fa8706c9acc0c254a6e89b92 under OpenMDW 1.1. A vLLM 0.21.0
+reasoner service returned a schema-complete ranking in 2.024 seconds on the
+primary L40S. A live guarded one-candidate planner smoke bound a valid response
+and wrote a durable receipt; a separate contradictory three-candidate response
+failed semantic validation and used the deterministic fallback. These are
+integration/fallback checks, not grasp-quality results. Model confidence remains
+separate from GraspScore.success_probability.
 
-For those reasons no general 6-DoF checkpoint is wired directly into motion.
-A future proposal service may be benchmarked, but every proposal must still be
-adapted to the supported top-down family, deterministically checked, and
-calibrated against complete project outcomes.
+NVIDIA GraspGenX is the evaluated geometric proposal source. The validated
+Apache-2.0 source commit is
+b9429097728cb1c430dd78b92edf17ba318aad03; released checkpoints use the NVIDIA
+Open Model License. Its loopback service returned finite 6-DoF poses, including
+276 valid infer_object proposals in a live service-only smoke. The repository
+adapter never executes those poses directly: it validates SE(3), frame,
+calibration, approach axis, and Robotiq descriptor depth, then maps only to an
+existing feasible catalog candidate. Model output contains no jaw width, so
+catalog finger commands remain authoritative.
+
+The repository does not yet include the capture resolver/ZMQ proposal source that
+turns upstream msgpack replies into the request-bound project envelope. GraspGenX
+is therefore not an end-to-end planner path until that capture, calibration, and
+wire-protocol bridge exists and is tested.
+
+AnyGrasp was not selected because the official SDK requires machine licensing.
+Contact-GraspNet and the GraspNet baseline use older conflicting stacks.
+FoundationPose estimates object pose rather than grasp quality.
+
+See AI_SELECTION.md for exact hashes, frame conventions, gates, fallback
+behavior, durable receipt fields, live evidence, and the no-hardware boundary.
 
 Official references:
 
+- https://github.com/NVlabs/GraspGenX
 - https://github.com/graspnet/anygrasp_sdk
 - https://github.com/NVlabs/contact_graspnet
 - https://github.com/graspnet/graspnet-baseline

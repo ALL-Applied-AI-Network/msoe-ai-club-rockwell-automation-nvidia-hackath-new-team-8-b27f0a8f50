@@ -30,6 +30,11 @@ from sorting_core.grasping import (
 )
 from sorting_core.perception import DetectedObject, Pose3D, SceneObservation
 
+from team_plugins.grasping.ai_selection import (
+    AIAssistedSelector,
+    _AI_SIMULATION_CAPABILITY,
+    _create_ai_selection_policy,
+)
 
 PLUGIN_API_VERSION = 1
 FEATURE_SCHEMA_ID = "team8-preaction-grasp-features-v1"
@@ -201,21 +206,16 @@ def _measure_candidate(
     expected_class = (
         SCREW_CLASS_ID if candidate.generator_id == SCREW_GENERATOR_ID else "cube"
     )
-    target_class_mismatch = (
-        target is not None and target.class_id != expected_class
-    )
+    target_class_mismatch = target is not None and target.class_id != expected_class
     target_geometry_missing = target is not None and target.dimensions_m is None
     legacy_adapter_evidence = (
         target is not None
         and legacy_target is not None
         and "legacy_square_yaw_rad" in target.attributes
     )
-    target_evidence_missing = (
-        target is None
-        or (
-            (target.pose_quality is None or target.visibility is None)
-            and not legacy_adapter_evidence
-        )
+    target_evidence_missing = target is None or (
+        (target.pose_quality is None or target.visibility is None)
+        and not legacy_adapter_evidence
     )
     target_position_disagreement = 0.0
     target_dimension_disagreement = 0.0
@@ -232,8 +232,7 @@ def _measure_candidate(
         )
         if target.dimensions_m is not None:
             target_dimension_disagreement = max(
-                abs(value - settings.cube_edge_m)
-                for value in target.dimensions_m
+                abs(value - settings.cube_edge_m) for value in target.dimensions_m
             )
         if legacy_target is not None:
             target_yaw_disagreement = _square_yaw_distance(
@@ -297,11 +296,7 @@ def _measure_candidate(
     visibility = (
         confidence
         if legacy_adapter_evidence and target.visibility is None
-        else (
-            0.0
-            if target is None or target.visibility is None
-            else target.visibility
-        )
+        else (0.0 if target is None or target.visibility is None else target.visibility)
     )
     return {
         "pick_radius_m": math.hypot(px, py),
@@ -500,9 +495,7 @@ class GeometricPriorScorer:
 
     def score(self, candidate, features):
         values = features.values
-        clearance = max(
-            min(values["minimum_footprint_clearance_m"], 0.025), 0.0
-        )
+        clearance = max(min(values["minimum_footprint_clearance_m"], 0.025), 0.0)
         evidence = (
             values["confidence"] + values["pose_quality"] + values["visibility"]
         ) / 3.0
@@ -607,9 +600,7 @@ class JsonLogisticScorer:
     @staticmethod
     def _vector(value: Any, name: str) -> tuple[float, ...]:
         if not isinstance(value, list) or len(value) != len(FEATURE_NAMES):
-            raise ValueError(
-                f"{name} must contain {len(FEATURE_NAMES)} values"
-            )
+            raise ValueError(f"{name} must contain {len(FEATURE_NAMES)} values")
         return tuple(_finite(item, name) for item in value)
 
     def score(self, candidate, features):
@@ -678,23 +669,15 @@ def _build_scorer(context, *, allow_uncalibrated: bool):
         return GeometricPriorScorer()
     if scorer_name == "checkpoint_logistic":
         if not context.checkpoint:
-            raise ValueError(
-                "checkpoint_logistic requires ROCKWELL_GRASP_CHECKPOINT"
-            )
+            raise ValueError("checkpoint_logistic requires ROCKWELL_GRASP_CHECKPOINT")
         checkpoint_sha256 = context.options.get("checkpoint_sha256")
         if not isinstance(checkpoint_sha256, str):
-            raise ValueError(
-                "checkpoint_logistic requires options.checkpoint_sha256"
-            )
-        return JsonLogisticScorer(
-            context.checkpoint, expected_sha256=checkpoint_sha256
-        )
+            raise ValueError("checkpoint_logistic requires options.checkpoint_sha256")
+        return JsonLogisticScorer(context.checkpoint, expected_sha256=checkpoint_sha256)
     raise ValueError(f"unsupported scorer {scorer_name!r}")
 
 
-def _create_pipeline(
-    context, *, allow_uncalibrated: bool
-) -> GraspPlanningPipeline:
+def _create_pipeline(context, *, allow_uncalibrated: bool) -> GraspPlanningPipeline:
     allowed = {
         "scorer",
         "checkpoint_sha256",
@@ -709,15 +692,11 @@ def _create_pipeline(
     }
     unknown = set(context.options) - allowed
     if unknown:
-        raise ValueError(
-            "unknown grasp profile options: " + ", ".join(sorted(unknown))
-        )
+        raise ValueError("unknown grasp profile options: " + ", ".join(sorted(unknown)))
     raw_offsets = context.options.get("yaw_offsets_deg", (0.0, 45.0, 90.0))
     if not isinstance(raw_offsets, (tuple, list)):
         raise ValueError("yaw_offsets_deg must be an array")
-    offsets = tuple(
-        math.radians(_finite(value, "yaw offset")) for value in raw_offsets
-    )
+    offsets = tuple(math.radians(_finite(value, "yaw offset")) for value in raw_offsets)
     settings = _settings_from_config(context.config, context.options)
     return GraspPlanningPipeline(
         generator=CubeYawCandidateGenerator(
@@ -726,9 +705,7 @@ def _create_pipeline(
         ),
         checker=SceneEnvelopeChecker(settings),
         feature_extractor=Team8FeatureExtractor(settings),
-        scorer=_build_scorer(
-            context, allow_uncalibrated=allow_uncalibrated
-        ),
+        scorer=_build_scorer(context, allow_uncalibrated=allow_uncalibrated),
         selector=HighestSuccessSelector(),
     )
 
@@ -743,6 +720,54 @@ def create_simulation(context) -> GraspPlanningPipeline:
     """Build the explicit uncalibrated cube ranker for direct Isaac use only."""
 
     return _create_pipeline(context, allow_uncalibrated=True)
+
+
+def _create_ai_simulation_pipeline(
+    context,
+    provider,
+    *,
+    simulation_capability,
+    mode="shadow",
+    minimum_confidence=0.7,
+    minimum_score_margin=0.1,
+    timeout_s=20.0,
+    decision_sink,
+) -> GraspPlanningPipeline:
+    """Build an explicitly simulation-only pretrained-model selector.
+
+    The normal executable factory remains unchanged. The injected provider sees
+    only candidates that have already passed SceneEnvelopeChecker.
+    """
+
+    if simulation_capability is not _AI_SIMULATION_CAPABILITY:
+        raise ValueError("AI binding requires the isolated simulation capability")
+    if context.options.get("simulation_only") is not True:
+        raise ValueError("AI grasp selection requires simulation_only=true")
+    if decision_sink is None or not callable(decision_sink):
+        raise ValueError("AI grasp selection requires a callable durable receipt sink")
+    baseline = create_simulation(context)
+    policy = _create_ai_selection_policy(
+        provider,
+        simulation_capability=simulation_capability,
+        mode=mode,
+        minimum_confidence=minimum_confidence,
+        minimum_score_margin=minimum_score_margin,
+        timeout_s=timeout_s,
+        request_context={
+            "profile_id": str(context.profile_id),
+            "profile_path": str(context.profile_path),
+            "profile_sha256": str(context.profile_sha256),
+            "simulation_only": True,
+            "object_family": "10mm_block",
+        },
+    )
+    return GraspPlanningPipeline(
+        generator=baseline.generator,
+        checker=baseline.checker,
+        feature_extractor=baseline.feature_extractor,
+        scorer=baseline.scorer,
+        selector=AIAssistedSelector(policy, decision_sink=decision_sink),
+    )
 
 
 def _rotate_vector(
@@ -783,12 +808,8 @@ class ScrewShaftCandidateGenerator:
             raise ValueError("screw offsets must be non-empty and unique")
         self.length_m = _positive(length_m, "length_m")
         self.shank_start_m = _positive(shank_start_m, "shank_start_m")
-        self.shank_diameter_m = _positive(
-            shank_diameter_m, "shank_diameter_m"
-        )
-        self.seating_margin_m = _positive(
-            seating_margin_m, "seating_margin_m"
-        )
+        self.shank_diameter_m = _positive(shank_diameter_m, "shank_diameter_m")
+        self.seating_margin_m = _positive(seating_margin_m, "seating_margin_m")
         if len(catalog_dimensions_m) != 3:
             raise ValueError("catalog_dimensions_m must contain three extents")
         self.catalog_dimensions_m = tuple(
@@ -883,12 +904,12 @@ class OfflineGraspDecision:
 class OfflineScrewPlanner:
     """Score screw candidates without crossing the cube-only executor boundary."""
 
-    def __init__(self, settings, scorer, generator=None) -> None:
+    def __init__(self, settings, scorer, generator=None, selector=None) -> None:
         self.settings = settings
         self.scorer = scorer
         self.generator = generator or ScrewShaftCandidateGenerator()
         self.checker = SceneEnvelopeChecker(settings)
-        self.selector = HighestSuccessSelector()
+        self.selector = HighestSuccessSelector() if selector is None else selector
 
     def decide(
         self,
@@ -916,9 +937,7 @@ class OfflineScrewPlanner:
             approach_clearance_m=approach_clearance_m,
         )
         context = GraspPlanningContext(
-            destination=BinTarget(
-                target.sort_label, release_tip_pose.xyz_m[:2]
-            ),
+            destination=BinTarget(target.sort_label, release_tip_pose.xyz_m[:2]),
             release_tip_pose=release_tip_pose,
             pick_tip_z_m=pick_tip_z_m,
             approach_clearance_m=approach_clearance_m,
@@ -948,18 +967,14 @@ class OfflineScrewPlanner:
                 {name: values[name] for name in FEATURE_NAMES},
             )
             score = self.scorer.score(candidate, features)
-            evaluations.append(
-                EvaluatedGrasp(candidate, feasibility, features, score)
-            )
+            evaluations.append(EvaluatedGrasp(candidate, feasibility, features, score))
         if not evaluations:
             details = "; ".join(
                 f"{item.candidate.candidate_id}: "
                 + ", ".join(item.feasibility.rejection_reasons)
                 for item in rejections
             )
-            raise GraspPlanningError(
-                "no feasible offline screw candidates: " + details
-            )
+            raise GraspPlanningError("no feasible offline screw candidates: " + details)
         selected = self.selector.select(tuple(evaluations))
         return OfflineGraspDecision(
             scene_id=scene.scene_id,
@@ -976,6 +991,49 @@ def build_offline_screw_planner(config, *, scorer=None, options=None):
     return OfflineScrewPlanner(
         settings,
         scorer if scorer is not None else GeometricPriorScorer(),
+    )
+
+
+def _create_ai_offline_screw_planner(
+    context,
+    provider,
+    *,
+    simulation_capability,
+    mode="shadow",
+    minimum_confidence=0.7,
+    minimum_score_margin=0.1,
+    timeout_s=20.0,
+    decision_sink,
+) -> OfflineScrewPlanner:
+    """Build a receipt-writing, non-executable AI screw planner."""
+
+    if simulation_capability is not _AI_SIMULATION_CAPABILITY:
+        raise ValueError("AI binding requires the isolated simulation capability")
+    if context.options.get("simulation_only") is not True:
+        raise ValueError("AI grasp selection requires simulation_only=true")
+    if decision_sink is None or not callable(decision_sink):
+        raise ValueError("AI grasp selection requires a callable durable receipt sink")
+    policy = _create_ai_selection_policy(
+        provider,
+        simulation_capability=simulation_capability,
+        mode=mode,
+        minimum_confidence=minimum_confidence,
+        minimum_score_margin=minimum_score_margin,
+        timeout_s=timeout_s,
+        request_context={
+            "profile_id": str(context.profile_id),
+            "profile_path": str(context.profile_path),
+            "profile_sha256": str(context.profile_sha256),
+            "simulation_only": True,
+            "object_family": "iso10642_m6x30_screw",
+            "execution_supported": False,
+        },
+    )
+    settings = _settings_from_config(context.config, context.options)
+    return OfflineScrewPlanner(
+        settings,
+        _build_scorer(context, allow_uncalibrated=True),
+        selector=AIAssistedSelector(policy, decision_sink=decision_sink),
     )
 
 
