@@ -28,6 +28,9 @@ your coding AI when a step or term is unclear; do not guess at the robot.
 - Table RGB is currently the only camera trusted for motion coordinates. Side
   and wrist images are valuable diagnostic evidence, but their detector bias,
   wrist transform/timing, and hose occlusion are not yet validated for motion.
+- Use the no-motion vision diagnostic's `--capture-camera table|side|wrist`
+  option to collect each stream separately at its configured resolution. Side
+  and wrist runs are capture-only and do not publish motion coordinates.
 
 For screws to become hardware-ready, the teams must first complete and test:
 

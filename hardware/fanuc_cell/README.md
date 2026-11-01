@@ -169,6 +169,17 @@ row. An archived site snapshot in `scilabDocumentation.txt` contains older
 100/12/40/8 values. Shared trajectories stay at 5 mm. The supervised hardware
 launcher defaults to a `smooth` profile using 10 mm rows, 8-degree rows and a
 nominal 100 mm/s; `--motion-profile conservative` restores 5 mm / 50 mm/s.
+The smooth profile keeps three identical terminal target rows when capacity
+allows, so the real servo can converge without draining the action queue.
+While a long chunk is playing, the client polls queue state with a 160×90 JPEG;
+it still fetches a fresh lossless 1920×1080 frame before every policy decision.
+The official localhost mock accepts this request pattern, but a real rollout is
+still needed to measure its effect on queue starvation and motion continuity.
+
+At pre-descent and post-placement camera checkpoints, a transient unusable or
+ambiguous frame now causes at most three hold-and-reobserve cycles. Motion does
+not advance on those frames, and a fourth failure latches the policy into its
+existing hold behavior.
 
 ---
 

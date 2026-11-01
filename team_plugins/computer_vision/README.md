@@ -308,6 +308,15 @@ still returns the already-constructed hold. Once the base policy has
 successfully constructed a row, the returned action remains the original
 strict measured TCP/gripper hold row.
 
+Use `--capture-camera side` or `--capture-camera wrist` for a separate
+native-calibration-resolution evidence run. Those auxiliary modes are
+explicitly `capture_only`: they save decoded RGB plus calibration and measured
+robot-state provenance, but do not run the table provider, publish an object
+pose, or fuse cameras. The official client has one RGB request size, so the
+tool intentionally requests one camera per process. See
+`HARDWARE_VALIDATION.md` for commands and the still-unverified approved-camera
+backend requirement.
+
 `--max-snapshots` limits provider calls and saved snapshots; it does **not**
 terminate the approved rollout. After the limit, the policy continues returning
 fresh measured-pose holds until the cell run ends or the operator stops it.

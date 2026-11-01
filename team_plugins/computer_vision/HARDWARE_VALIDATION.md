@@ -151,10 +151,36 @@ The table camera is the only current source permitted for robot-base target
 coordinates. Side/wrist frames are diagnostic until cross-camera calibration
 and timing are measured.
 
-The active hybrid profile requests table RGB only, so the diagnostic captures
-only that stream. Capturing side/wrist/depth requires a separately reviewed
-profile/backend change; merely listing another camera does not calibrate or
-fuse it.
+The diagnostic can request one RGB stream at a time at the resolution pinned by
+`hardware/fanuc_cell/calibration/cameras.json`. Separate processes are required
+because the official client exposes one global RGB request size while table and
+side are 1920x1080 and wrist is 1280x720:
+
+```bash
+# Evidence only: no side/wrist provider inference and no coordinate fusion.
+uv run --project hardware/fanuc_cell python -m \
+  team_plugins.computer_vision.live_no_motion_diagnostic \
+  --capture-camera side \
+  --output-dir /mnt/c/path/outside-the-repository/live-side-01 \
+  --cube-mm 16 --max-snapshots 10
+
+uv run --project hardware/fanuc_cell python -m \
+  team_plugins.computer_vision.live_no_motion_diagnostic \
+  --capture-camera wrist \
+  --output-dir /mnt/c/path/outside-the-repository/live-wrist-01 \
+  --cube-mm 16 --max-snapshots 10
+```
+
+Those modes save the decoded frame, calibration ID/solve/RMS/transform
+provenance, observation timestamp, joints and TCP, and mark the record
+`capture_only`. They deliberately do not run the table provider or publish a
+pose. The backend may also require the selected camera to be listed in the
+approved submission; this has not been tested against the live service. Verify
+that requirement with the organizer or a hold-only request before relying on
+the commands. Requested native-calibration resolution is still not proof that
+the returned pixels are untouched sensor-native data. Depth capture remains a
+separate reviewed backend change. Merely saving another view does not calibrate
+or fuse it.
 
 ## Minimal measured pose set
 

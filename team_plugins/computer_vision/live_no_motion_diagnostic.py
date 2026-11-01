@@ -4,7 +4,15 @@ This is a deliberately narrow adapter around the official SIDC Lab client.  It
 selects the requested checked-in vision profile *before* importing ``Policy``, clears the
 physical-motion/descent interlocks, lets the normal policy construct its strict
 measured-pose hold row, and only then calls the existing private perception
-boundary.  It never calls ``_start_next_plan`` or a motion phase.
+boundary for the trusted table-camera mode.  Side and wrist modes save native-
+resolution evidence plus measured robot feedback but deliberately skip provider
+inference because their motion-coordinate adapters are not yet validated.  It
+never calls ``_start_next_plan`` or a motion phase.
+
+Only one RGB camera is requested per process.  The official client exposes one
+global RGB request size, while the pinned wrist calibration is 1280x720 and the
+fixed cameras are 1920x1080.  Separate captures avoid silently rescaling one
+camera through another camera's calibration.
 
 The official TCP protocol has no no-op.  Repeating the measured TCP/gripper row
 may still produce a small controller correction; this tool is not an emergency
@@ -53,6 +61,7 @@ GRASP_FIT_ENV = "ROCKWELL_CONFIRM_CUBE_GRASP_FIT"
 
 _INTERLOCK_ENVIRONMENT = (MOTION_ENV, DESCENT_ENV, GRASP_FIT_ENV)
 _MAXIMUM_SNAPSHOTS = 100
+_CAPTURE_CAMERA_IDS = ("table", "side", "wrist")
 
 
 def _sha256_file(path: Path) -> str:
@@ -61,6 +70,48 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _capture_camera_spec(camera_id: str) -> dict[str, Any]:
+    """Return the pinned native RGB capture contract for one physical camera.
+
+    The official client exposes one global RGB size per observation request, so
+    cameras with different native sizes cannot be requested together without
+    resampling at least one stream.  The diagnostic therefore captures exactly
+    one camera at a time and asks for the size pinned by ``cameras.json``.
+    """
+
+    if camera_id not in _CAPTURE_CAMERA_IDS:
+        raise ValueError(
+            f"capture_camera must be one of {', '.join(_CAPTURE_CAMERA_IDS)}"
+        )
+    try:
+        calibration_root = json.loads(CALIBRATION_PATH.read_text(encoding="utf-8"))
+        calibration = calibration_root[camera_id]
+        size = calibration["size"]
+        width, height = int(size[0]), int(size[1])
+        rms_px = float(calibration["rms_px"])
+        solved = str(calibration["solved"])
+        transform = str(calibration["transform"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"invalid RGB calibration entry for capture camera {camera_id!r}"
+        ) from exc
+    if width <= 0 or height <= 0 or not np.isfinite(rms_px):
+        raise ValueError(
+            f"invalid RGB calibration entry for capture camera {camera_id!r}"
+        )
+    return {
+        "camera_id": camera_id,
+        "image_size_wh": (width, height),
+        "calibration_id": f"sidclab-cameras.json:{camera_id}",
+        "calibration_solved": solved,
+        "calibration_rms_px": rms_px,
+        "transform_semantics": transform,
+        "moving_camera": camera_id == "wrist",
+        "trusted_for_motion_coordinates": camera_id == "table",
+        "provider_inference_enabled": camera_id == "table",
+    }
 
 
 def _git_value(*arguments: str) -> str | None:
@@ -189,6 +240,7 @@ class SnapshotRecorder:
         maximum_snapshots: int,
         cube_edge_mm: int,
         provenance: Mapping[str, Any] | None = None,
+        capture_camera_spec: Mapping[str, Any] | None = None,
     ) -> None:
         if not 1 <= int(maximum_snapshots) <= _MAXIMUM_SNAPSHOTS:
             raise ValueError(
@@ -200,6 +252,13 @@ class SnapshotRecorder:
         self.maximum_snapshots = int(maximum_snapshots)
         self.cube_edge_mm = cube_edge_mm
         self.provenance = dict(provenance or _repository_provenance())
+        self.capture_camera_spec = (
+            None if capture_camera_spec is None else dict(capture_camera_spec)
+        )
+        self.provider_inference_enabled = bool(
+            self.capture_camera_spec is None
+            or self.capture_camera_spec.get("provider_inference_enabled", True)
+        )
         self.attempts = 0
         self.failures = 0
         self._limit_reported = False
@@ -220,6 +279,21 @@ class SnapshotRecorder:
                     f"camera {camera_id!r} must be HxWx3 uint8 RGB, got "
                     f"{rgb.dtype} {rgb.shape}"
                 )
+            camera_spec = self.capture_camera_spec
+            if camera_spec is not None:
+                if str(camera_spec.get("camera_id")) != str(camera_id):
+                    raise ValueError(
+                        "capture camera specification does not match the policy "
+                        f"camera: {camera_spec.get('camera_id')!r} != {camera_id!r}"
+                    )
+                expected_width, expected_height = camera_spec["image_size_wh"]
+                expected_shape = (int(expected_height), int(expected_width), 3)
+                if rgb.shape != expected_shape:
+                    raise ValueError(
+                        f"camera {camera_id!r} response must match its pinned native "
+                        f"RGB calibration size {expected_width}x{expected_height}, got "
+                        f"{rgb.shape[1]}x{rgb.shape[0]}"
+                    )
             safe_camera_id = "".join(
                 character if character.isalnum() or character in "-_" else "_"
                 for character in str(camera_id)
@@ -231,24 +305,37 @@ class SnapshotRecorder:
             if not ok:
                 raise OSError(f"failed to encode camera {camera_id!r} as PNG")
             _write_bytes_atomic(self.output_dir / filename, encoded.tobytes())
-            records.append(
-                {
-                    "camera_id": str(camera_id),
-                    "file": filename,
-                    "shape_hwc": [int(value) for value in rgb.shape],
-                    "dtype": str(rgb.dtype),
-                    "channel_order": "RGB",
-                    "pixel_provenance": (
-                        "decoded_backend_observation_at_requested_resolution"
+            frame_record = {
+                "camera_id": str(camera_id),
+                "file": filename,
+                "shape_hwc": [int(value) for value in rgb.shape],
+                "dtype": str(rgb.dtype),
+                "channel_order": "RGB",
+                "pixel_provenance": (
+                    "decoded_backend_observation_at_requested_resolution"
+                ),
+                "sensor_native_unmodified": False,
+                "requested_wire_format": str(
+                    getattr(policy, "IMAGE_FORMAT", "unknown")
+                ),
+                "rgb_sha256": hashlib.sha256(rgb.tobytes(order="C")).hexdigest(),
+                "png_sha256": _sha256_file(self.output_dir / filename),
+            }
+            if camera_spec is not None:
+                frame_record["calibration"] = {
+                    "calibration_id": camera_spec["calibration_id"],
+                    "native_size_wh": [
+                        int(value) for value in camera_spec["image_size_wh"]
+                    ],
+                    "solved": camera_spec["calibration_solved"],
+                    "rms_px": float(camera_spec["calibration_rms_px"]),
+                    "transform_semantics": camera_spec["transform_semantics"],
+                    "moving_camera": bool(camera_spec["moving_camera"]),
+                    "trusted_for_motion_coordinates": bool(
+                        camera_spec["trusted_for_motion_coordinates"]
                     ),
-                    "sensor_native_unmodified": False,
-                    "requested_wire_format": str(
-                        getattr(policy, "IMAGE_FORMAT", "unknown")
-                    ),
-                    "rgb_sha256": hashlib.sha256(rgb.tobytes(order="C")).hexdigest(),
-                    "png_sha256": _sha256_file(self.output_dir / filename),
                 }
-            )
+            records.append(frame_record)
         return records
 
     def capture(
@@ -282,7 +369,11 @@ class SnapshotRecorder:
         scene: SceneObservation | None = None
         failure: Exception | None = None
         failure_stage: str | None = None
-        provider = getattr(policy, "_perception_provider", None)
+        provider = (
+            getattr(policy, "_perception_provider", None)
+            if self.provider_inference_enabled
+            else None
+        )
         proxy = None
         if provider is not None:
             class _CapturingProvider:
@@ -302,31 +393,34 @@ class SnapshotRecorder:
 
             proxy = _CapturingProvider(provider)
             policy._perception_provider = proxy
-        try:
-            # This is the narrow private integration described in the module
-            # docstring. It builds/validates the provider request *and* applies
-            # the cube task's diagnostic partitioning. A task-partition error can
-            # therefore follow valid provider output. It never starts a plan or
-            # constructs a motion phase.
-            scene = policy._detect_scene_views(obs).observation
-            if not isinstance(scene, SceneObservation):
-                raise TypeError("policy perception boundary returned no SceneObservation")
-        except Exception as exc:  # explicit evidence plus nonzero process exit
-            failure = exc
-            if proxy is not None and proxy.scene is not None:
-                # The provider result itself passed the strict request boundary;
-                # retain it even when the legacy cube-task partition rejects the
-                # scene afterward (for example because a task-specific colour
-                # condition is absent). This distinction is essential when the
-                # purpose of the run is vision evidence rather than execution.
-                scene = proxy.scene
-                failure_stage = "task_partition_after_valid_provider_scene"
-            else:
-                failure_stage = "provider_or_request_boundary"
-            self.failures += 1
-        finally:
-            if proxy is not None:
-                policy._perception_provider = provider
+        if self.provider_inference_enabled:
+            try:
+                # This is the narrow private integration described in the module
+                # docstring. It builds/validates the provider request *and* applies
+                # the cube task's diagnostic partitioning. A task-partition error can
+                # therefore follow valid provider output. It never starts a plan or
+                # constructs a motion phase.
+                scene = policy._detect_scene_views(obs).observation
+                if not isinstance(scene, SceneObservation):
+                    raise TypeError(
+                        "policy perception boundary returned no SceneObservation"
+                    )
+            except Exception as exc:  # explicit evidence plus nonzero process exit
+                failure = exc
+                if proxy is not None and proxy.scene is not None:
+                    # The provider result itself passed the strict request boundary;
+                    # retain it even when the legacy cube-task partition rejects the
+                    # scene afterward (for example because a task-specific colour
+                    # condition is absent). This distinction is essential when the
+                    # purpose of the run is vision evidence rather than execution.
+                    scene = proxy.scene
+                    failure_stage = "task_partition_after_valid_provider_scene"
+                else:
+                    failure_stage = "provider_or_request_boundary"
+                self.failures += 1
+            finally:
+                if proxy is not None:
+                    policy._perception_provider = provider
         latency_ms = (time.perf_counter() - started) * 1000.0
 
         trial = obs.get("trial")
@@ -337,13 +431,20 @@ class SnapshotRecorder:
         record: dict[str, Any] = {
             "schema_version": 1,
             "snapshot_index": index,
-            "status": "error" if failure is not None else "ok",
+            "status": (
+                "error"
+                if failure is not None
+                else "ok"
+                if self.provider_inference_enabled
+                else "capture_only"
+            ),
             "capture_time_s": observation_time_s,
             "trial_id": trial_id,
             "cube_edge_mm": self.cube_edge_mm,
             "perception_latency_ms": latency_ms,
             "hold_action_generated_before_perception": True,
             "motion_planning_called": False,
+            "provider_inference_ran": self.provider_inference_enabled,
             "frames": frames,
             "robot_feedback": {
                 "source_timestamp_s": observation_time_s,
@@ -407,8 +508,30 @@ class SnapshotRecorder:
         )
 
 
-def diagnostic_policy_class(base_policy_class: type, recorder: SnapshotRecorder) -> type:
+def diagnostic_policy_class(
+    base_policy_class: type,
+    recorder: SnapshotRecorder,
+    *,
+    capture_camera_id: str = "table",
+    capture_image_size: tuple[int, int] | None = None,
+) -> type:
     """Return a Policy subclass that preserves hold output byte-for-byte."""
+
+    if capture_camera_id not in _CAPTURE_CAMERA_IDS:
+        raise ValueError(
+            f"capture_camera_id must be one of {', '.join(_CAPTURE_CAMERA_IDS)}"
+        )
+    if capture_image_size is None:
+        capture_image_size = tuple(
+            int(value)
+            for value in getattr(base_policy_class, "IMAGE_SIZE", (1920, 1080))
+        )
+    if (
+        len(capture_image_size) != 2
+        or int(capture_image_size[0]) <= 0
+        or int(capture_image_size[1]) <= 0
+    ):
+        raise ValueError("capture_image_size must be positive (width, height)")
 
     class LiveNoMotionDiagnosticPolicy(base_policy_class):
         def _assert_interlocks_closed(self) -> None:
@@ -469,6 +592,17 @@ def diagnostic_policy_class(base_policy_class: type, recorder: SnapshotRecorder)
 
     LiveNoMotionDiagnosticPolicy.__name__ = "LiveNoMotionDiagnosticPolicy"
     LiveNoMotionDiagnosticPolicy.__qualname__ = "LiveNoMotionDiagnosticPolicy"
+    # The official client reads these attributes from the replacement class.
+    # Exactly one stream is requested because it exposes only one global RGB
+    # size per observation and the wrist camera has a different native size.
+    LiveNoMotionDiagnosticPolicy.CAMERAS = (capture_camera_id,)
+    LiveNoMotionDiagnosticPolicy.IMAGE_SIZE = tuple(
+        int(value) for value in capture_image_size
+    )
+    # If the base hardware policy uses reduced queue-poll previews, keep them
+    # on the same explicitly selected stream. In particular, a wrist/side-only
+    # approved diagnostic must never inherit the base policy's table preview.
+    LiveNoMotionDiagnosticPolicy.QUEUE_POLL_CAMERAS = (capture_camera_id,)
     return LiveNoMotionDiagnosticPolicy
 
 
@@ -531,6 +665,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cube-mm", required=True, type=int, choices=(10, 16))
     parser.add_argument(
+        "--capture-camera",
+        choices=_CAPTURE_CAMERA_IDS,
+        default="table",
+        help=(
+            "single RGB camera to save at its pinned native calibration size; "
+            "side/wrist are capture-only and are not used for pose or motion"
+        ),
+    )
+    parser.add_argument(
         "--vision",
         choices=("hybrid-geometry", "yolo11n"),
         default="hybrid-geometry",
@@ -588,6 +731,14 @@ def main(
 ) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    camera_spec = _capture_camera_spec(args.capture_camera)
+    if args.capture_camera != "table" and (
+        args.vision != "hybrid-geometry" or args.vision_checkpoint is not None
+    ):
+        parser.error(
+            "--vision/--vision-checkpoint apply only to --capture-camera table; "
+            "side and wrist are evidence-only"
+        )
     if args.vision == "yolo11n":
         if args.vision_checkpoint is None:
             parser.error("--vision yolo11n requires --vision-checkpoint PATH")
@@ -608,6 +759,14 @@ def main(
                     "event": "vision_diagnostic_dry_run",
                     **environment_summary,
                     "vision": args.vision,
+                    "capture_camera": args.capture_camera,
+                    "capture_image_size_wh": list(camera_spec["image_size_wh"]),
+                    "provider_inference_enabled": camera_spec[
+                        "provider_inference_enabled"
+                    ],
+                    "trusted_for_motion_coordinates": camera_spec[
+                        "trusted_for_motion_coordinates"
+                    ],
                     "maximum_snapshots": args.max_snapshots,
                     "output_dir": str(args.output_dir.expanduser().resolve()),
                 },
@@ -621,6 +780,7 @@ def main(
         maximum_snapshots=args.max_snapshots,
         cube_edge_mm=args.cube_mm,
         provenance=_repository_provenance(profile_path),
+        capture_camera_spec=camera_spec,
     )
     official_run = (
         _load_official_run(profile_path)
@@ -628,7 +788,12 @@ def main(
         else official_run_loader()
     )
     original_policy = official_run.Policy
-    official_run.Policy = diagnostic_policy_class(original_policy, recorder)
+    official_run.Policy = diagnostic_policy_class(
+        original_policy,
+        recorder,
+        capture_camera_id=args.capture_camera,
+        capture_image_size=tuple(camera_spec["image_size_wh"]),
+    )
     previous_argv = sys.argv
     try:
         sys.argv = [str(HARDWARE_DIR / "run.py"), *_forwarded_arguments(args)]

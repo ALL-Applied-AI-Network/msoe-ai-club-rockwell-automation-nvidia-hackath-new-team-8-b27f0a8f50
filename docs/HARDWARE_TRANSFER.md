@@ -123,6 +123,18 @@ The client observation also carries a timestamp, robot status, and queued-action
 count internally. Preserve those when adapting it to a project observation;
 they are needed to reject stale decisions and understand latency.
 
+The current hardware policy uses full-resolution lossless table RGB for every
+perception decision. While a long action chunk is still queued, the client may
+request a 160×90 JPEG only to read trial and queue state; that preview is never
+passed to `Policy.act`. Chunks shorter than four rows skip the extra preview
+request. This reduces repeated 1080p transfers but does not reduce the calibrated
+decision-frame resolution.
+
+One ambiguous camera frame at the explicit pre-descent or post-placement
+checkpoint does not immediately abandon the rollout. The policy holds the
+freshly measured pose and requests at most three new frames. It still advances
+only after a valid observation; persistent failure remains a latched hold.
+
 OpenCV normally treats decoded images as BGR, but the official client converts
 them to RGB. Convert explicitly at one boundary. Otherwise red and blue sorting
 can silently reverse.

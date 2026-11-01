@@ -283,6 +283,12 @@ class FanucPolicyTests(unittest.TestCase):
         self.assertTrue(policy.PREFETCH)
         self.assertEqual(policy.DEPTH, [])
         self.assertEqual(policy.IMAGE_FORMAT, "png")
+        self.assertEqual(policy.QUEUE_POLL_CAMERAS, ("table",))
+        self.assertEqual(policy.QUEUE_POLL_IMAGE_SIZE, (160, 90))
+        self.assertEqual(policy.QUEUE_POLL_IMAGE_FORMAT, "jpeg")
+        self.assertEqual(policy.QUEUE_POLL_IMAGE_QUALITY, 50)
+        self.assertEqual(policy.QUEUE_POLL_DEPTH, ())
+        self.assertEqual(policy.QUEUE_POLL_MIN_ROWS, 4)
 
         obs = _observation(policy._scan_tcp[:6], trial_id="real-rollout")
         obs["joints"][-1] = 0.65
@@ -479,15 +485,122 @@ class FanucPolicyTests(unittest.TestCase):
             policy.config.gripper.open_command,
         )
         obs = _observation(current[:6], trial_id="real-rollout")
-        chunk = np.asarray(policy._execute_phase(obs, phase), dtype=float)
+        obs["queued"] = 4
+        with mock.patch.object(policy, "_emit", wraps=policy._emit) as emit:
+            chunk = np.asarray(policy._execute_phase(obs, phase), dtype=float)
 
         self.assertEqual(policy._max_linear_step_mm, 10.0)
         self.assertEqual(policy._max_angular_step_deg, 8.0)
-        self.assertEqual(len(chunk), 13)
+        self.assertEqual(len(chunk), 15)
         deltas = np.linalg.norm(
             np.diff(np.vstack([current[:3], chunk[:, :3]]), axis=0), axis=1
         )
         self.assertLessEqual(float(deltas.max()), 10.0 + 1e-9)
+        np.testing.assert_allclose(
+            chunk[-policy.SMOOTH_TERMINAL_TARGET_ROWS :],
+            np.repeat(
+                chunk[-1][None, :],
+                policy.SMOOTH_TERMINAL_TARGET_ROWS,
+                axis=0,
+            ),
+        )
+        event = next(
+            call.kwargs
+            for call in emit.call_args_list
+            if call.args and call.args[0] == "phase_action"
+        )
+        self.assertEqual(event["action_kind"], "motion")
+        self.assertEqual(event["motion_profile"], "smooth")
+        self.assertEqual(event["motion_call"], 1)
+        self.assertEqual(event["queued_at_observation"], 4)
+        self.assertEqual(event["geometric_rows_sent"], 13)
+        self.assertEqual(event["geometric_rows_remaining"], 0)
+        self.assertEqual(event["terminal_padding_rows"], 2)
+        self.assertEqual(event["first_action_row"], chunk[0].round(4).tolist())
+        self.assertEqual(event["last_action_row"], chunk[-1].round(4).tolist())
+
+    def test_terminal_target_padding_is_smooth_motion_only(self):
+        current_policy = Policy()
+        current = np.asarray(current_policy._scan_tcp, dtype=float)
+        target = current.copy()
+        target[2] -= 20.0
+        phase = MotionPhase(
+            "conservative-test",
+            uf0_tcp_to_base_tip(target, current_policy.config),
+            current_policy.config.gripper.open_command,
+        )
+        obs = _observation(current[:6], trial_id="real-rollout")
+
+        chunk = np.asarray(
+            current_policy._execute_phase(obs, phase), dtype=float
+        )
+
+        self.assertEqual(len(chunk), 4)
+        self.assertFalse(np.allclose(chunk[-2], chunk[-1]))
+
+    def test_terminal_target_padding_never_displaces_motion_rows(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_PROFILE_ENV: "smooth",
+                "ROCKWELL_MAX_ACTIONS_PER_ACT": "1",
+            },
+        ):
+            policy = Policy()
+        current = np.asarray(policy._scan_tcp, dtype=float)
+        target = current.copy()
+        target[2] -= 20.0
+        phase = MotionPhase(
+            "one-row-smooth-test",
+            uf0_tcp_to_base_tip(target, policy.config),
+            policy.config.gripper.open_command,
+        )
+        obs = _observation(current[:6], trial_id="real-rollout")
+
+        with mock.patch.object(policy, "_emit", wraps=policy._emit) as emit:
+            chunk = np.asarray(policy._execute_phase(obs, phase), dtype=float)
+
+        self.assertEqual(chunk.shape, (1, 7))
+        event = next(
+            call.kwargs
+            for call in emit.call_args_list
+            if call.args and call.args[0] == "phase_action"
+        )
+        self.assertEqual(event["geometric_rows_sent"], 1)
+        self.assertEqual(event["geometric_rows_remaining"], 1)
+        self.assertEqual(event["terminal_padding_rows"], 0)
+
+    def test_terminal_target_padding_does_not_replace_gripper_dwell(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_PROFILE_ENV: "smooth",
+                "ROCKWELL_MAX_ACTIONS_PER_ACT": "32",
+            },
+        ):
+            policy = Policy()
+        current = np.asarray(policy._scan_tcp, dtype=float)
+        target = current.copy()
+        target[2] -= 20.0
+        phase = MotionPhase(
+            "close",
+            uf0_tcp_to_base_tip(target, policy.config),
+            policy.config.gripper.closed_command,
+            dwell_s=0.6,
+        )
+        obs = _observation(current[:6], trial_id="real-rollout")
+
+        with mock.patch.object(policy, "_emit", wraps=policy._emit) as emit:
+            chunk = np.asarray(policy._execute_phase(obs, phase), dtype=float)
+
+        self.assertEqual(chunk.shape, (2, 7))
+        self.assertFalse(np.allclose(chunk[-2], chunk[-1]))
+        event = next(
+            call.kwargs
+            for call in emit.call_args_list
+            if call.args and call.args[0] == "phase_action"
+        )
+        self.assertEqual(event["terminal_padding_rows"], 0)
 
     def test_zero_dwell_waypoint_streams_without_repeated_target_row(self):
         policy = Policy()
@@ -1141,6 +1254,72 @@ class FanucPolicyTests(unittest.TestCase):
         self.assertAlmostEqual(alignment[-1, 2], obs["tcp_pose"][2])
         self.assertIsNone(policy._blocked_reason)
 
+    def test_offset_inspection_retries_transient_vision_errors(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "1",
+            },
+        ):
+            policy = Policy()
+        policy._detect_scene_views = lambda current: _views(_scene(current))
+        obs = _advance_to_gate(policy, _observation(policy._scan_tcp[:6]))
+        policy._detect_scene_views = mock.Mock(
+            side_effect=(
+                VisionError("cable occluded the inspection frame"),
+                VisionError("neural and geometric detections disagree"),
+                _views(_scene(obs)),
+            )
+        )
+
+        for expected_attempt in (1, 2):
+            obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+            held = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+            np.testing.assert_allclose(held[-1, :6], obs["tcp_pose"])
+            self.assertEqual(
+                policy._revalidation_visibility_failures, expected_attempt
+            )
+            self.assertIsNone(policy._blocked_reason)
+            self.assertEqual(policy._phase_index, 1)
+
+        obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+        alignment = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+        self.assertEqual(policy._phase_index, 2)
+        self.assertEqual(policy._revalidation_visibility_failures, 0)
+        self.assertAlmostEqual(alignment[-1, 2], obs["tcp_pose"][2])
+        self.assertIsNone(policy._blocked_reason)
+
+    def test_offset_inspection_vision_error_latches_after_retry_bound(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESCENT_INTERLOCK_ENV: "1",
+            },
+        ):
+            policy = Policy()
+        policy._detect_scene_views = lambda current: _views(_scene(current))
+        obs = _advance_to_gate(policy, _observation(policy._scan_tcp[:6]))
+        policy._detect_scene_views = mock.Mock(
+            side_effect=VisionError("inspection remains unusable")
+        )
+
+        for expected_attempt in (1, 2, 3):
+            obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+            held = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+            np.testing.assert_allclose(held[-1, :6], obs["tcp_pose"])
+            self.assertEqual(
+                policy._revalidation_visibility_failures, expected_attempt
+            )
+            self.assertIsNone(policy._blocked_reason)
+
+        obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+        blocked = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+        np.testing.assert_allclose(blocked[-1, :6], obs["tcp_pose"])
+        self.assertIn("inspection remains unusable", policy._blocked_reason)
+        self.assertEqual(policy._revalidation_visibility_failures, 3)
+
     def test_staleness_uses_estimated_cell_clock_offset(self):
         with mock.patch.dict(
             os.environ,
@@ -1196,6 +1375,141 @@ class FanucPolicyTests(unittest.TestCase):
         policy._verify_post_place(_views(clear_scene))
         self.assertIn("red", policy._completed_colours)
         self.assertIsNone(policy._pending_verification_colour)
+
+    def test_post_place_verification_retries_transient_vision_errors(self):
+        with mock.patch.dict(os.environ, {Policy.MOTION_INTERLOCK_ENV: "1"}):
+            policy = Policy()
+        obs = _observation(policy._scan_tcp[:6])
+        self.assertTrue(policy._start_next_plan(_scene(obs)))
+        policy._completed_colours.update({"yellow", "blue"})
+        policy._finish_active_plan()
+        empty_scene = SceneDetections("red-in-bin", float(obs["t"]), ())
+        policy._detect_scene_views = mock.Mock(
+            side_effect=(
+                VisionError("table frame was temporarily occluded"),
+                VisionError("detector temporarily abstained"),
+                _views(empty_scene),
+            )
+        )
+
+        for expected_attempt in (1, 2):
+            obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+            held = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+            np.testing.assert_allclose(held[-1, :6], obs["tcp_pose"])
+            self.assertEqual(
+                policy._post_place_visibility_failures, expected_attempt
+            )
+            self.assertIsNone(policy._blocked_reason)
+            self.assertEqual(policy._pending_verification_colour, "red")
+
+        obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+        held = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+        np.testing.assert_allclose(held[-1, :6], obs["tcp_pose"])
+        self.assertIn("red", policy._completed_colours)
+        self.assertIsNone(policy._pending_verification_colour)
+        self.assertEqual(policy._post_place_visibility_failures, 0)
+        self.assertIsNone(policy._blocked_reason)
+
+    def test_post_place_vision_error_latches_after_retry_bound(self):
+        with mock.patch.dict(os.environ, {Policy.MOTION_INTERLOCK_ENV: "1"}):
+            policy = Policy()
+        obs = _observation(policy._scan_tcp[:6])
+        self.assertTrue(policy._start_next_plan(_scene(obs)))
+        policy._finish_active_plan()
+        policy._detect_scene_views = mock.Mock(
+            side_effect=VisionError("post-place view remains unusable")
+        )
+
+        for expected_attempt in (1, 2, 3):
+            obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+            held = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+            np.testing.assert_allclose(held[-1, :6], obs["tcp_pose"])
+            self.assertEqual(
+                policy._post_place_visibility_failures, expected_attempt
+            )
+            self.assertIsNone(policy._blocked_reason)
+
+        obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+        blocked = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+        np.testing.assert_allclose(blocked[-1, :6], obs["tcp_pose"])
+        self.assertIn("post-place view remains unusable", policy._blocked_reason)
+        self.assertEqual(policy._post_place_visibility_failures, 3)
+        self.assertEqual(policy._pending_verification_colour, "red")
+
+    def test_post_place_missing_destination_retries_then_verifies(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESTINATION_MODE_ENV: "virtual-table",
+            },
+        ):
+            policy = Policy()
+        obs = _observation(policy._scan_tcp[:6])
+        self.assertTrue(policy._start_next_plan(_scene(obs)))
+        policy._finish_active_plan()
+        empty = SceneDetections("temporarily-missing", float(obs["t"]), ())
+        destination_xy = policy.config.task.bin_centres_base_m["red"]
+        placed = CubeDetection(
+            "red-in-virtual-zone",
+            "red",
+            float(obs["t"]),
+            (destination_xy[0], destination_xy[1], -0.0001),
+            0.0,
+            0.9,
+        )
+        policy._detect_scene_views = mock.Mock(
+            side_effect=(
+                _views(empty),
+                _views(empty),
+                _views(empty, at_destination={"red": (placed,)}),
+            )
+        )
+
+        for expected_attempt in (1, 2):
+            obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+            held = np.asarray(policy.act(obs), dtype=float).reshape(-1, 7)
+            np.testing.assert_allclose(held[-1, :6], obs["tcp_pose"])
+            self.assertEqual(
+                policy._post_place_visibility_failures, expected_attempt
+            )
+            self.assertIsNone(policy._blocked_reason)
+
+        obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+        policy.act(obs)
+        self.assertIn("red", policy._completed_colours)
+        self.assertIsNone(policy._pending_verification_colour)
+        self.assertEqual(policy._post_place_visibility_failures, 0)
+        self.assertIsNone(policy._blocked_reason)
+
+    def test_post_place_missing_destination_latches_after_retry_bound(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                Policy.MOTION_INTERLOCK_ENV: "1",
+                Policy.DESTINATION_MODE_ENV: "virtual-table",
+            },
+        ):
+            policy = Policy()
+        obs = _observation(policy._scan_tcp[:6])
+        self.assertTrue(policy._start_next_plan(_scene(obs)))
+        policy._finish_active_plan()
+        empty = SceneDetections("persistently-missing", float(obs["t"]), ())
+        policy._detect_scene_views = mock.Mock(return_value=_views(empty))
+
+        for expected_attempt in (1, 2, 3):
+            obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+            policy.act(obs)
+            self.assertEqual(
+                policy._post_place_visibility_failures, expected_attempt
+            )
+            self.assertIsNone(policy._blocked_reason)
+
+        obs["t"] = max(time.time(), float(obs["t"]) + 0.001)
+        policy.act(obs)
+        self.assertIn("exactly one confident red", policy._blocked_reason)
+        self.assertEqual(policy._post_place_visibility_failures, 3)
+        self.assertEqual(policy._pending_verification_colour, "red")
 
     def test_virtual_table_mode_sets_down_and_requires_positive_destination_view(self):
         with mock.patch.dict(

@@ -108,6 +108,10 @@ def _shortest_angle_degrees(first: float, second: float) -> float:
     return (float(first) - float(second) + 180.0) % 360.0 - 180.0
 
 
+class _PostPlaceVisibilityError(PlanningError):
+    """Fresh frame lacks unambiguous positive destination evidence."""
+
+
 @dataclass(frozen=True)
 class _SceneViews:
     """Broad outcome observations and the narrower pick-eligible subset."""
@@ -130,6 +134,19 @@ class Policy:
     CAMERAS = list(PERCEPTION_CAMERA_IDS)
     IMAGE_SIZE = (1920, 1080)  # native table RGB; calibration pixels stay valid
     IMAGE_FORMAT = "png"  # preserve tiny cube edges until JPEG is validated on real images
+    # Queue polling does not run perception. The client uses this tiny preview
+    # only to read trial/queue state, then fetches one native lossless frame
+    # before every Policy.act call. This avoids repeatedly transferring 1080p
+    # PNGs while a previously returned action chunk is still executing.
+    QUEUE_POLL_CAMERAS = tuple(CAMERAS)
+    QUEUE_POLL_IMAGE_SIZE = (160, 90)
+    QUEUE_POLL_IMAGE_FORMAT = "jpeg"
+    QUEUE_POLL_IMAGE_QUALITY = 50
+    QUEUE_POLL_DEPTH: tuple[str, ...] = ()
+    # A preview plus the required full observation costs two HTTP round trips.
+    # Skip that extra request for short holds/gripper transitions where it
+    # cannot save repeated full-frame polling.
+    QUEUE_POLL_MIN_ROWS = 4
     ACTION = "tcp"
     # Let the official client refill a long motion before its queue empties.
     # Phase transitions still require measured feedback; this only removes
@@ -153,6 +170,11 @@ class Policy:
         # 5 mm trajectory configuration.
         "smooth": (10.0, 8.0),
     }
+    # Keep a final smooth-profile target in the controller queue long enough
+    # for prefetch to replace it with the next command.  These rows do not
+    # change the target; they only avoid draining the queue while the measured
+    # TCP catches up to the final interpolated row.
+    SMOOTH_TERMINAL_TARGET_ROWS = 3
     MAX_ACTIONS_PER_CALL = 100
     ABSOLUTE_MAX_MOTION_CALLS_PER_PHASE = 200
     MAX_NO_PROGRESS_CALLS = 4
@@ -379,6 +401,7 @@ class Policy:
         self._phase_index = 0
         self._phase_dwell_rows_remaining: int | None = None
         self._revalidation_visibility_failures = 0
+        self._post_place_visibility_failures = 0
         self._reset_phase_watchdog()
         self._completed_colours: set[str] = set()
         self._pending_verification_colour: str | None = None
@@ -440,9 +463,11 @@ class Policy:
     def act(self, obs: dict):
         """Return one bounded TCP chunk for the latest official observation.
 
-        Invalid perception never produces a grasp command. Once motion has
-        started, a stale/moved/ambiguous scene latches the rollout into a hold;
-        there is no blind retry. The returned hold is not an emergency stop.
+        Invalid perception never produces a grasp command. At the explicit
+        pre-descent and post-place camera checkpoints, transient visibility
+        failures receive bounded fresh-frame retries while holding position.
+        Persistent ambiguity or any invalid scene outside those checkpoints
+        latches the rollout into a hold. The hold is not an emergency stop.
         """
 
         if self._blocked_reason is not None:
@@ -477,9 +502,42 @@ class Policy:
 
         try:
             if self._active_plan is None:
-                scenes = self._detect_scene_views(obs)
+                try:
+                    scenes = self._detect_scene_views(obs)
+                except VisionError as exc:
+                    if self._pending_verification_colour is None:
+                        raise
+                    retry = self._visibility_retry_hold(
+                        obs,
+                        counter_attribute="_post_place_visibility_failures",
+                        event="post_place_visibility_retry",
+                        reason=str(exc),
+                        hold_reason=(
+                            "post-place camera view temporarily unusable; waiting "
+                            "for a fresh table-camera frame"
+                        ),
+                    )
+                    if retry is not None:
+                        return retry
+                    raise
                 if self._pending_verification_colour is not None:
-                    self._verify_post_place(scenes)
+                    try:
+                        self._verify_post_place(scenes)
+                    except _PostPlaceVisibilityError as exc:
+                        retry = self._visibility_retry_hold(
+                            obs,
+                            counter_attribute="_post_place_visibility_failures",
+                            event="post_place_visibility_retry",
+                            reason=str(exc),
+                            hold_reason=(
+                                "post-place destination evidence temporarily "
+                                "missing or ambiguous; waiting for a fresh "
+                                "table-camera frame"
+                            ),
+                        )
+                        if retry is not None:
+                            return retry
+                        raise
                 if len(self._completed_colours) == len(self.config.task.colour_order):
                     return self._hold_action(
                         obs, "all configured colours camera-checked after placement"
@@ -504,7 +562,22 @@ class Policy:
             for _ in range(len(self._phases) + 1):
                 phase = self._phases[self._phase_index]
                 if phase.requires_reobservation_before:
-                    scenes = self._detect_scene_views(obs)
+                    try:
+                        scenes = self._detect_scene_views(obs)
+                    except VisionError as exc:
+                        retry = self._visibility_retry_hold(
+                            obs,
+                            counter_attribute="_revalidation_visibility_failures",
+                            event="pre_descent_visibility_retry",
+                            reason=str(exc),
+                            hold_reason=(
+                                "inspection view temporarily unusable; waiting "
+                                "for a fresh table-camera frame"
+                            ),
+                        )
+                        if retry is not None:
+                            return retry
+                        raise
                     try:
                         self._revalidate_before_descent(
                             scenes.pickable,
@@ -518,25 +591,21 @@ class Policy:
                             " target is missing" in message
                             or " target is ambiguous" in message
                         )
-                        if (
-                            retryable
-                            and self._revalidation_visibility_failures
-                            < self.MAX_REVALIDATION_VISIBILITY_RETRIES
-                        ):
-                            self._revalidation_visibility_failures += 1
-                            self._emit(
-                                "pre_descent_visibility_retry",
-                                attempt=self._revalidation_visibility_failures,
-                                maximum_attempts=(
-                                    self.MAX_REVALIDATION_VISIBILITY_RETRIES
-                                ),
-                                reason=message,
-                            )
-                            return self._hold_action(
+                        if retryable:
+                            retry = self._visibility_retry_hold(
                                 obs,
-                                "inspection view temporarily incomplete; waiting "
-                                "for a fresh table-camera frame",
+                                counter_attribute=(
+                                    "_revalidation_visibility_failures"
+                                ),
+                                event="pre_descent_visibility_retry",
+                                reason=message,
+                                hold_reason=(
+                                    "inspection view temporarily incomplete; "
+                                    "waiting for a fresh table-camera frame"
+                                ),
                             )
+                            if retry is not None:
+                                return retry
                         raise
                     phase = self._phases[self._phase_index]
 
@@ -594,6 +663,30 @@ class Policy:
             ):
                 self._block(str(exc))
             return self._hold_action(obs, f"policy failed closed: {exc}")
+
+    def _visibility_retry_hold(
+        self,
+        obs: dict,
+        *,
+        counter_attribute: str,
+        event: str,
+        reason: str,
+        hold_reason: str,
+    ):
+        """Hold for one bounded fresh-frame retry at an explicit checkpoint."""
+
+        failures = int(getattr(self, counter_attribute))
+        if failures >= self.MAX_REVALIDATION_VISIBILITY_RETRIES:
+            return None
+        failures += 1
+        setattr(self, counter_attribute, failures)
+        self._emit(
+            event,
+            attempt=failures,
+            maximum_attempts=self.MAX_REVALIDATION_VISIBILITY_RETRIES,
+            reason=reason,
+        )
+        return self._hold_action(obs, hold_reason)
 
     def _accept_observation_timestamp(self, obs: dict) -> None:
         timestamp = float(obs.get("t"))
@@ -1375,12 +1468,42 @@ class Policy:
                     f"phase {phase.name} made no measured TCP progress for "
                     f"{self._phase_no_progress_calls} calls"
                 )
-            rows = all_rows[: self._max_actions_per_call]
+            geometric_rows_sent = min(len(all_rows), self._max_actions_per_call)
+            rows = all_rows[:geometric_rows_sent]
+            terminal_padding_rows = 0
+            final_geometric_chunk = len(all_rows) <= self._max_actions_per_call
+            if (
+                self._motion_profile == "smooth"
+                and phase.dwell_s <= 0.0
+                and final_geometric_chunk
+            ):
+                available = self._max_actions_per_call - len(rows)
+                terminal_padding_rows = min(
+                    self.SMOOTH_TERMINAL_TARGET_ROWS - 1,
+                    available,
+                )
+                if terminal_padding_rows:
+                    padding = np.repeat(
+                        target[None, :], terminal_padding_rows, axis=0
+                    )
+                    rows = np.vstack((rows, padding))
             rows = validate_tcp_chunk(rows, self.DT, self.config)
             self._emit(
                 "phase_action",
                 phase=phase.name,
+                action_kind="motion",
                 action_rows=len(rows),
+                geometric_rows_sent=geometric_rows_sent,
+                geometric_rows_remaining=max(
+                    0, len(all_rows) - geometric_rows_sent
+                ),
+                terminal_padding_rows=terminal_padding_rows,
+                motion_profile=self._motion_profile,
+                motion_call=self._phase_motion_calls,
+                motion_call_limit=self._phase_motion_call_limit,
+                queued_at_observation=obs.get("queued"),
+                first_action_row=[round(float(value), 4) for value in rows[0]],
+                last_action_row=[round(float(value), 4) for value in rows[-1]],
                 position_error_mm=round(position_error, 2),
                 angle_error_deg=round(angle_error, 2),
             )
@@ -1422,7 +1545,13 @@ class Policy:
         self._emit(
             "phase_action",
             phase=phase.name,
+            action_kind="dwell",
             action_rows=len(rows),
+            terminal_padding_rows=0,
+            motion_profile=self._motion_profile,
+            queued_at_observation=obs.get("queued"),
+            first_action_row=[round(float(value), 4) for value in rows[0]],
+            last_action_row=[round(float(value), 4) for value in rows[-1]],
             target_reached=True,
             phase_finished=phase_finished,
         )
@@ -1444,6 +1573,7 @@ class Policy:
         self._pending_verification_plan = completed_plan
         self._pending_attempt_id = self._active_attempt_id
         self._pending_attempt_started_at_s = self._active_attempt_started_at_s
+        self._post_place_visibility_failures = 0
         motion_finished_at_s = self._last_observation_time_s
         self._emit(
             "plan_motion_complete",
@@ -1528,7 +1658,7 @@ class Policy:
                     if cube.confidence >= self._minimum_confidence
                 )
                 if len(matching) != 1:
-                    raise PlanningError(
+                    raise _PostPlaceVisibilityError(
                         "virtual-table post-place verification requires exactly "
                         f"one confident {expected_colour} cube in its configured "
                         f"destination footprint, observed {len(matching)}"
@@ -1543,6 +1673,7 @@ class Policy:
         self._pending_verification_plan = None
         self._pending_attempt_id = None
         self._pending_attempt_started_at_s = None
+        self._post_place_visibility_failures = 0
         verification = (
             "fresh table RGB found exactly one matching-colour cube in the "
             "configured virtual-table destination for every completed colour "

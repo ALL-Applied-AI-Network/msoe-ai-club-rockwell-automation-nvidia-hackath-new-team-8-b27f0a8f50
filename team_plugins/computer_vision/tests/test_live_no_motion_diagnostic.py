@@ -21,6 +21,8 @@ class _FakePolicy:
     ACTION = "tcp"
     CAMERAS = ("table",)
     IMAGE_FORMAT = "png"
+    QUEUE_POLL_CAMERAS = ("table",)
+    QUEUE_POLL_IMAGE_SIZE = (160, 90)
 
     def __init__(self, *, fail_perception: bool = False, motion: bool = False):
         self._motion_enabled = motion
@@ -73,13 +75,13 @@ class _ProviderThenPartitionFailurePolicy(_FakePolicy):
         raise ValueError("synthetic cube-task partition failure")
 
 
-def _observation() -> dict:
+def _observation(camera_id: str = "table") -> dict:
     rgb = np.zeros((6, 8, 3), dtype=np.uint8)
     rgb[..., 0] = 255
     return {
         "t": 12.5,
         "trial": {"trial_id": "test-trial"},
-        "images": {"table": rgb},
+        "images": {camera_id: rgb},
         "joints": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 0.25],
         "tcp_pose": [400.0, 10.0, -200.0, 180.0, 0.0, 90.0],
     }
@@ -102,6 +104,21 @@ def _recorder(path: Path, maximum: int = 2) -> diagnostic.SnapshotRecorder:
 
 
 class LiveNoMotionDiagnosticTests(unittest.TestCase):
+    def test_camera_specs_use_each_pinned_native_rgb_size(self):
+        table = diagnostic._capture_camera_spec("table")
+        side = diagnostic._capture_camera_spec("side")
+        wrist = diagnostic._capture_camera_spec("wrist")
+
+        self.assertEqual(table["image_size_wh"], (1920, 1080))
+        self.assertEqual(side["image_size_wh"], (1920, 1080))
+        self.assertEqual(wrist["image_size_wh"], (1280, 720))
+        self.assertTrue(table["provider_inference_enabled"])
+        self.assertFalse(side["provider_inference_enabled"])
+        self.assertFalse(wrist["provider_inference_enabled"])
+        self.assertTrue(wrist["moving_camera"])
+        self.assertTrue(table["trusted_for_motion_coordinates"])
+        self.assertFalse(side["trusted_for_motion_coordinates"])
+
     def test_loaded_profile_validation_rejects_cached_wrong_profile(self):
         wrong_profile = SimpleNamespace(
             source_path=str(diagnostic.REPOSITORY_ROOT / "wrong-profile.json"),
@@ -282,6 +299,62 @@ class LiveNoMotionDiagnosticTests(unittest.TestCase):
             # Source was pure RGB red; OpenCV decodes the PNG as BGR.
             self.assertEqual(decoded[0, 0].tolist(), [0, 0, 255])
 
+    def test_auxiliary_camera_capture_skips_provider_and_records_calibration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            spec = {
+                "camera_id": "wrist",
+                "image_size_wh": (8, 6),
+                "calibration_id": "sidclab-cameras.json:wrist",
+                "calibration_solved": "2026-10-07",
+                "calibration_rms_px": 0.9,
+                "transform_semantics": "T_flange_cam: camera -> flange",
+                "moving_camera": True,
+                "trusted_for_motion_coordinates": False,
+                "provider_inference_enabled": False,
+            }
+            recorder = diagnostic.SnapshotRecorder(
+                Path(temporary),
+                maximum_snapshots=1,
+                cube_edge_mm=16,
+                provenance={},
+                capture_camera_spec=spec,
+            )
+            policy_class = diagnostic.diagnostic_policy_class(
+                _FakePolicy,
+                recorder,
+                capture_camera_id="wrist",
+                capture_image_size=(8, 6),
+            )
+            policy = policy_class()
+
+            result = policy.act(_observation("wrist"))
+
+            self.assertIs(result, policy.hold_action)
+            self.assertEqual(policy.perception_calls, 0)
+            self.assertEqual(policy.CAMERAS, ("wrist",))
+            self.assertEqual(policy.IMAGE_SIZE, (8, 6))
+            self.assertEqual(policy.QUEUE_POLL_CAMERAS, ("wrist",))
+            self.assertFalse(
+                (Path(temporary) / "snapshot-000-scene.json").exists()
+            )
+            record = json.loads(
+                (Path(temporary) / "snapshot-000-record.json").read_text()
+            )
+            self.assertEqual(record["status"], "capture_only")
+            self.assertFalse(record["provider_inference_ran"])
+            self.assertEqual(
+                record["frames"][0]["calibration"]["calibration_id"],
+                "sidclab-cameras.json:wrist",
+            )
+            self.assertTrue(
+                record["frames"][0]["calibration"]["moving_camera"]
+            )
+            self.assertFalse(
+                record["frames"][0]["calibration"][
+                    "trusted_for_motion_coordinates"
+                ]
+            )
+
     def test_provider_failure_is_recorded_and_hold_is_still_returned(self):
         with tempfile.TemporaryDirectory() as temporary:
             recorder = _recorder(Path(temporary))
@@ -434,6 +507,32 @@ class LiveNoMotionDiagnosticTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertFalse(loader_called)
 
+    def test_wrist_dry_run_reports_native_capture_without_provider_inference(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = diagnostic.main(
+                    [
+                        "--output-dir",
+                        temporary,
+                        "--cube-mm",
+                        "10",
+                        "--capture-camera",
+                        "wrist",
+                        "--dry-run",
+                    ],
+                    official_run_loader=lambda: self.fail(
+                        "dry-run must not load the official client"
+                    ),
+                )
+
+            self.assertEqual(result, 0)
+            summary = json.loads(output.getvalue())
+            self.assertEqual(summary["capture_camera"], "wrist")
+            self.assertEqual(summary["capture_image_size_wh"], [1280, 720])
+            self.assertFalse(summary["provider_inference_enabled"])
+            self.assertFalse(summary["trusted_for_motion_coordinates"])
+
     def test_main_selects_profile_before_loader_and_restores_policy(self):
         with tempfile.TemporaryDirectory() as temporary:
             fake_run = SimpleNamespace(Policy=_FakePolicy)
@@ -455,17 +554,32 @@ class LiveNoMotionDiagnosticTests(unittest.TestCase):
                 },
                 clear=True,
             ):
-                result = diagnostic.main(
-                    [
-                        "--output-dir",
-                        temporary,
-                        "--cube-mm",
-                        "16",
-                        "--max-snapshots",
-                        "1",
-                    ],
-                    official_run_loader=lambda: fake_run,
-                )
+                with patch.object(
+                    diagnostic,
+                    "_capture_camera_spec",
+                    return_value={
+                        "camera_id": "table",
+                        "image_size_wh": (8, 6),
+                        "calibration_id": "sidclab-cameras.json:table",
+                        "calibration_solved": "test",
+                        "calibration_rms_px": 0.5,
+                        "transform_semantics": "T_base_cam: camera -> base",
+                        "moving_camera": False,
+                        "trusted_for_motion_coordinates": True,
+                        "provider_inference_enabled": True,
+                    },
+                ):
+                    result = diagnostic.main(
+                        [
+                            "--output-dir",
+                            temporary,
+                            "--cube-mm",
+                            "16",
+                            "--max-snapshots",
+                            "1",
+                        ],
+                        official_run_loader=lambda: fake_run,
+                    )
 
             self.assertEqual(result, 0)
             self.assertEqual(

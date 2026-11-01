@@ -106,6 +106,45 @@ def _replace(obs_t: float | None) -> dict:
     return {} if obs_t is None else {"obs_t": obs_t, "replace": True}
 
 
+def _observe_policy(cell: CellClient, policy, *, queue_poll: bool) -> dict:
+    """Observe the cell, optionally using a policy-declared queue preview.
+
+    A queue preview is never passed to ``Policy.act``.  It exists only to poll
+    trial status and the number of queued action rows without repeatedly
+    transferring the policy's full-resolution perception image while the arm
+    is still executing a chunk.  Policies that do not declare
+    ``QUEUE_POLL_IMAGE_SIZE`` retain the original full-observation behavior.
+    """
+
+    image_size = getattr(policy, "IMAGE_SIZE", (640, 360))
+    image_format = getattr(policy, "IMAGE_FORMAT", "png")
+    image_quality = getattr(policy, "IMAGE_QUALITY", 90)
+    cameras = policy.CAMERAS
+    depth = getattr(policy, "DEPTH", ())
+    if queue_poll and getattr(policy, "QUEUE_POLL_IMAGE_SIZE", None) is not None:
+        image_size = policy.QUEUE_POLL_IMAGE_SIZE
+        image_format = getattr(policy, "QUEUE_POLL_IMAGE_FORMAT", image_format)
+        image_quality = getattr(policy, "QUEUE_POLL_IMAGE_QUALITY", image_quality)
+        cameras = getattr(policy, "QUEUE_POLL_CAMERAS", cameras)
+        depth = getattr(policy, "QUEUE_POLL_DEPTH", ())
+    return cell.observe(
+        cameras,
+        image_size,
+        image_format,
+        quality=image_quality,
+        depth=depth,
+    )
+
+
+def _use_queue_preview(policy, last_chunk_rows: int) -> bool:
+    """Whether a completed action chunk is long enough to justify a preview GET."""
+
+    if getattr(policy, "QUEUE_POLL_IMAGE_SIZE", None) is None:
+        return False
+    minimum_rows = max(1, int(getattr(policy, "QUEUE_POLL_MIN_ROWS", 1)))
+    return int(last_chunk_rows) >= minimum_rows
+
+
 def run_trial(cell: CellClient, policy, trial: dict) -> None:
     offset, rtt = cell.clock()
     log.info("cell clock offset %+.3f s, round trip %.0f ms", offset, rtt * 1000)
@@ -117,8 +156,8 @@ def run_trial(cell: CellClient, policy, trial: dict) -> None:
     took = None  # seconds from an observation to its actions reaching the cell (act + network), measured
     last = 0  # actions in the last chunk
     while True:
-        obs = cell.observe(policy.CAMERAS, policy.IMAGE_SIZE, getattr(policy, "IMAGE_FORMAT", "png"),
-                           depth=getattr(policy, "DEPTH", ()))
+        used_queue_preview = _use_queue_preview(policy, last)
+        obs = _observe_policy(cell, policy, queue_poll=used_queue_preview)
         if obs["trial"] is None or obs["trial"]["status"] != "running":
             log.info("trial %s ended", trial["trial_id"])
             return
@@ -133,6 +172,17 @@ def run_trial(cell: CellClient, policy, trial: dict) -> None:
         if obs["status"] != "running" or obs["queued"] > lead:
             time.sleep(0.01)  # wait until the last actions have (almost) played out
             continue
+        if used_queue_preview:
+            # Policy.act must always receive the complete calibrated observation,
+            # never the low-resolution queue preview.  Recheck state because the
+            # trial or queue can change during the full-resolution request.
+            obs = _observe_policy(cell, policy, queue_poll=False)
+            if obs["trial"] is None or obs["trial"]["status"] != "running":
+                log.info("trial %s ended", trial["trial_id"])
+                return
+            if obs["status"] != "running" or obs["queued"] > lead:
+                time.sleep(0.01)
+                continue
         t0 = time.time()
         chunk = np.asarray(policy.act(obs), dtype=float)
         if chunk.ndim == 1:  # one target
