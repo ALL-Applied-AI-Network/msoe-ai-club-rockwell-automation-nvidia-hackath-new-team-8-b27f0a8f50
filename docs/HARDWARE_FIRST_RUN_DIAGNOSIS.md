@@ -197,3 +197,27 @@ uv run audit_table_capture.py /path/to/table.mp4 \
 Prefer an original uncropped 1920×1080 PNG for pose validation. A result-video
 replay can expose likely HSV/size failures, but cannot certify millimetre camera
 accuracy, grasp fit, or safe motion.
+
+## Offline motion-log audit
+
+After a run, summarize the new phase/queue telemetry without contacting the
+cell:
+
+```bash
+uv run --project hardware/fanuc_cell python \
+  scripts/analyze_hardware_motion_log.py /path/to/hardware.log \
+  --output /path/to/new-motion-report.json
+```
+
+The report groups action rows by phase, action kind, and motion profile;
+summarizes terminal target padding and observed queue depths; counts camera
+visibility retries; preserves blocked reasons; and shows how much of the new
+telemetry was actually present. Its `possible_queue_starvation` and
+`repeated_micro_corrections` fields are diagnostic leads, not conclusions:
+camera/grasp/release boundaries intentionally allow the queue to drain. Compare
+each flagged phase occurrence's source, line range, and parsed timestamp prefix
+with the recorded video before changing a motion profile. Reusing a phase name
+for another cube does not combine those occurrences. The analyzer verifies each
+input's hash before and after parsing, rejects a changing source, and creates an
+explicit output path exclusively instead of overwriting it. Older logs remain
+readable, but missing telemetry stays explicit rather than being guessed.

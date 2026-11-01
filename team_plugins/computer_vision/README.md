@@ -125,10 +125,10 @@ The tests cover:
 - non-monotonic time and non-fabrication of occlusion on disappearance; and
 - preservation of the cube path.
 
-The provider has 26 focused tests, the annotation evaluator has 15, replay and
-overlay/provenance handling has 9, the live diagnostic has 14, the
-annotation-bundle tool has 14, and the realistic-sensor evaluator has 3, for
-81 computer-vision-team tests total.
+Replay, overlay, checkpoint/provenance, and explicit-abstention handling has 15
+focused tests. The directory-wide suite also covers the provider, annotation
+evaluator/bundle, live diagnostic, realistic-sensor evaluator, and isolated
+model experiments; use test discovery rather than relying on a stale total.
 Run the annotation evaluator tests directly with:
 
 ```bash
@@ -209,13 +209,49 @@ uv run --project hardware/fanuc_cell python -m \
 ```
 
 The command requires a new or empty output directory, loads the exact checked-in
-profile, validates every returned scene against its request, and writes an
+profile (the hybrid profile by default), validates every returned scene against
+its request, and writes an
 overlay video, sampled overlays, JSONL scene records, and a hash-pinned report.
 It emits a schema-valid `evaluation-result.v1.json` only when the worktree is
-clean and capture/calibration/profile/provider/tool/catalog/commit/branch
-provenance stays unchanged throughout the run. A provenance change makes the
-command exit nonzero. Timestamps are decoded `frame_index / FPS`, not measured
-exposure times. Do not commit recordings, weights, or generated outputs.
+clean and capture/calibration/profile/provider-module/checkpoint/tool/catalog/
+commit/branch provenance stays unchanged throughout the run. The provider hash
+comes from the selected factory callable's actual source module, not a hardcoded
+hybrid-provider path. The experiment identity also binds the provider name and
+version returned by its validated scenes plus the calibration-file SHA-256;
+standardized provenance carries the calibration hash without an absolute path.
+A provenance change makes the command exit nonzero.
+Timestamps are decoded `frame_index / FPS`, not measured exposure times. Do not
+commit recordings, weights, or generated outputs.
+
+Any validated profile that requests only RGB `table` and no depth camera can be
+replayed. A model-backed profile receives its checkpoint only through the
+explicit `--vision-checkpoint` argument. The file must exist outside the Git
+repository; its name and SHA-256 are recorded and its hash is rechecked after
+the replay. For the pinned YOLO11n profile, use the isolated locked runtime:
+
+```bash
+UV_PROJECT_ENVIRONMENT=/tmp/rockwell-yolo11n-runtime \
+  uv run --project team_plugins/computer_vision/yolo11n_runtime python -m \
+  team_plugins.computer_vision.replay_camera \
+  /path/to/table.mp4 \
+  --profile team_plugins/computer_vision/profile.yolo11n-cube.v1.json \
+  --vision-checkpoint /absolute/path/outside/repository/seed55-best.pt \
+  --output-dir /path/outside/repository/yolo-replay-output \
+  --cube-edge-mm 16 --every 1 --allow-upscale-compressed \
+  --record-vision-errors
+```
+
+The default remains fail-fast: a provider `VisionError` stops replay. The
+optional `--record-vision-errors` mode instead records the frame index, input
+hash, latency, exception text, and a red `NO SCENE` overlay, then continues. It
+does **not** turn an error into an empty `SceneObservation`. `report.json`
+summarizes consecutive abstention streaks in processed-frame units and retains
+their original source-frame ranges/reasons. If **any** sampled frame records a
+vision error, no standardized `evaluation-result.v1.json` is emitted: its v1
+schema cannot represent the missing per-frame scene alongside successful
+frames. `report.json` records
+`standardized_evaluation_skip_reason`, and `report.json` plus `scenes.jsonl`
+remain the explicit mixed-success/error evidence.
 
 The overlay uses numbered markers and a corner legend: yellow rows are cubes,
 green rows are screw **geometry candidates**, red rows are non-executable

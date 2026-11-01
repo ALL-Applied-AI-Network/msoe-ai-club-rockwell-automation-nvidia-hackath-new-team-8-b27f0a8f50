@@ -65,6 +65,37 @@ SHA-256 is
 `010bb71b1b07fc77490a2bc2bd774102205640bdf9ba07d6fa8b3bd758788fbb`.
 Keep the `.pt` file and captured evidence outside Git.
 
+Before the cell slot, replay the exact profile/checkpoint on saved table-camera
+video with the same isolated runtime. This exercises the same profile factory
+without requesting hardware motion and records the selected provider-module and
+checkpoint hashes:
+
+```bash
+UV_PROJECT_ENVIRONMENT=/tmp/rockwell-yolo11n-runtime \
+  uv run --project team_plugins/computer_vision/yolo11n_runtime python -m \
+  team_plugins.computer_vision.replay_camera \
+  /path/to/table.mp4 \
+  --profile team_plugins/computer_vision/profile.yolo11n-cube.v1.json \
+  --vision-checkpoint /absolute/path/outside/repository/seed55-best.pt \
+  --output-dir /path/outside/repository/yolo-replay-output \
+  --cube-edge-mm 16 --every 1 --allow-upscale-compressed \
+  --record-vision-errors
+```
+
+Without `--record-vision-errors`, replay remains fail-fast. With it, each strict
+YOLO whole-scene rejection is an explicit error/abstention record and `NO SCENE`
+overlay—not an empty scene or successful observation. `report.json` includes
+the count and maximum length of consecutive error streaks in **processed replay
+frames**, plus 1-based processed ordinals, original source-frame ranges, and
+reason counts. This measures acceptance/dropout behavior; compressed replay
+still cannot validate robot-base millimetre pose accuracy. Any recorded
+abstention suppresses `evaluation-result.v1.json`, even when other frames
+succeeded, because that schema cannot represent the missing per-frame scene.
+Use `report.json` and `scenes.jsonl` for mixed runs; the report states the
+standardized-evaluation skip reason explicitly. A zero-error standardized run
+binds its experiment identity to provider name/version and the calibration
+SHA-256, and records that calibration hash without exposing an absolute path.
+
 The YOLO11n profile intentionally abstains instead of guessing if it sees an
 above-threshold screw prediction, if a YOLO cube box and calibrated cube
 geometry do not agree one-to-one inside the crop, or if calibrated geometry

@@ -1,10 +1,11 @@
-"""Offline, no-motion replay for the hybrid cube/screw provider.
+"""Offline, no-motion replay for an RGB-only table-camera vision profile.
 
 The official downloaded recordings are resized/compressed 640x360 video.  This
 tool may upscale those frames to the native calibrated table size for a
 qualitative regression test, but its report marks the evidence as incapable of
 proving millimetre pose accuracy.  Use native uncropped captures with measured
-object poses for the final calibration test.
+object poses for the final calibration test.  The hybrid cube/screw profile is
+the default; model-backed profiles must receive their checkpoint explicitly.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import argparse
 from collections import Counter
 from datetime import datetime, timezone
 import hashlib
+import inspect
 import json
 from pathlib import Path
 import statistics
@@ -34,8 +36,10 @@ from sorting_core.integration_plugins import (
 from sorting_core.perception import (
     CameraFrame,
     PerceptionRequest,
+    VisionProvider,
     validate_scene_for_request,
 )
+from sorting_core.vision import VisionError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CALIBRATION = REPO_ROOT / "hardware" / "fanuc_cell" / "calibration" / "cameras.json"
@@ -48,6 +52,151 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _is_within(path: Path, directory: Path) -> bool:
+    try:
+        path.relative_to(directory)
+    except ValueError:
+        return False
+    return True
+
+
+def _resolve_vision_checkpoint(value: Path | None) -> Path | None:
+    """Resolve one immutable external model artifact, if one was requested."""
+
+    if value is None:
+        return None
+    try:
+        checkpoint = value.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"--vision-checkpoint cannot be resolved: {value}: {exc}") from exc
+    if not checkpoint.is_file():
+        raise ValueError(f"--vision-checkpoint must be a file: {checkpoint}")
+    if _is_within(checkpoint, REPO_ROOT):
+        raise ValueError("--vision-checkpoint must remain outside the Git repository")
+    return checkpoint
+
+
+def _factory_artifact(factory, reference: str) -> tuple[str, Path]:
+    """Return the module and concrete source file for the callable we execute."""
+
+    module_name = getattr(factory, "__module__", None)
+    if not isinstance(module_name, str) or not module_name.strip():
+        module_name = reference.split(":", 1)[0]
+    try:
+        source = inspect.getsourcefile(factory) or inspect.getfile(factory)
+    except (OSError, TypeError) as exc:
+        raise ValueError(
+            f"cannot attribute vision factory {reference!r} to a source artifact: {exc}"
+        ) from exc
+    if source is None:
+        raise ValueError(
+            f"cannot attribute vision factory {reference!r} to a source artifact"
+        )
+    try:
+        path = Path(source).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(
+            f"cannot resolve vision factory artifact for {reference!r}: {source}: {exc}"
+        ) from exc
+    if not path.is_file():
+        raise ValueError(
+            f"vision factory artifact for {reference!r} is not a file: {path}"
+        )
+    return module_name, path
+
+
+def _create_provider(factory, context: VisionFactoryContext, reference: str) -> VisionProvider:
+    try:
+        provider = factory(context)
+    except Exception as exc:
+        checkpoint_hint = (
+            " If this profile requires model weights, pass their external path with "
+            "--vision-checkpoint PATH."
+            if context.checkpoint is None
+            else ""
+        )
+        raise RuntimeError(
+            f"vision factory {reference!r} failed: {type(exc).__name__}: {exc}."
+            f"{checkpoint_hint}"
+        ) from exc
+    if not isinstance(provider, VisionProvider):
+        raise TypeError(
+            f"vision factory {reference!r} did not return a VisionProvider"
+        )
+    return provider
+
+
+def _observe_frame(
+    provider: VisionProvider,
+    request: PerceptionRequest,
+    *,
+    record_vision_errors: bool,
+):
+    """Validate one scene, or explicitly record a provider abstention."""
+
+    try:
+        return validate_scene_for_request(request, provider.observe(request)), None
+    except VisionError as exc:
+        if not record_vision_errors:
+            raise
+        return None, {
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+        }
+
+
+def _summarize_vision_error_streaks(
+    records: list[dict[str, object]],
+) -> dict[str, object]:
+    """Summarize consecutive abstentions in processed-frame order."""
+
+    raw_streaks: list[list[tuple[int, dict[str, object]]]] = []
+    current: list[tuple[int, dict[str, object]]] = []
+    for processed_ordinal, record in enumerate(records, start=1):
+        if "vision_error" in record:
+            current.append((processed_ordinal, record))
+        elif current:
+            raw_streaks.append(current)
+            current = []
+    if current:
+        raw_streaks.append(current)
+
+    streaks = []
+    for raw in raw_streaks:
+        reasons: Counter[tuple[str, str]] = Counter()
+        for unused_ordinal, record in raw:
+            error = record["vision_error"]
+            if not isinstance(error, dict):  # Internal invariant, not input parsing.
+                raise RuntimeError("vision_error record must be a dictionary")
+            reasons[(str(error["error_type"]), str(error["message"]))] += 1
+        streaks.append(
+            {
+                "start_processed_ordinal": raw[0][0],
+                "end_processed_ordinal": raw[-1][0],
+                "length_processed_frames": len(raw),
+                "start_source_frame_index": int(raw[0][1]["frame_index"]),
+                "end_source_frame_index": int(raw[-1][1]["frame_index"]),
+                "reasons": [
+                    {
+                        "error_type": error_type,
+                        "message": message,
+                        "processed_frames": count,
+                    }
+                    for (error_type, message), count in sorted(reasons.items())
+                ],
+            }
+        )
+    return {
+        "unit": "consecutive processed replay frames (1-based processed ordinals)",
+        "count": len(streaks),
+        "maximum_length_processed_frames": max(
+            (int(streak["length_processed_frames"]) for streak in streaks),
+            default=0,
+        ),
+        "streaks": streaks,
+    }
 
 
 def _git_value(*arguments: str) -> str | None:
@@ -446,12 +595,41 @@ def _draw_overlay(
     return overlay
 
 
+def _draw_vision_error_overlay(bgr: np.ndarray, error: dict[str, str]) -> np.ndarray:
+    """Mark a provider abstention without inventing a scene or object geometry."""
+
+    overlay = bgr.copy()
+    height, width = overlay.shape[:2]
+    panel_height = min(height, max(44, int(round(height * 0.10))))
+    cv2.rectangle(overlay, (0, 0), (width - 1, panel_height - 1), (25, 25, 25), -1)
+    message = f"VISION ERROR / NO SCENE: {error['error_type']}: {error['message']}"
+    cv2.putText(
+        overlay,
+        message[:180],
+        (8, max(20, panel_height // 2 + 6)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        max(0.35, min(0.7, width / 1800.0)),
+        (40, 40, 230),
+        2,
+        cv2.LINE_AA,
+    )
+    return overlay
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("capture", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--calibration", type=Path, default=DEFAULT_CALIBRATION)
     parser.add_argument("--profile", type=Path, default=DEFAULT_PROFILE)
+    parser.add_argument(
+        "--vision-checkpoint",
+        type=Path,
+        help=(
+            "external checkpoint file for a model-backed vision profile; its SHA-256 "
+            "is recorded and rechecked after replay"
+        ),
+    )
     parser.add_argument("--cube-edge-mm", type=float, choices=(10.0, 16.0), default=16.0)
     parser.add_argument("--every", type=int, default=10)
     parser.add_argument("--start-frame", type=int, default=0)
@@ -466,6 +644,13 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="save the first 24 processed source frames next to review overlays",
     )
+    parser.add_argument(
+        "--record-vision-errors",
+        action="store_true",
+        help=(
+            "record per-frame VisionError abstentions and continue; default is fail-fast"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -476,6 +661,7 @@ def main() -> int:
     args.capture = args.capture.expanduser().resolve(strict=True)
     args.calibration = args.calibration.expanduser().resolve(strict=True)
     args.profile = args.profile.expanduser().resolve(strict=True)
+    args.vision_checkpoint = _resolve_vision_checkpoint(args.vision_checkpoint)
     args.output_dir = args.output_dir.expanduser().resolve()
     if args.output_dir.exists():
         if not args.output_dir.is_dir():
@@ -486,7 +672,6 @@ def main() -> int:
             )
     else:
         args.output_dir.mkdir(parents=True)
-    provider_path = Path(__file__).with_name("hybrid_geometry_provider.py")
     catalog_path = REPO_ROOT / "docs" / "OBJECT_CATALOG.md"
     project_commit = _git_value("rev-parse", "HEAD")
     branch = _git_value("branch", "--show-current")
@@ -495,64 +680,70 @@ def main() -> int:
     if branch is None:
         raise RuntimeError("unable to record the repository branch for replay provenance")
     worktree_dirty_at_start = _git_worktree_dirty()
-    provenance_at_start = {
-        "capture_sha256": _sha256(args.capture),
-        "calibration_sha256": _sha256(args.calibration),
-        "profile_sha256": _sha256(args.profile),
-        "provider_artifact_sha256": _sha256(provider_path),
-        "replay_tool_sha256": _sha256(Path(__file__)),
-        "object_catalog_sha256": _sha256(catalog_path),
-        "project_commit": project_commit,
-        "branch": branch,
-    }
+    capture_sha256_at_start = _sha256(args.capture)
+    calibration_sha256_at_start = _sha256(args.calibration)
+    profile_sha256_at_start = _sha256(args.profile)
+    checkpoint_sha256_at_start = (
+        None if args.vision_checkpoint is None else _sha256(args.vision_checkpoint)
+    )
     calibration = load_calibration(args.calibration)
     table = calibration["table"]
     native_size = tuple(int(value) for value in table["size"])
     projector = lambda uv, z: pixel_to_base(table, uv, z=z)
     profile = load_integration_profile(args.profile)
-    if profile.source_sha256 != provenance_at_start["profile_sha256"]:
+    if profile.source_sha256 != profile_sha256_at_start:
         raise RuntimeError("profile changed while it was being loaded")
     if profile.vision is None:
         raise ValueError("replay profile must select a vision provider")
-    expected_factory = (
-        "team_plugins.computer_vision.hybrid_geometry_provider:create"
-    )
-    if profile.vision.factory != expected_factory:
-        raise ValueError(
-            "this replay tool can attribute only the hybrid provider; expected "
-            f"vision factory {expected_factory!r}, got {profile.vision.factory!r}"
-        )
     calibration_id = f"{args.calibration.name}:table"
     effective_calibrations = {"table": calibration_id}
     if profile.vision.camera_ids != ("table",) or profile.vision.depth_camera_ids:
         raise ValueError("this table replay requires an RGB-only table-camera profile")
     factory = load_factory(profile.vision.factory, "vision")
-    provider = factory(
-        VisionFactoryContext(
-            config=load_config(),
-            camera_projectors={"table": projector},
-            calibration_ids=effective_calibrations,
-            expected_cube_edge_m=args.cube_edge_mm / 1000.0,
-            checkpoint=None,
-            detector=None,
-            options=profile.vision.options,
-            camera_ids=profile.vision.camera_ids,
-            depth_camera_ids=profile.vision.depth_camera_ids,
-            declared_calibration_ids=profile.vision.calibration_ids,
-            declared_depth_calibration_ids=profile.vision.depth_calibration_ids,
-            profile_id=profile.profile_id,
-            profile_path=profile.source_path,
-            profile_sha256=profile.source_sha256,
-        )
+    provider_factory_module, provider_path = _factory_artifact(
+        factory, profile.vision.factory
     )
+    provider_artifact_sha256_at_start = _sha256(provider_path)
+    provenance_at_start = {
+        "capture_sha256": capture_sha256_at_start,
+        "calibration_sha256": calibration_sha256_at_start,
+        "profile_sha256": profile_sha256_at_start,
+        "provider_artifact_sha256": provider_artifact_sha256_at_start,
+        "vision_checkpoint_sha256": checkpoint_sha256_at_start,
+        "replay_tool_sha256": _sha256(Path(__file__)),
+        "object_catalog_sha256": _sha256(catalog_path),
+        "project_commit": project_commit,
+        "branch": branch,
+    }
+    context = VisionFactoryContext(
+        config=load_config(),
+        camera_projectors={"table": projector},
+        calibration_ids=effective_calibrations,
+        expected_cube_edge_m=args.cube_edge_mm / 1000.0,
+        checkpoint=(
+            None if args.vision_checkpoint is None else str(args.vision_checkpoint)
+        ),
+        detector=None,
+        options=profile.vision.options,
+        camera_ids=profile.vision.camera_ids,
+        depth_camera_ids=profile.vision.depth_camera_ids,
+        declared_calibration_ids=profile.vision.calibration_ids,
+        declared_depth_calibration_ids=profile.vision.depth_calibration_ids,
+        profile_id=profile.profile_id,
+        profile_path=profile.source_path,
+        profile_sha256=profile.source_sha256,
+    )
+    provider = _create_provider(factory, context, profile.vision.factory)
     records = []
     latencies_ms = []
     counts: Counter[str] = Counter()
+    vision_errors: list[dict[str, object]] = []
     writer = None
     processed = 0
     source_size = None
     processed_frame_indices: list[int] = []
     source_fps = None
+    provider_identity: tuple[str, str] | None = None
     for frame_index, timestamp_s, bgr, decoded_fps in _frames(args.capture):
         source_fps = decoded_fps
         if frame_index < args.start_frame or (frame_index - args.start_frame) % args.every:
@@ -590,25 +781,49 @@ def main() -> int:
                 "qualitative_upscale": source_size != native_size,
             },
         )
-        scene = validate_scene_for_request(request, provider.observe(request))
+        scene, vision_error = _observe_frame(
+            provider,
+            request,
+            record_vision_errors=args.record_vision_errors,
+        )
         latency_ms = (time.perf_counter() - start) * 1000.0
         latencies_ms.append(latency_ms)
-        counts.update(item.class_id for item in scene.objects)
-        records.append(
-            {
-                "frame_index": frame_index,
-                "timestamp_s": timestamp_s,
-                "latency_ms": latency_ms,
-                "input_rgb_sha256": hashlib.sha256(
-                    rgb.tobytes(order="C")
-                ).hexdigest(),
-                "input_rgb_shape_hwc": [int(value) for value in rgb.shape],
-                "input_rgb_dtype": str(rgb.dtype),
-                "input_channel_order": "RGB",
-                "scene": scene_observation_to_dict(scene),
-            }
-        )
-        overlay = _draw_overlay(native_bgr, scene, table)
+        record = {
+            "frame_index": frame_index,
+            "timestamp_s": timestamp_s,
+            "latency_ms": latency_ms,
+            "input_rgb_sha256": hashlib.sha256(rgb.tobytes(order="C")).hexdigest(),
+            "input_rgb_shape_hwc": [int(value) for value in rgb.shape],
+            "input_rgb_dtype": str(rgb.dtype),
+            "input_channel_order": "RGB",
+        }
+        if scene is None:
+            if vision_error is None:  # Defensive: _observe_frame returns one or the other.
+                raise RuntimeError("vision frame produced neither a scene nor an error")
+            record["explicit_abstention"] = True
+            record["vision_error"] = vision_error
+            vision_errors.append(
+                {
+                    "frame_index": frame_index,
+                    "timestamp_s": timestamp_s,
+                    "latency_ms": latency_ms,
+                    **vision_error,
+                }
+            )
+            overlay = _draw_vision_error_overlay(native_bgr, vision_error)
+        else:
+            scene_provider_identity = (scene.provider_name, scene.provider_version)
+            if provider_identity is None:
+                provider_identity = scene_provider_identity
+            elif scene_provider_identity != provider_identity:
+                raise ValueError(
+                    "vision provider identity changed during replay: "
+                    f"{provider_identity!r} -> {scene_provider_identity!r}"
+                )
+            counts.update(item.class_id for item in scene.objects)
+            record["scene"] = scene_observation_to_dict(scene)
+            overlay = _draw_overlay(native_bgr, scene, table)
+        records.append(record)
         preview = cv2.resize(overlay, (960, 540), interpolation=cv2.INTER_AREA)
         if writer is None:
             writer = cv2.VideoWriter(
@@ -633,6 +848,9 @@ def main() -> int:
         writer.release()
     if not records:
         raise ValueError("no frames were processed")
+    provider_name, provider_version = (
+        (None, None) if provider_identity is None else provider_identity
+    )
     scenes_path = args.output_dir / "scenes.jsonl"
     scenes_payload = "".join(
         json.dumps(record, sort_keys=True) + "\n" for record in records
@@ -652,6 +870,11 @@ def main() -> int:
         "calibration_sha256": _sha256(args.calibration),
         "profile_sha256": _sha256(args.profile),
         "provider_artifact_sha256": _sha256(provider_path),
+        "vision_checkpoint_sha256": (
+            None
+            if args.vision_checkpoint is None
+            else _sha256(args.vision_checkpoint)
+        ),
         "replay_tool_sha256": _sha256(Path(__file__)),
         "object_catalog_sha256": _sha256(catalog_path),
         "project_commit": _git_value("rev-parse", "HEAD"),
@@ -669,9 +892,15 @@ def main() -> int:
     evaluation_path = args.output_dir / "evaluation-result.v1.json"
     experiment_identity = {
         "capture_sha256": capture_sha256,
+        "calibration_sha256": calibration_sha256,
         "project_commit": project_commit,
         "profile_sha256": profile.source_sha256,
+        "vision_factory": profile.vision.factory,
+        "provider_factory_module": provider_factory_module,
+        "provider_name": provider_name,
+        "provider_version": provider_version,
         "provider_artifact_sha256": provider_sha256,
+        "vision_checkpoint_sha256": checkpoint_sha256_at_start,
         "replay_tool_sha256": provenance_at_start["replay_tool_sha256"],
         "cube_edge_mm_profile": args.cube_edge_mm,
         "sample_every_n_frames": args.every,
@@ -686,7 +915,7 @@ def main() -> int:
     ).hexdigest()
     evaluation = {
         "schema_version": 1,
-        "evaluation_id": f"hybrid-replay-{experiment_sha256[:16]}",
+        "evaluation_id": f"vision-replay-{experiment_sha256[:16]}",
         "created_at_utc": created_at_utc,
         "split": "pilot",
         "backend": "offline_replay",
@@ -702,12 +931,22 @@ def main() -> int:
             "components": [
                 {
                     "component": "vision",
-                    "name": provider.PROVIDER_NAME,
-                    "version": provider.PROVIDER_VERSION,
+                    "name": provider_name or profile.vision.factory,
+                    "version": provider_version or "no-validated-scene",
                     "artifact_sha256": provider_sha256,
                 }
             ],
-            "source_run_ids": [f"capture-sha256:{capture_sha256}"],
+            "source_run_ids": [
+                f"capture-sha256:{capture_sha256}",
+                f"calibration-sha256:{calibration_sha256}",
+                *(
+                    []
+                    if checkpoint_sha256_at_start is None
+                    else [
+                        f"vision-checkpoint-sha256:{checkpoint_sha256_at_start}"
+                    ]
+                ),
+            ],
         },
         "vision": {
             "frames_evaluated": processed,
@@ -741,7 +980,25 @@ def main() -> int:
             }
         ],
     }
-    evaluation_emitted = not worktree_dirty and provenance_stable
+    if not provenance_stable:
+        standardized_evaluation_skip_reason = (
+            "repository/input provenance changed during replay"
+        )
+    elif worktree_dirty:
+        standardized_evaluation_skip_reason = (
+            "standardized artifact requires a clean committed worktree"
+        )
+    elif vision_errors:
+        standardized_evaluation_skip_reason = (
+            "recorded vision abstentions make evaluation-result.v1 schema incomplete"
+        )
+    elif provider_identity is None:
+        standardized_evaluation_skip_reason = (
+            "no validated SceneObservation was produced"
+        )
+    else:
+        standardized_evaluation_skip_reason = None
+    evaluation_emitted = standardized_evaluation_skip_reason is None
     if evaluation_emitted:
         evaluation_path.write_text(
             json.dumps(evaluation, indent=2, sort_keys=True) + "\n",
@@ -755,9 +1012,20 @@ def main() -> int:
         "capture_sha256": capture_sha256,
         "calibration_id": calibration_id,
         "calibration_sha256": calibration_sha256,
-        "provider_name": provider.PROVIDER_NAME,
-        "provider_version": provider.PROVIDER_VERSION,
+        "provider_name": provider_name,
+        "provider_version": provider_version,
+        "vision_factory": profile.vision.factory,
+        "provider_factory_module": provider_factory_module,
+        "provider_artifact_file": provider_path.name,
         "provider_artifact_sha256": provider_sha256,
+        "vision_checkpoint": (
+            None
+            if args.vision_checkpoint is None
+            else {
+                "file_name": args.vision_checkpoint.name,
+                "sha256": checkpoint_sha256_at_start,
+            }
+        ),
         "replay_tool_sha256": provenance_at_start["replay_tool_sha256"],
         "scenes_jsonl_sha256": scenes_jsonl_sha256,
         "project_commit": project_commit,
@@ -772,6 +1040,7 @@ def main() -> int:
             "profile_path": profile.source_path,
             "profile_sha256": profile.source_sha256,
         },
+        "experiment_identity": experiment_identity,
         "experiment_sha256": experiment_sha256,
         "processed_frame_indices": processed_frame_indices,
         "source_size": source_size,
@@ -783,6 +1052,10 @@ def main() -> int:
         "start_frame": args.start_frame,
         "maximum_frames": args.maximum_frames,
         "processed_frames": processed,
+        "validated_scene_frames": processed - len(vision_errors),
+        "vision_error_frames": len(vision_errors),
+        "vision_errors": vision_errors,
+        "vision_error_streaks": _summarize_vision_error_streaks(records),
         "object_observations_by_class": dict(sorted(counts.items())),
         "latency_ms": {
             "mean": statistics.fmean(latencies_ms),
@@ -799,15 +1072,8 @@ def main() -> int:
             "hardware exposure timestamps."
         ),
         "evaluation_result": evaluation_path.name if evaluation_emitted else None,
-        "evaluation_result_skipped_reason": (
-            "repository/input provenance changed during replay"
-            if not provenance_stable
-            else (
-                "standardized artifact requires a clean committed worktree"
-                if worktree_dirty
-                else None
-            )
-        ),
+        "evaluation_result_skipped_reason": standardized_evaluation_skip_reason,
+        "standardized_evaluation_skip_reason": standardized_evaluation_skip_reason,
     }
     (args.output_dir / "report.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n",

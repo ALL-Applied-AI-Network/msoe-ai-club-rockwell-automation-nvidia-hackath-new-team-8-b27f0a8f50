@@ -18,6 +18,7 @@ from sorting_core.perception import (
     SceneObservation,
     scene_observation_to_dict,
 )
+from sorting_core.vision import VisionError
 from team_plugins.computer_vision import replay_camera
 
 
@@ -274,6 +275,107 @@ class ReplayOverlayTests(unittest.TestCase):
         )
 
 
+class ReplayProviderLoadingTests(unittest.TestCase):
+    def test_factory_artifact_follows_selected_yolo_module(self):
+        reference = "team_plugins.computer_vision.yolo11n_provider:create"
+        factory = replay_camera.load_factory(reference, "vision")
+
+        module_name, artifact = replay_camera._factory_artifact(factory, reference)
+
+        self.assertEqual(
+            module_name,
+            "team_plugins.computer_vision.yolo11n_provider",
+        )
+        self.assertEqual(artifact.name, "yolo11n_provider.py")
+        self.assertNotEqual(artifact.name, "hybrid_geometry_provider.py")
+
+    def test_checkpoint_inside_repository_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repository"
+            repository.mkdir()
+            checkpoint = repository / "model.pt"
+            checkpoint.write_bytes(b"weights")
+
+            with (
+                patch.object(replay_camera, "REPO_ROOT", repository),
+                self.assertRaisesRegex(ValueError, "outside the Git repository"),
+            ):
+                replay_camera._resolve_vision_checkpoint(checkpoint)
+
+    def test_factory_failure_without_checkpoint_names_replay_flag(self):
+        def factory(unused_context):
+            raise ValueError("weights are required")
+
+        context = SimpleNamespace(checkpoint=None)
+        with self.assertRaisesRegex(RuntimeError, "--vision-checkpoint PATH"):
+            replay_camera._create_provider(factory, context, "example.provider:create")
+
+    def test_vision_error_recording_is_opt_in_and_does_not_fabricate_scene(self):
+        class Provider:
+            def observe(self, unused_request):
+                raise VisionError("whole-scene agreement failed")
+
+        provider = Provider()
+        with self.assertRaisesRegex(VisionError, "whole-scene agreement failed"):
+            replay_camera._observe_frame(
+                provider,
+                object(),
+                record_vision_errors=False,
+            )
+
+        scene, error = replay_camera._observe_frame(
+            provider,
+            object(),
+            record_vision_errors=True,
+        )
+        self.assertIsNone(scene)
+        self.assertEqual(
+            error,
+            {
+                "error_type": "VisionError",
+                "message": "whole-scene agreement failed",
+            },
+        )
+
+    def test_vision_error_streaks_use_processed_order_and_keep_source_indices(self):
+        error_a = {"error_type": "VisionError", "message": "agreement failed"}
+        error_b = {"error_type": "VisionError", "message": "screw abstention"}
+        records = [
+            {"frame_index": 10, "vision_error": error_a},
+            {"frame_index": 20, "vision_error": error_a},
+            {"frame_index": 30, "scene": {}},
+            {"frame_index": 40, "vision_error": error_b},
+        ]
+
+        summary = replay_camera._summarize_vision_error_streaks(records)
+
+        self.assertEqual(summary["count"], 2)
+        self.assertEqual(summary["maximum_length_processed_frames"], 2)
+        self.assertEqual(
+            summary["unit"],
+            "consecutive processed replay frames (1-based processed ordinals)",
+        )
+        self.assertEqual(
+            summary["streaks"][0],
+            {
+                "start_processed_ordinal": 1,
+                "end_processed_ordinal": 2,
+                "length_processed_frames": 2,
+                "start_source_frame_index": 10,
+                "end_source_frame_index": 20,
+                "reasons": [
+                    {
+                        "error_type": "VisionError",
+                        "message": "agreement failed",
+                        "processed_frames": 2,
+                    }
+                ],
+            },
+        )
+        self.assertEqual(summary["streaks"][1]["start_source_frame_index"], 40)
+        self.assertEqual(summary["streaks"][1]["end_source_frame_index"], 40)
+
+
 class ReplayMainGuardTests(unittest.TestCase):
     @staticmethod
     def _arguments(root: Path, output: Path) -> argparse.Namespace:
@@ -287,12 +389,14 @@ class ReplayMainGuardTests(unittest.TestCase):
             output_dir=output,
             calibration=calibration,
             profile=profile,
+            vision_checkpoint=None,
             cube_edge_mm=16.0,
             every=2,
             start_frame=0,
             maximum_frames=1,
             allow_upscale_compressed=False,
             save_source_frames=False,
+            record_vision_errors=False,
         )
 
     def test_main_rejects_nonempty_output_directory_before_replay(self):
@@ -396,24 +500,61 @@ class ReplayMainGuardTests(unittest.TestCase):
                 hashlib.sha256((output / "scenes.jsonl").read_bytes()).hexdigest(),
             )
 
-    def test_main_rejects_profile_for_unattributed_factory(self):
+    def test_main_replays_other_table_rgb_factory_with_external_checkpoint(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             output = root / "new-output"
             arguments = self._arguments(root, output)
+            checkpoint = root / "seed55-best.pt"
+            checkpoint.write_bytes(b"external-model")
+            arguments.vision_checkpoint = checkpoint
+            arguments.maximum_frames = 2
             digest = "c" * 64
             profile = SimpleNamespace(
                 source_sha256=digest,
-                vision=SimpleNamespace(factory="other_team.provider:create"),
+                source_path=str(arguments.profile),
+                profile_id="yolo-replay-profile",
+                vision=SimpleNamespace(
+                    camera_ids=("table",),
+                    depth_camera_ids=(),
+                    factory="team_plugins.computer_vision.yolo11n_provider:create",
+                    options={},
+                    calibration_ids={"table": "declared-table"},
+                    depth_calibration_ids={},
+                ),
             )
+
+            class Provider:
+                def observe(self, request):
+                    return SceneObservation(
+                        scene_id=request.scene_id,
+                        capture_time_s=request.capture_time_s,
+                        objects=(),
+                        provider_name="model-backed-provider",
+                        provider_version=f"1+sha256:{digest}",
+                        calibration_ids=("calibration.json:table",),
+                    )
+
+            factory_contexts = []
+
+            def factory(context):
+                factory_contexts.append(context)
+                return Provider()
+
+            frame = np.zeros((2, 2, 3), dtype=np.uint8)
+            writer = _FakeWriter()
             with (
                 patch.object(replay_camera, "_parse_args", return_value=arguments),
                 patch.object(
                     replay_camera,
                     "_git_value",
-                    side_effect=("a" * 40, "vision/test"),
+                    side_effect=("a" * 40, "vision/test", "a" * 40, "vision/test"),
                 ),
-                patch.object(replay_camera, "_git_worktree_dirty", return_value=False),
+                patch.object(
+                    replay_camera,
+                    "_git_worktree_dirty",
+                    side_effect=(False, False),
+                ),
                 patch.object(replay_camera, "_sha256", return_value=digest),
                 patch.object(
                     replay_camera,
@@ -425,9 +566,189 @@ class ReplayMainGuardTests(unittest.TestCase):
                     "load_integration_profile",
                     return_value=profile,
                 ),
-                self.assertRaisesRegex(ValueError, "attribute only the hybrid provider"),
+                patch.object(replay_camera, "load_factory", return_value=factory),
+                patch.object(
+                    replay_camera,
+                    "_frames",
+                    return_value=iter(
+                        (
+                            (0, 0.0, frame, 10.0),
+                            (2, 0.2, frame, 10.0),
+                        )
+                    ),
+                ),
+                patch.object(replay_camera, "_draw_overlay", return_value=frame),
+                patch.object(
+                    replay_camera.cv2,
+                    "resize",
+                    return_value=np.zeros((540, 960, 3), dtype=np.uint8),
+                ),
+                patch.object(replay_camera.cv2, "VideoWriter", return_value=writer),
+                patch.object(replay_camera.cv2, "imwrite", return_value=True),
+                patch("builtins.print"),
             ):
-                replay_camera.main()
+                result = replay_camera.main()
+
+            self.assertEqual(result, 0)
+            self.assertEqual(len(factory_contexts), 1)
+            self.assertEqual(factory_contexts[0].checkpoint, str(checkpoint.resolve()))
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                report["vision_factory"],
+                "team_plugins.computer_vision.yolo11n_provider:create",
+            )
+            self.assertEqual(report["provider_factory_module"], __name__)
+            self.assertEqual(report["provider_artifact_file"], Path(__file__).name)
+            self.assertEqual(
+                report["vision_checkpoint"],
+                {"file_name": checkpoint.name, "sha256": digest},
+            )
+            self.assertEqual(report["provider_name"], "model-backed-provider")
+            self.assertEqual(report["validated_scene_frames"], 2)
+            self.assertEqual(report["vision_error_frames"], 0)
+            self.assertEqual(
+                report["experiment_identity"]["provider_name"],
+                "model-backed-provider",
+            )
+            self.assertEqual(
+                report["experiment_identity"]["provider_version"],
+                f"1+sha256:{digest}",
+            )
+            self.assertEqual(
+                report["experiment_identity"]["calibration_sha256"],
+                digest,
+            )
+            evaluation = json.loads(
+                (output / "evaluation-result.v1.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                evaluation["provenance"]["source_run_ids"],
+                [
+                    f"capture-sha256:{digest}",
+                    f"calibration-sha256:{digest}",
+                    f"vision-checkpoint-sha256:{digest}",
+                ],
+            )
+            self.assertEqual(
+                evaluation["provenance"]["components"][0]["name"],
+                "model-backed-provider",
+            )
+            self.assertEqual(
+                evaluation["provenance"]["components"][0]["version"],
+                f"1+sha256:{digest}",
+            )
+            self.assertNotIn(str(root), json.dumps(evaluation, sort_keys=True))
+
+    def test_partial_recorded_vision_errors_skip_standardized_evaluation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "new-output"
+            arguments = self._arguments(root, output)
+            arguments.maximum_frames = 2
+            arguments.record_vision_errors = True
+            digest = "d" * 64
+            profile = SimpleNamespace(
+                source_sha256=digest,
+                source_path=str(arguments.profile),
+                profile_id="strict-profile",
+                vision=SimpleNamespace(
+                    camera_ids=("table",),
+                    depth_camera_ids=(),
+                    factory="team_plugins.computer_vision.strict_provider:create",
+                    options={},
+                    calibration_ids={"table": "declared-table"},
+                    depth_calibration_ids={},
+                ),
+            )
+
+            class Provider:
+                def __init__(self):
+                    self.calls = 0
+
+                def observe(self, request):
+                    self.calls += 1
+                    if self.calls == 2:
+                        raise VisionError("no complete-scene agreement")
+                    return SceneObservation(
+                        scene_id=request.scene_id,
+                        capture_time_s=request.capture_time_s,
+                        objects=(),
+                        provider_name="strict-provider",
+                        provider_version="2",
+                        calibration_ids=("calibration.json:table",),
+                    )
+
+            def factory(unused_context):
+                return Provider()
+
+            frame = np.zeros((2, 2, 3), dtype=np.uint8)
+            with (
+                patch.object(replay_camera, "_parse_args", return_value=arguments),
+                patch.object(
+                    replay_camera,
+                    "_git_value",
+                    side_effect=("a" * 40, "vision/test", "a" * 40, "vision/test"),
+                ),
+                patch.object(
+                    replay_camera,
+                    "_git_worktree_dirty",
+                    side_effect=(False, False),
+                ),
+                patch.object(replay_camera, "_sha256", return_value=digest),
+                patch.object(
+                    replay_camera,
+                    "load_calibration",
+                    return_value={"table": {"size": [2, 2]}},
+                ),
+                patch.object(
+                    replay_camera,
+                    "load_integration_profile",
+                    return_value=profile,
+                ),
+                patch.object(replay_camera, "load_factory", return_value=factory),
+                patch.object(
+                    replay_camera,
+                    "_frames",
+                    return_value=iter(
+                        (
+                            (0, 0.0, frame, 10.0),
+                            (2, 0.2, frame, 10.0),
+                        )
+                    ),
+                ),
+                patch.object(
+                    replay_camera.cv2,
+                    "resize",
+                    return_value=np.zeros((540, 960, 3), dtype=np.uint8),
+                ),
+                patch.object(
+                    replay_camera.cv2,
+                    "VideoWriter",
+                    return_value=_FakeWriter(),
+                ),
+                patch.object(replay_camera.cv2, "imwrite", return_value=True),
+                patch("builtins.print"),
+            ):
+                result = replay_camera.main()
+
+            self.assertEqual(result, 0)
+            self.assertFalse((output / "evaluation-result.v1.json").exists())
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["validated_scene_frames"], 1)
+            self.assertEqual(report["vision_error_frames"], 1)
+            self.assertEqual(report["provider_name"], "strict-provider")
+            self.assertEqual(
+                report["vision_error_streaks"]["maximum_length_processed_frames"],
+                1,
+            )
+            self.assertEqual(
+                report["evaluation_result_skipped_reason"],
+                "recorded vision abstentions make evaluation-result.v1 schema incomplete",
+            )
+            self.assertEqual(
+                report["standardized_evaluation_skip_reason"],
+                "recorded vision abstentions make evaluation-result.v1 schema incomplete",
+            )
 
     def test_clean_to_dirty_transition_is_provenance_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
