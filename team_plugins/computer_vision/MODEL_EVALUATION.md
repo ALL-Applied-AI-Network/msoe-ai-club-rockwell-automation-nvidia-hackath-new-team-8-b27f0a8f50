@@ -93,10 +93,10 @@ registered depth and should not be treated as the default.
   retained those observations as non-executable scene evidence while keeping
   unmatched pickup geometry and every unmatched YOLO box fail-closed. On the
   identical 3,389 frames it accepted 2,958 (87.28%) and abstained on 431
-  (12.72%); the longest streak fell from 86 to 50 frames (5.0 s). Median/p95
-  CPU latency was 90.52/309.14 ms, with large host-scheduling outliers. This is
-  improved agreement-gate availability, not accuracy, and remains no-motion
-  evidence only.
+  (12.72%); the longest streak fell from 86 to 50 frames (5.0 s). A clean
+  commit replay reproduced all semantic outputs exactly and measured
+  90.89/181.54 ms median/p95 CPU latency. This is improved agreement-gate
+  availability, not accuracy, and remains no-motion evidence only.
 
 - Before this experiment, rollout-4 compressed replay under the 16 mm cube
   profile found exactly one pickable cube of each color on 121/123 sampled

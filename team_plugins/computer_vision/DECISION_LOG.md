@@ -385,12 +385,15 @@
   errors were 242 frames with pickup-geometry disagreement and 189 with an
   unmatched YOLO box. Abstentions formed 48 streaks; the maximum was 50 frames
   (5.0 seconds at decoded 10 Hz), down from 86 frames under the strict gate.
-- Timing/provenance: median/p95 local CPU latency was 90.52/309.14 ms. Host
-  stalls produced a 36.59 s maximum, so neither that maximum nor the 159.87 ms
-  mean is a hardware-loop guarantee. Capture SHA-256 is
+- Reproduction/timing: a second full replay from clean pushed commit `c2b3881`
+  produced zero semantic mismatches across all 3,389 records after removing
+  only runtime latency/warm-up fields. Its local CPU
+  mean/median/p95/maximum was 105.89/90.89/181.54/905.48 ms. These still
+  exclude capture/network/controller latency and are not a hardware-loop
+  guarantee. Capture SHA-256 is
   `bac071bf...cdbc534`, checkpoint SHA-256 is `010bb71b...788fbb`, profile
   SHA-256 is `3c039e1d...898ba`, and experiment SHA-256 is
-  `1f74b5ed...762f3`.
+  `6225d90e...76b45`.
 - Evidence limit/decision: this is availability on a compressed video with no
   independent object or pose truth. Accepted poses still come from the same
   geometry provider. Keep the baseline as motion authority and test this gate

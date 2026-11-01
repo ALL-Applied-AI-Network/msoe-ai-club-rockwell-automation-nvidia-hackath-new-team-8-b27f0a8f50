@@ -90,11 +90,12 @@ On all 3,389 frames of the same compressed Rollout 5 table video, the strict
 profile accepted 2,199 (64.89%). The pickup gate accepted 2,958 (87.28%), an
 increase of exactly 759 frames that the strict error decomposition attributed
 only to unmatched off-pickup geometry. It abstained on 431 frames in 48 streaks;
-the longest was 50 frames, or 5.0 seconds at decoded 10 Hz. Median/p95 local CPU
-latency was 90.52/309.14 ms. Large host-scheduling outliers made the mean and
-maximum unsuitable as runtime guarantees. These are agreement-gate
-availability measurements on compressed video, not recall, pose accuracy, or
-physical-grasp evidence. The baseline remains the motion default.
+the longest was 50 frames, or 5.0 seconds at decoded 10 Hz. A repeat from clean
+commit `c2b3881` reproduced all 3,389 semantic records exactly after removing
+runtime-only timing fields. Its local CPU mean/median/p95/maximum was
+105.89/90.89/181.54/905.48 ms. These are agreement-gate availability
+measurements on compressed video, not recall, pose accuracy, or physical-grasp
+evidence. The baseline remains the motion default.
 
 On the project laptop's WSL CPU, the exact checkpoint loaded in about 1.1 s.
 One cold inference took 11.8 s; two subsequent passes took 150 ms and 128 ms.
