@@ -57,6 +57,14 @@ UV_PROJECT_ENVIRONMENT=/tmp/rockwell-yolo11n-runtime \
   --cube-mm 16 --max-snapshots 10
 ```
 
+The stricter profile remains `--vision yolo11n`. To collect native evidence
+for the separate pickup-region agreement experiment, replace that argument
+with `--vision yolo11n-pickup-gate`. Both commands forcibly clear the motion,
+descent, and grasp-fit interlocks. The normal hover/pick launcher's explicit
+`--vision` choices do **not** expose the pickup-gate profile. Its pre-existing
+advanced `ROCKWELL_INTEGRATION_PROFILE` override can load arbitrary profiles;
+do not use that override to run this experiment with motion.
+
 This is the first real-hardware test, not permission to descend. YOLO11n emits
 2D class/box proposals only. The provider still requires the checked-in table
 camera calibration and deterministic cube geometry to produce robot-base
@@ -81,6 +89,13 @@ UV_PROJECT_ENVIRONMENT=/tmp/rockwell-yolo11n-runtime \
   --cube-edge-mm 16 --every 1 --allow-upscale-compressed \
   --record-vision-errors
 ```
+
+To replay the pickup-region experiment, change only the profile path to
+`team_plugins/computer_vision/profile.yolo11n-cube-pickup-gate.v1.json` and use
+a different empty output directory. On the complete compressed Rollout 5
+recording it accepted 2,958/3,389 frames (87.28%), versus 2,199/3,389 (64.89%)
+for the strict profile. That measures availability only; it does not validate
+object recall or robot-base pose accuracy.
 
 Without `--record-vision-errors`, replay remains fail-fast. With it, each strict
 YOLO whole-scene rejection is an explicit error/abstention record and `NO SCENE`

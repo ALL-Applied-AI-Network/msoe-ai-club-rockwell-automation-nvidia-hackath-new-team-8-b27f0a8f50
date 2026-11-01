@@ -34,7 +34,11 @@ from sorting_core.perception import (
     validate_scene_for_request,
 )
 from sorting_core.task_perception import cube_scene_to_observation
-from sorting_core.vision import VisionError, detect_coloured_cubes
+from sorting_core.vision import (
+    VisionError,
+    detect_coloured_cubes,
+    detection_in_pickup_region,
+)
 
 if TYPE_CHECKING:
     from sorting_core.integration_plugins import VisionFactoryContext
@@ -43,7 +47,7 @@ if TYPE_CHECKING:
 
 PLUGIN_API_VERSION = 1
 PROVIDER_NAME = "yolo11n-cube-proposals-calibrated-geometry"
-PROVIDER_REVISION = "1"
+PROVIDER_REVISION = "2"
 EXPECTED_CHECKPOINT_SHA256 = (
     "010bb71b1b07fc77490a2bc2bd774102205640bdf9ba07d6fa8b3bd758788fbb"
 )
@@ -57,6 +61,9 @@ EXPECTED_INFERENCE_IMAGE_SIZE = 960
 EXPECTED_CONFIDENCE_THRESHOLD = 0.6596596596596597
 EXPECTED_IOU_THRESHOLD = 0.7
 EXPECTED_WARMUP_PASSES = 3
+GEOMETRY_AGREEMENT_SCOPES = frozenset(
+    {"all_inference_crop", "pickup_region"}
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -172,6 +179,7 @@ class Yolo11nCubeVisionProvider:
         confidence_threshold: float = EXPECTED_CONFIDENCE_THRESHOLD,
         iou_threshold: float = EXPECTED_IOU_THRESHOLD,
         roi_margin_px: int = 4,
+        geometry_agreement_scope: str = "all_inference_crop",
         maximum_frame_age_s: float = 0.15,
         profile_provenance: Mapping[str, Any] | None = None,
     ) -> None:
@@ -235,6 +243,18 @@ class Yolo11nCubeVisionProvider:
         if type(roi_margin_px) is not int or not 0 <= roi_margin_px <= 32:
             raise ValueError("roi_margin_px must be an integer in [0, 32]")
         self._roi_margin_px = roi_margin_px
+        if not isinstance(geometry_agreement_scope, str):
+            raise ValueError(
+                "geometry_agreement_scope must be one of "
+                f"{sorted(GEOMETRY_AGREEMENT_SCOPES)}"
+            )
+        agreement_scope = geometry_agreement_scope.strip()
+        if agreement_scope not in GEOMETRY_AGREEMENT_SCOPES:
+            raise ValueError(
+                "geometry_agreement_scope must be one of "
+                f"{sorted(GEOMETRY_AGREEMENT_SCOPES)}"
+            )
+        self._geometry_agreement_scope = agreement_scope
         self._maximum_frame_age_s = _finite_float(
             maximum_frame_age_s, "maximum_frame_age_s"
         )
@@ -369,9 +389,14 @@ class Yolo11nCubeVisionProvider:
         geometry: SceneDetections,
         boxes: Sequence[_YoloBox],
     ) -> tuple[_GatedCube, ...]:
-        candidates: list[tuple[float, int, int]] = []
+        candidates: list[tuple[int, float, int, int]] = []
         crop_left, crop_top, crop_right, crop_bottom = self._crop_xyxy
         geometry_in_crop: set[int] = set()
+        geometry_in_pickup_region = {
+            index
+            for index, cube in enumerate(geometry.cubes)
+            if detection_in_pickup_region(cube, self.config)
+        }
         for geometry_index, cube in enumerate(geometry.cubes):
             if cube.pixel_center_uv is None:
                 raise VisionError(
@@ -398,12 +423,26 @@ class Yolo11nCubeVisionProvider:
                 distance = ((u - centre_u) / half_width) ** 2 + (
                     (v - centre_v) / half_height
                 ) ** 2
-                candidates.append((distance, geometry_index, box_index))
+                required_priority = (
+                    0
+                    if self._geometry_agreement_scope == "all_inference_crop"
+                    or geometry_index in geometry_in_pickup_region
+                    else 1
+                )
+                candidates.append(
+                    (required_priority, distance, geometry_index, box_index)
+                )
+
+        geometry_requiring_yolo = (
+            geometry_in_crop
+            if self._geometry_agreement_scope == "all_inference_crop"
+            else geometry_in_crop & geometry_in_pickup_region
+        )
 
         assigned_geometry: set[int] = set()
         assigned_boxes: set[int] = set()
         matched_boxes: dict[int, _YoloBox] = {}
-        for _, geometry_index, box_index in sorted(candidates):
+        for _, _, geometry_index, box_index in sorted(candidates):
             if geometry_index in assigned_geometry or box_index in assigned_boxes:
                 continue
             cube = geometry.cubes[geometry_index]
@@ -415,12 +454,12 @@ class Yolo11nCubeVisionProvider:
         unmatched_boxes = tuple(
             index for index in range(len(boxes)) if index not in assigned_boxes
         )
-        unmatched_in_crop_geometry = tuple(
+        unmatched_required_geometry = tuple(
             index
-            for index in sorted(geometry_in_crop)
+            for index in sorted(geometry_requiring_yolo)
             if index not in assigned_geometry
         )
-        if unmatched_boxes or unmatched_in_crop_geometry:
+        if unmatched_boxes or unmatched_required_geometry:
             unmatched_box_details = [
                 {
                     "xyxy_full": tuple(
@@ -439,22 +478,21 @@ class Yolo11nCubeVisionProvider:
                         for value in geometry.cubes[index].pixel_center_uv or ()
                     ),
                 }
-                for index in unmatched_in_crop_geometry
+                for index in unmatched_required_geometry
             ]
             raise VisionError(
                 "YOLO11n and calibrated geometry disagree inside the inference "
                 f"crop: unmatched_yolo_boxes={len(unmatched_boxes)}, "
                 "unmatched_geometry_detections="
-                f"{len(unmatched_in_crop_geometry)}, "
+                f"{len(unmatched_required_geometry)}, "
+                f"geometry_agreement_scope={self._geometry_agreement_scope!r}, "
                 f"unmatched_yolo={unmatched_box_details!r}, "
                 f"unmatched_geometry={unmatched_geometry_details!r}"
             )
 
-        x_bounds = self.config.task.pickup_region_base_m["x"]
-        y_bounds = self.config.task.pickup_region_base_m["y"]
         gated: list[_GatedCube] = []
         for geometry_index, cube in enumerate(geometry.cubes):
-            if geometry_index in geometry_in_crop:
+            if geometry_index in matched_boxes:
                 box = matched_boxes[geometry_index]
                 gated.append(
                     _GatedCube(
@@ -469,11 +507,23 @@ class Yolo11nCubeVisionProvider:
                 )
                 continue
 
-            x_m, y_m = cube.position_base_m[:2]
-            pick_eligible = (
-                x_bounds[0] <= x_m <= x_bounds[1]
-                and y_bounds[0] <= y_m <= y_bounds[1]
-            )
+            if geometry_index in geometry_in_crop:
+                # Only the opt-in pickup-region scope can reach this branch.
+                # Preserve off-region geometry for destination verification and
+                # obstacle evidence, but expose its missing neural corroboration.
+                gated.append(
+                    _GatedCube(
+                        cube=cube,
+                        box=None,
+                        geometry_confidence=cube.confidence,
+                        yolo_status=(
+                            "inside_inference_crop_outside_pickup_geometry_only"
+                        ),
+                    )
+                )
+                continue
+
+            pick_eligible = geometry_index in geometry_in_pickup_region
             if pick_eligible:
                 raise VisionError(
                     "calibrated geometry found a pick-eligible cube outside the "
@@ -575,6 +625,10 @@ class Yolo11nCubeVisionProvider:
             attributes.update({
                 "yolo_status": match.yolo_status,
                 "geometry_confidence": match.geometry_confidence,
+                "geometry_agreement_scope": self._geometry_agreement_scope,
+                "in_pickup_region": detection_in_pickup_region(
+                    match.cube, self.config
+                ),
                 "checkpoint_sha256": self._checkpoint_sha256,
                 "inference_crop_xyxy": self._crop_xyxy,
                 "inference_image_size": self._inference_image_size,
@@ -626,6 +680,9 @@ def create(context: "VisionFactoryContext") -> "VisionProvider":
     )
     iou_threshold = options.pop("iou_threshold", EXPECTED_IOU_THRESHOLD)
     roi_margin_px = options.pop("roi_margin_px", 4)
+    geometry_agreement_scope = options.pop(
+        "geometry_agreement_scope", "all_inference_crop"
+    )
     declared_checkpoint_sha256 = str(
         options.pop("checkpoint_sha256", EXPECTED_CHECKPOINT_SHA256)
     ).strip().lower()
@@ -673,6 +730,7 @@ def create(context: "VisionFactoryContext") -> "VisionProvider":
         confidence_threshold=confidence_threshold,
         iou_threshold=iou_threshold,
         roi_margin_px=roi_margin_px,
+        geometry_agreement_scope=geometry_agreement_scope,
         maximum_frame_age_s=maximum_frame_age_s,
         profile_provenance={
             "profile_id": context.profile_id,
@@ -693,6 +751,7 @@ __all__ = [
     "EXPECTED_INFERENCE_IMAGE_SIZE",
     "EXPECTED_IOU_THRESHOLD",
     "EXPECTED_WARMUP_PASSES",
+    "GEOMETRY_AGREEMENT_SCOPES",
     "PLUGIN_API_VERSION",
     "Yolo11nCubeVisionProvider",
     "create",

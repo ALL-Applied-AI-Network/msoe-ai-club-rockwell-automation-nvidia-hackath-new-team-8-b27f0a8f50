@@ -358,3 +358,40 @@
   lossless frames with reviewed cube references and a separate real-screw
   positive/negative set, then measure dropout duration and robot-base pose
   error against independent truth.
+
+## 2026-11-01 — Pickup-region YOLO agreement experiment
+
+- Problem decomposition: of the strict profile's 1,190 abstention frames, 759
+  were geometry-only disagreements whose unmatched geometry was entirely
+  outside the configured pickup region. Another 242 had unmatched pickup-region
+  geometry, 119 were YOLO-only, and 70 had unmatched YOLO plus optional
+  off-region geometry.
+- Hypothesis: require YOLO corroboration only for geometry that can become a
+  pick target, while retaining all off-region geometry as scene/destination
+  evidence. This may improve availability without hiding a missed executable
+  target.
+- Implementation: add the separate
+  `profile.yolo11n-cube-pickup-gate.v1.json`. Pickup geometry is matched before
+  optional geometry. Every unmatched YOLO box, unmatched pickup geometry,
+  screw prediction, and pickup target outside crop coverage still abstains.
+  The strict profile and profile-unset baseline are unchanged. The new profile
+  is offered only by replay and the no-motion diagnostic, not by the motion
+  launcher's explicit `--vision` choices. The pre-existing arbitrary-profile
+  environment override remains technically capable of loading it and is not a
+  supported motion path.
+- Exact-frame result: on the same 3,389 decoded frames and pinned checkpoint,
+  2,958 frames were accepted (87.28%) and 431 abstained (12.72%). The 759-frame
+  improvement exactly matched the pre-registered decomposition. Remaining
+  errors were 242 frames with pickup-geometry disagreement and 189 with an
+  unmatched YOLO box. Abstentions formed 48 streaks; the maximum was 50 frames
+  (5.0 seconds at decoded 10 Hz), down from 86 frames under the strict gate.
+- Timing/provenance: median/p95 local CPU latency was 90.52/309.14 ms. Host
+  stalls produced a 36.59 s maximum, so neither that maximum nor the 159.87 ms
+  mean is a hardware-loop guarantee. Capture SHA-256 is
+  `bac071bf...cdbc534`, checkpoint SHA-256 is `010bb71b...788fbb`, profile
+  SHA-256 is `3c039e1d...898ba`, and experiment SHA-256 is
+  `1f74b5ed...762f3`.
+- Evidence limit/decision: this is availability on a compressed video with no
+  independent object or pose truth. Accepted poses still come from the same
+  geometry provider. Keep the baseline as motion authority and test this gate
+  only with native, measured, no-motion captures before reconsidering.

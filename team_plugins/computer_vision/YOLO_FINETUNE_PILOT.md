@@ -66,11 +66,35 @@ pre-registered experiment should use disk/no cache before viewing test results.
 `profile.yolo11n-cube.v1.json` selects the exact seed-55 artifact by SHA-256.
 The provider uses YOLO only for 2D proposals; the existing calibrated
 HSV/known-size geometry still supplies color, robot-base position, and cube yaw.
-Inside the neural crop the two methods must agree one-to-one. Disagreement,
-unvalidated screw predictions, or incomplete pick-region crop coverage causes
-an explicit abstention. The profile is opt-in through
+The strict profile requires one-to-one agreement for every geometry detection
+inside the neural crop. Disagreement, unvalidated screw predictions, or
+incomplete pick-region crop coverage causes an explicit abstention. It remains
+the profile selected by
 `supervised_run.py --vision yolo11n --vision-checkpoint PATH`; profile-unset
 behavior remains unchanged.
+
+`profile.yolo11n-cube-pickup-gate.v1.json` is a separate replay/no-motion
+experiment. It still requires every pickup-eligible geometry detection to
+match YOLO, rejects every unmatched YOLO box, rejects screw predictions, and
+rejects pickup-eligible geometry outside crop coverage. Geometry outside the
+pickup region is retained as scene/destination evidence with explicit
+`inside_inference_crop_outside_pickup_geometry_only` provenance instead of
+forcing an abstention. Required pickup geometry receives assignment priority
+so an optional off-region artifact cannot consume its only candidate box. The
+no-motion diagnostic exposes it as `--vision yolo11n-pickup-gate`; the motion
+launcher's explicit `--vision` choices do not. The existing advanced
+`ROCKWELL_INTEGRATION_PROFILE` override can load arbitrary profiles, so do not
+use that override to grant this experiment motion authority.
+
+On all 3,389 frames of the same compressed Rollout 5 table video, the strict
+profile accepted 2,199 (64.89%). The pickup gate accepted 2,958 (87.28%), an
+increase of exactly 759 frames that the strict error decomposition attributed
+only to unmatched off-pickup geometry. It abstained on 431 frames in 48 streaks;
+the longest was 50 frames, or 5.0 seconds at decoded 10 Hz. Median/p95 local CPU
+latency was 90.52/309.14 ms. Large host-scheduling outliers made the mean and
+maximum unsuitable as runtime guarantees. These are agreement-gate
+availability measurements on compressed video, not recall, pose accuracy, or
+physical-grasp evidence. The baseline remains the motion default.
 
 On the project laptop's WSL CPU, the exact checkpoint loaded in about 1.1 s.
 One cold inference took 11.8 s; two subsequent passes took 150 ms and 128 ms.

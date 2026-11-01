@@ -48,6 +48,9 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 HARDWARE_DIR = REPOSITORY_ROOT / "hardware" / "fanuc_cell"
 HYBRID_PROFILE_PATH = Path(__file__).with_name("profile.hybrid-geometry.v1.json")
 YOLO11N_PROFILE_PATH = Path(__file__).with_name("profile.yolo11n-cube.v1.json")
+YOLO11N_PICKUP_GATE_PROFILE_PATH = Path(__file__).with_name(
+    "profile.yolo11n-cube-pickup-gate.v1.json"
+)
 # Backward-compatible name used by existing callers/tests. The default remains
 # the exact profile that this diagnostic selected before YOLO support existed.
 PROFILE_PATH = HYBRID_PROFILE_PATH
@@ -797,11 +800,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--vision",
-        choices=("hybrid-geometry", "yolo11n"),
+        choices=("hybrid-geometry", "yolo11n", "yolo11n-pickup-gate"),
         default="hybrid-geometry",
         help=(
-            "vision provider to exercise (default: hybrid-geometry); yolo11n "
-            "requires --vision-checkpoint"
+            "vision provider to exercise (default: hybrid-geometry); YOLO11n "
+            "profiles require --vision-checkpoint; pickup-gate is no-motion "
+            "evidence only"
         ),
     )
     parser.add_argument(
@@ -877,13 +881,22 @@ def main(
             "--vision/--vision-checkpoint apply only to --capture-camera table; "
             "side and wrist are evidence-only"
         )
-    if args.vision == "yolo11n":
+    if args.vision in {"yolo11n", "yolo11n-pickup-gate"}:
         if args.vision_checkpoint is None:
-            parser.error("--vision yolo11n requires --vision-checkpoint PATH")
-        profile_path = YOLO11N_PROFILE_PATH
+            parser.error(
+                f"--vision {args.vision} requires --vision-checkpoint PATH"
+            )
+        profile_path = (
+            YOLO11N_PROFILE_PATH
+            if args.vision == "yolo11n"
+            else YOLO11N_PICKUP_GATE_PROFILE_PATH
+        )
     else:
         if args.vision_checkpoint is not None:
-            parser.error("--vision-checkpoint requires --vision yolo11n")
+            parser.error(
+                "--vision-checkpoint requires --vision yolo11n or "
+                "yolo11n-pickup-gate"
+            )
         profile_path = HYBRID_PROFILE_PATH
     environment_summary = configure_no_motion_environment(
         args.cube_mm,

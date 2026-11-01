@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "profile_id": "vision-yolo11n-seed55-cube-pickup-gate-v1",
+  "vision": {
+    "factory": "team_plugins.computer_vision.yolo11n_provider:create",
+    "camera_ids": ["table"],
+    "depth_camera_ids": [],
+    "calibration_ids": {
+      "table": "sidclab-cameras.json:table"
+    },
+    "depth_calibration_ids": {},
+    "options": {
+      "camera_id": "table",
+      "maximum_frame_age_s": 0.15,
+      "expected_image_size": [1920, 1080],
+      "crop_xyxy": [500, 400, 1500, 1050],
+      "inference_image_size": 960,
+      "confidence_threshold": 0.6596596596596597,
+      "iou_threshold": 0.7,
+      "roi_margin_px": 4,
+      "geometry_agreement_scope": "pickup_region",
+      "checkpoint_sha256": "010bb71b1b07fc77490a2bc2bd774102205640bdf9ba07d6fa8b3bd758788fbb"
+    }
+  }
+}

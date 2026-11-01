@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
@@ -88,7 +89,13 @@ class Yolo11nProviderTests(unittest.TestCase):
     def setUp(self):
         self.config = load_config()
 
-    def provider(self, model: FakeModel, detector=None) -> Yolo11nCubeVisionProvider:
+    def provider(
+        self,
+        model: FakeModel,
+        detector=None,
+        *,
+        geometry_agreement_scope: str = "all_inference_crop",
+    ) -> Yolo11nCubeVisionProvider:
         return Yolo11nCubeVisionProvider(
             config=self.config,
             camera_projectors={"table": projector},
@@ -97,6 +104,7 @@ class Yolo11nProviderTests(unittest.TestCase):
             checkpoint_sha256=EXPECTED_CHECKPOINT_SHA256,
             expected_cube_edge_m=0.010,
             detector=detector,
+            geometry_agreement_scope=geometry_agreement_scope,
         )
 
     def test_cube_box_corroborates_full_frame_geometry_and_converts_rgb_to_bgr(self):
@@ -239,6 +247,168 @@ class Yolo11nProviderTests(unittest.TestCase):
                 request(np.zeros((1080, 1920, 3), dtype=np.uint8))
             )
 
+    def test_strict_scope_rejects_unmatched_off_pickup_geometry_in_crop(self):
+        model = FakeModel()
+
+        def detector(rgb, projector, config, **kwargs):
+            return SceneDetections(
+                scene_id=kwargs["scene_id"],
+                capture_time_s=kwargs["capture_time_s"],
+                cubes=(
+                    CubeDetection(
+                        track_id="off-pickup-artifact",
+                        colour="yellow",
+                        capture_time_s=kwargs["capture_time_s"],
+                        position_base_m=(0.20, 0.02, 0.005),
+                        yaw_rad=0.0,
+                        pixel_center_uv=(640.0, 540.0),
+                    ),
+                ),
+            )
+
+        with self.assertRaisesRegex(VisionError, "unmatched_geometry_detections=1"):
+            self.provider(model, detector).observe(
+                request(np.zeros((1080, 1920, 3), dtype=np.uint8))
+            )
+
+    def test_pickup_scope_preserves_unmatched_off_pickup_geometry_in_crop(self):
+        model = FakeModel()
+
+        def detector(rgb, projector, config, **kwargs):
+            return SceneDetections(
+                scene_id=kwargs["scene_id"],
+                capture_time_s=kwargs["capture_time_s"],
+                cubes=(
+                    CubeDetection(
+                        track_id="off-pickup-artifact",
+                        colour="yellow",
+                        capture_time_s=kwargs["capture_time_s"],
+                        position_base_m=(0.20, 0.02, 0.005),
+                        yaw_rad=0.0,
+                        confidence=0.7,
+                        pixel_center_uv=(640.0, 540.0),
+                    ),
+                ),
+            )
+
+        scene = self.provider(
+            model,
+            detector,
+            geometry_agreement_scope="pickup_region",
+        ).observe(request(np.zeros((1080, 1920, 3), dtype=np.uint8)))
+
+        self.assertEqual(len(scene.objects), 1)
+        detected = scene.objects[0]
+        self.assertEqual(
+            detected.attributes["yolo_status"],
+            "inside_inference_crop_outside_pickup_geometry_only",
+        )
+        self.assertFalse(detected.attributes["in_pickup_region"])
+        self.assertEqual(
+            detected.attributes["geometry_agreement_scope"], "pickup_region"
+        )
+        self.assertNotIn("yolo_confidence", detected.attributes)
+
+    def test_pickup_scope_still_rejects_unmatched_pickup_geometry(self):
+        model = FakeModel()
+
+        def detector(rgb, projector, config, **kwargs):
+            return SceneDetections(
+                scene_id=kwargs["scene_id"],
+                capture_time_s=kwargs["capture_time_s"],
+                cubes=(
+                    CubeDetection(
+                        track_id="missed-pickup-red",
+                        colour="red",
+                        capture_time_s=kwargs["capture_time_s"],
+                        position_base_m=(0.36, 0.02, 0.005),
+                        yaw_rad=0.0,
+                        pixel_center_uv=(640.0, 540.0),
+                    ),
+                ),
+            )
+
+        with self.assertRaisesRegex(VisionError, "unmatched_geometry_detections=1"):
+            self.provider(
+                model,
+                detector,
+                geometry_agreement_scope="pickup_region",
+            ).observe(request(np.zeros((1080, 1920, 3), dtype=np.uint8)))
+
+    def test_pickup_scope_still_rejects_unmatched_yolo_box(self):
+        model = FakeModel(
+            FakeBoxes(
+                xyxy=((100.0, 100.0, 180.0, 180.0),),
+                confidence=(0.9,),
+                classes=(0,),
+            )
+        )
+
+        def detector(rgb, projector, config, **kwargs):
+            return SceneDetections(
+                scene_id=kwargs["scene_id"],
+                capture_time_s=kwargs["capture_time_s"],
+                cubes=(),
+            )
+
+        with self.assertRaisesRegex(VisionError, "unmatched_yolo_boxes=1"):
+            self.provider(
+                model,
+                detector,
+                geometry_agreement_scope="pickup_region",
+            ).observe(request(np.zeros((1080, 1920, 3), dtype=np.uint8)))
+
+    def test_pickup_geometry_wins_box_assignment_over_closer_optional_geometry(self):
+        model = FakeModel(
+            FakeBoxes(
+                xyxy=((100.0, 100.0, 180.0, 180.0),),
+                confidence=(0.9,),
+                classes=(0,),
+            )
+        )
+
+        def detector(rgb, projector, config, **kwargs):
+            common = {
+                "colour": "red",
+                "capture_time_s": kwargs["capture_time_s"],
+                "yaw_rad": 0.0,
+            }
+            return SceneDetections(
+                scene_id=kwargs["scene_id"],
+                capture_time_s=kwargs["capture_time_s"],
+                cubes=(
+                    CubeDetection(
+                        track_id="closer-off-pickup",
+                        position_base_m=(0.20, 0.02, 0.005),
+                        pixel_center_uv=(640.0, 540.0),
+                        **common,
+                    ),
+                    CubeDetection(
+                        track_id="required-pickup",
+                        position_base_m=(0.36, 0.02, 0.005),
+                        pixel_center_uv=(645.0, 540.0),
+                        **common,
+                    ),
+                ),
+            )
+
+        scene = self.provider(
+            model,
+            detector,
+            geometry_agreement_scope="pickup_region",
+        ).observe(request(np.zeros((1080, 1920, 3), dtype=np.uint8)))
+        by_id = {detected.track_id: detected for detected in scene.objects}
+        self.assertEqual(
+            by_id["closer-off-pickup"].attributes["yolo_status"],
+            "inside_inference_crop_outside_pickup_geometry_only",
+        )
+        self.assertEqual(
+            by_id["required-pickup"].attributes["yolo_status"], "corroborated"
+        )
+        self.assertIn(
+            "yolo_confidence", by_id["required-pickup"].attributes
+        )
+
     def test_outside_crop_destination_geometry_is_preserved_without_yolo(self):
         model = FakeModel()
 
@@ -298,6 +468,15 @@ class Yolo11nProviderTests(unittest.TestCase):
         model = FakeModel(names={0: "cube"})
         with self.assertRaisesRegex(ValueError, "class map"):
             self.provider(model)
+
+    def test_rejects_invalid_geometry_agreement_scope(self):
+        for invalid in ("whole_scene", True, None):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "geometry_agreement_scope"):
+                    self.provider(
+                        FakeModel(),
+                        geometry_agreement_scope=invalid,
+                    )
 
     def test_rejects_bad_image_calibration_and_timestamp(self):
         model = FakeModel()
@@ -418,6 +597,33 @@ class Yolo11nProviderTests(unittest.TestCase):
                 with self.assertRaisesRegex(VisionError, "inference failed"):
                     create(self.factory_context(checkpoint))
 
+    def test_factory_propagates_pickup_region_agreement_scope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "best.pt"
+            checkpoint.write_bytes(b"fake-checkpoint")
+            context = self.factory_context(checkpoint)
+            context = replace(
+                context,
+                options={
+                    **dict(context.options),
+                    "geometry_agreement_scope": "pickup_region",
+                },
+            )
+            with (
+                patch.object(
+                    yolo11n_provider,
+                    "_sha256_file",
+                    return_value=EXPECTED_CHECKPOINT_SHA256,
+                ),
+                patch.object(
+                    yolo11n_provider,
+                    "_load_yolo_model",
+                    return_value=FakeModel(),
+                ),
+            ):
+                provider = create(context)
+            self.assertEqual(provider._geometry_agreement_scope, "pickup_region")
+
     def test_factory_rejects_hash_mismatch_without_loading_model(self):
         with tempfile.TemporaryDirectory() as directory:
             checkpoint = Path(directory) / "best.pt"
@@ -446,6 +652,21 @@ class Yolo11nProviderTests(unittest.TestCase):
         self.assertEqual(
             options["confidence_threshold"], EXPECTED_CONFIDENCE_THRESHOLD
         )
+        self.assertNotIn("geometry_agreement_scope", options)
+
+    def test_pickup_gate_profile_is_separate_and_pins_same_artifact(self):
+        profile_path = Path(yolo11n_provider.__file__).with_name(
+            "profile.yolo11n-cube-pickup-gate.v1.json"
+        )
+        profile = load_integration_profile(profile_path)
+        self.assertEqual(
+            profile.profile_id,
+            "vision-yolo11n-seed55-cube-pickup-gate-v1",
+        )
+        self.assertIsNotNone(profile.vision)
+        options = dict(profile.vision.options)
+        self.assertEqual(options["checkpoint_sha256"], EXPECTED_CHECKPOINT_SHA256)
+        self.assertEqual(options["geometry_agreement_scope"], "pickup_region")
 
 
 if __name__ == "__main__":
