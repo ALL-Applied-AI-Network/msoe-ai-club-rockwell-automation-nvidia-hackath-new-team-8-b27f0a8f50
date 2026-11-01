@@ -47,6 +47,46 @@ SCREW_DIMENSIONS_M = (0.012, 0.01199627, 0.030)
 SCREW_CAD_SHA256 = "6a842f1de0923083b0eb2a3a209eacae87cc83d4b62e15b768a0a8cd277cec2a"
 
 
+@dataclass(frozen=True)
+class CubeDetectorOverrides:
+    """Profile-only overrides for a bounded cube-detector experiment.
+
+    The shared task configuration remains immutable. An empty object is an
+    exact compatibility path; the only permitted experiment widens the shape
+    aspect gate by a small, explicit amount for compressed/oblique silhouettes.
+    """
+
+    maximum_component_aspect_ratio: float | None = None
+
+    @classmethod
+    def from_options(cls, options: Mapping[str, Any]) -> "CubeDetectorOverrides":
+        raw = dict(options)
+        allowed = set(cls.__dataclass_fields__)
+        unknown = sorted(set(raw) - allowed)
+        if unknown:
+            raise ValueError(f"unknown cube detector options: {unknown}")
+        if "maximum_component_aspect_ratio" in raw:
+            value = _finite(
+                raw["maximum_component_aspect_ratio"],
+                "maximum_component_aspect_ratio",
+            )
+            if not 1.0 < value <= 2.0:
+                raise ValueError(
+                    "maximum_component_aspect_ratio must be in (1, 2]"
+                )
+            raw["maximum_component_aspect_ratio"] = value
+        return cls(**raw)
+
+    def apply(self, config: "SortConfig") -> "SortConfig":
+        if self.maximum_component_aspect_ratio is None:
+            return config
+        vision = replace(
+            config.vision,
+            maximum_component_aspect_ratio=self.maximum_component_aspect_ratio,
+        )
+        return replace(config, vision=vision).validate()
+
+
 def _finite(value: Any, name: str) -> float:
     if isinstance(value, bool):
         raise ValueError(f"{name} must be a finite number")
@@ -802,11 +842,13 @@ class CubeScrewHybridVisionProvider:
         camera_id: str = "table",
         expected_cube_edge_m: float | None = None,
         detector: Any | None = None,
+        cube_config: CubeDetectorOverrides | None = None,
         screw_config: ScrewDetectorConfig | None = None,
         maximum_frame_age_s: float = 0.15,
         profile_provenance: Mapping[str, Any] | None = None,
     ) -> None:
-        self.config = config.validate()
+        base_config = config.validate()
+        self.config = (cube_config or CubeDetectorOverrides()).apply(base_config)
         self.camera_id = str(camera_id).strip()
         if self.camera_id not in camera_projectors:
             raise ValueError(f"missing projector for camera {self.camera_id}")
@@ -970,9 +1012,12 @@ def create(context: "VisionFactoryContext") -> "VisionProvider":
     options = dict(context.options)
     camera_id = str(options.pop("camera_id", "table"))
     maximum_frame_age_s = options.pop("maximum_frame_age_s", 0.15)
+    cube_raw = options.pop("cube", {})
     screw_raw = options.pop("screw", {})
     if options:
         raise ValueError(f"unknown hybrid provider options: {sorted(options)}")
+    if not isinstance(cube_raw, Mapping):
+        raise ValueError("vision.options.cube must be an object")
     if not isinstance(screw_raw, Mapping):
         raise ValueError("vision.options.screw must be an object")
     return CubeScrewHybridVisionProvider(
@@ -982,6 +1027,7 @@ def create(context: "VisionFactoryContext") -> "VisionProvider":
         camera_id=camera_id,
         expected_cube_edge_m=context.expected_cube_edge_m,
         detector=context.detector,
+        cube_config=CubeDetectorOverrides.from_options(cube_raw),
         screw_config=ScrewDetectorConfig.from_options(screw_raw),
         maximum_frame_age_s=maximum_frame_age_s,
         profile_provenance={
@@ -993,6 +1039,7 @@ def create(context: "VisionFactoryContext") -> "VisionProvider":
 
 
 __all__ = [
+    "CubeDetectorOverrides",
     "CubeScrewHybridVisionProvider",
     "PLUGIN_API_VERSION",
     "SCREW_CLASS_ID",

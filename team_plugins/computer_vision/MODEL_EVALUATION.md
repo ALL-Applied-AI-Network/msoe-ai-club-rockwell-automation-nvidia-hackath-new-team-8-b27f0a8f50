@@ -361,7 +361,8 @@ The persistent yellow miss has an approximately 18x30-pixel mask in the
 1920x1080 annotation image, so the baseline 1.5 component-aspect gate rejects
 it. The isolated branch `vision/cube-recall-aspect` at `9e74555` swept limits
 1.50--2.00 behind an explicit experimental profile; defaults remained
-unchanged.
+unchanged. The full procedure and artifact hashes are in
+[`CUBE_ASPECT_EXPERIMENT.md`](CUBE_ASPECT_EXPERIMENT.md).
 
 - Baseline: 14 TP / 1 FP and 1,562 cube candidates over 192 replay frames.
 - Aspect 1.8: raw 16 TP / 3 FP, but confidence-eligible (>=0.2) remains
@@ -375,7 +376,6 @@ false-target evidence. Reject the aspect-only change and do not select the
 experimental profile for hardware. Prefer calibrated stop-and-look multi-view
 coverage or a shape/instance method that beats the same held-out labels and
 clutter cases.
-
 ## Pose semantics
 
 ### Cube
