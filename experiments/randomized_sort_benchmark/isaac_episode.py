@@ -1133,7 +1133,51 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             event["phase_truth"] = {}
             event["trajectory_ik_failures"] = 0
             execution_failed = None
-            segments = _motion_segments(pick, home, C)
+            base_segments = _motion_segments(pick, home, C)
+            first_phase = base_segments[0]
+            if first_phase[0] != "approach_pick" or base_segments[1][0] != "revalidate_before_descent":
+                raise RuntimeError("unexpected motion segment contract")
+            source_above = np.asarray(first_phase[2], dtype=float)
+            offset_xy = np.asarray(home[:2], dtype=float) - source_above[:2]
+            offset_norm = float(np.linalg.norm(offset_xy))
+            if offset_norm <= 1e-9:
+                raise RuntimeError("cannot construct camera-visible revalidation waypoint")
+            offset_xy *= min(0.060, offset_norm / 2.0) / offset_norm
+            revalidation_waypoint = source_above.copy()
+            revalidation_waypoint[:2] += offset_xy
+            segments = [
+                (
+                    "approach_pick",
+                    first_phase[1],
+                    revalidation_waypoint,
+                    0.9,
+                    first_phase[4],
+                    first_phase[5],
+                    first_phase[6],
+                ),
+                (
+                    "revalidate_before_descent",
+                    revalidation_waypoint,
+                    revalidation_waypoint,
+                    0.0,
+                    first_phase[4],
+                    first_phase[5],
+                    first_phase[6],
+                ),
+                (
+                    "approach_pick",
+                    revalidation_waypoint,
+                    source_above,
+                    0.3,
+                    first_phase[4],
+                    first_phase[5],
+                    first_phase[6],
+                ),
+                *base_segments[2:],
+            ]
+            event["camera_revalidation_waypoint_tip_base_m"] = (
+                revalidation_waypoint.tolist()
+            )
             for phase, start_xyz, end_xyz, duration, jaw0, jaw1, spread in segments:
                 if phase == "revalidate_before_descent":
                     refreshed, refresh_failure = stable_observation(
@@ -1179,6 +1223,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         target.pose.position_base_m[:2],
                     )
                     event["pre_descent_revalidation"] = {
+                        "source": (
+                            "table-camera observation from a 60 mm offset waypoint "
+                            "before final approach; avoids robot self-occlusion"
+                        ),
                         "movement_xy_m": movement,
                         "maximum_allowed_m": 0.005,
                     }
