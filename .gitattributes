@@ -6,6 +6,7 @@
 *.txt text eol=lf
 *.json text eol=lf
 *.usda text eol=lf
+*.pdf binary
 
 # The supplied twin has a SHA-256 manifest over its original bytes. Preserve it
 # exactly, including existing line endings; setup runs only from an external copy.
