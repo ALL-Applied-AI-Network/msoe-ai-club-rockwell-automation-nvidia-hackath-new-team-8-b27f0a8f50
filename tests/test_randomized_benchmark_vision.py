@@ -186,7 +186,7 @@ class RandomizedBenchmarkVisionTests(unittest.TestCase):
             result.observation.objects[0].attributes["original_evidence"], "kept"
         )
 
-    def test_yolo_mode_corroborates_cube_and_screw_without_changing_pose(self):
+    def test_yolo_mode_gates_cube_and_keeps_screw_on_geometry_path(self):
         # Boxes are crop-relative.  Crop origin is full-frame (500, 400).
         model = _Model(
             (
@@ -208,17 +208,22 @@ class RandomizedBenchmarkVisionTests(unittest.TestCase):
 
         self.assertEqual(result.report.status, "accepted")
         self.assertEqual(result.report.yolo_box_count, 2)
-        self.assertEqual(result.report.matched_count, 2)
+        self.assertEqual(result.report.matched_count, 1)
+        self.assertEqual(result.report.out_of_scope_yolo_box_count, 1)
         self.assertEqual(len(model.calls), 1)
         source = model.calls[0]["source"]
         self.assertEqual(source.shape, (650, 1000, 3))
         self.assertEqual(result.observation.objects[0].pose, self.cube.pose)
         self.assertEqual(result.observation.objects[1].pose, self.screw.pose)
         self.assertAlmostEqual(result.observation.objects[0].confidence, 0.86)
-        self.assertAlmostEqual(result.observation.objects[1].confidence, 0.81)
+        self.assertAlmostEqual(result.observation.objects[1].confidence, 0.88)
         self.assertEqual(
             result.observation.objects[1].attributes["metric_pose_source"],
             "calibrated_hybrid_geometry",
+        )
+        self.assertEqual(
+            result.observation.objects[1].attributes["neural_gate_status"],
+            "not_requested_outside_validated_yolo_scope",
         )
         self.assertEqual(
             result.observation.objects[2].attributes["neural_gate_status"],
@@ -314,7 +319,7 @@ class RandomizedBenchmarkVisionTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     YoloHttpSidecarModel(endpoint)
 
-    def test_missing_screw_box_abstains_with_structured_report(self):
+    def test_missing_screw_box_is_allowed_outside_validated_yolo_scope(self):
         model = _Model(((0, 0.86, (80.0, 80.0, 120.0, 120.0)),))
         provider = BenchmarkVisionProvider(
             geometry_provider=_GeometryProvider((self.cube, self.screw)),
@@ -325,20 +330,22 @@ class RandomizedBenchmarkVisionTests(unittest.TestCase):
             ),
         )
 
-        with self.assertRaises(BenchmarkVisionAbstention) as caught:
-            provider.observe(self.request)
+        result = provider.observe_with_report(self.request)
 
-        self.assertEqual(caught.exception.report.status, "abstained")
-        self.assertEqual(caught.exception.report.geometry_supported_count, 2)
-        self.assertEqual(caught.exception.report.yolo_box_count, 1)
-        self.assertIn("screw-0", caught.exception.report.failure_reason)
-        self.assertIs(provider.last_report, caught.exception.report)
+        self.assertEqual(result.report.status, "accepted")
+        self.assertEqual(result.report.geometry_supported_count, 2)
+        self.assertEqual(result.report.yolo_box_count, 1)
+        self.assertEqual(result.report.matched_count, 1)
+        self.assertEqual(
+            result.observation.objects[1].attributes["neural_gate_status"],
+            "not_requested_outside_validated_yolo_scope",
+        )
 
     def test_unmatched_yolo_false_positive_abstains(self):
         model = _Model(
             (
                 (0, 0.86, (80.0, 80.0, 120.0, 120.0)),
-                (1, 0.81, (400.0, 300.0, 440.0, 340.0)),
+                (0, 0.81, (400.0, 300.0, 440.0, 340.0)),
             )
         )
         provider = BenchmarkVisionProvider(

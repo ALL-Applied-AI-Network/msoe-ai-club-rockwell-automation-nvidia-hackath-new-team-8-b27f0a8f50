@@ -3,10 +3,12 @@
 The production YOLO provider is deliberately cube-only because its screw
 performance was not validated on physical data.  This experiment module does
 not weaken that boundary.  Instead, it offers an explicitly experimental
-``yolo_assisted_hybrid`` condition in which YOLO boxes must agree one-to-one
-with the calibrated hybrid geometry provider for both supported classes.
-Metric position and orientation always come from calibrated geometry; a box
-alone is never promoted into an executable pose.
+``yolo_assisted_hybrid`` condition in which YOLO cube boxes must agree
+one-to-one with the calibrated hybrid geometry provider. The reviewed
+checkpoint has no held-out screw evidence, so screws deliberately remain on
+the same deterministic geometry path in both vision cells. Metric position
+and orientation always come from calibrated geometry; a box alone is never
+promoted into an executable pose.
 
 Both benchmark modes consume the exact same :class:`PerceptionRequest`.  The
 SHA-256 digest of the native RGB bytes is recorded in every report so the
@@ -412,6 +414,7 @@ class VisionGateReport:
     yolo_box_count: int
     matched_count: int
     failure_reason: str | None = None
+    out_of_scope_yolo_box_count: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -430,6 +433,7 @@ class VisionGateReport:
             "yolo_box_count": self.yolo_box_count,
             "matched_count": self.matched_count,
             "failure_reason": self.failure_reason,
+            "out_of_scope_yolo_box_count": self.out_of_scope_yolo_box_count,
         }
 
 
@@ -532,6 +536,9 @@ class BenchmarkVisionProvider:
             if detected.class_id in CLASS_TO_YOLO_ID
         )
         unknown_count = len(geometry_scene.objects) - len(supported)
+        neural_gated = tuple(
+            detected for detected in supported if detected.class_id == CUBE_CLASS_ID
+        )
 
         if self.config.mode == DETERMINISTIC_HYBRID:
             objects = tuple(
@@ -572,10 +579,14 @@ class BenchmarkVisionProvider:
 
         neural_started = self._clock()
         boxes: tuple[YoloBox, ...] = ()
+        gated_boxes: tuple[YoloBox, ...] = ()
         try:
             boxes = self._predict(image)
+            gated_boxes = tuple(
+                box for box in boxes if box.class_name == CUBE_CLASS_ID
+            )
             neural_latency_ms = (self._clock() - neural_started) * 1000.0
-            matched = self._match_supported_objects(supported, boxes)
+            matched = self._match_supported_objects(neural_gated, gated_boxes)
         except VisionError as exc:
             neural_latency_ms = (self._clock() - neural_started) * 1000.0
             report = VisionGateReport(
@@ -594,6 +605,7 @@ class BenchmarkVisionProvider:
                 yolo_box_count=len(boxes),
                 matched_count=0,
                 failure_reason=str(exc),
+                out_of_scope_yolo_box_count=len(boxes) - len(gated_boxes),
             )
             self.last_report = report
             raise BenchmarkVisionAbstention(str(exc), report) from exc
@@ -601,7 +613,11 @@ class BenchmarkVisionProvider:
         objects: list[DetectedObject] = []
         for detected in geometry_scene.objects:
             box = matched.get(detected.track_id)
-            if box is None:
+            if detected.class_id == SCREW_CLASS_ID:
+                objects.append(
+                    self._annotate_geometry_only_catalog_target(detected, input_digest)
+                )
+            elif box is None:
                 objects.append(self._annotate_unknown(detected, input_digest))
             else:
                 objects.append(self._annotate_match(detected, box, input_digest))
@@ -630,6 +646,7 @@ class BenchmarkVisionProvider:
             geometry_unknown_count=unknown_count,
             yolo_box_count=len(boxes),
             matched_count=len(matched),
+            out_of_scope_yolo_box_count=len(boxes) - len(gated_boxes),
         )
         self.last_report = report
         return BenchmarkVisionResult(
@@ -834,6 +851,20 @@ class BenchmarkVisionProvider:
             {
                 "neural_gate_status": "geometry_only_non_target_obstacle",
                 "checkpoint_sha256": self.config.checkpoint_sha256,
+            }
+        )
+        return replace(detected, attributes=attributes)
+
+    def _annotate_geometry_only_catalog_target(
+        self, detected: DetectedObject, input_digest: str
+    ) -> DetectedObject:
+        attributes = self._common_attributes(detected, input_digest)
+        attributes.update(
+            {
+                "neural_gate_status": "not_requested_outside_validated_yolo_scope",
+                "checkpoint_sha256": self.config.checkpoint_sha256,
+                "metric_pose_source": "calibrated_hybrid_geometry",
+                "neural_output_scope": "cube class and 2d region only",
             }
         )
         return replace(detected, attributes=attributes)

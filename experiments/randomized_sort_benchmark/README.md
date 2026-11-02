@@ -9,8 +9,10 @@ This experiment evaluates the same frozen Isaac scenes with a 2×2 design:
 | DA | deterministic colour/silhouette geometry | guarded pretrained-AI ranking |
 | YA | YOLO11n box corroboration + calibrated geometry | guarded pretrained-AI ranking |
 
-DD is the baseline. YOLO does **not** manufacture a 3D pose: it must agree
-one-to-one with the camera-derived geometry result. The AI ranker can choose
+DD is the baseline. YOLO does **not** manufacture a 3D pose: for cubes it must
+agree one-to-one with the camera-derived geometry result. The reviewed
+checkpoint has no held-out screw evidence, so screws use the identical
+deterministic silhouette/geometry path in D and Y cells. The AI ranker can choose
 only an existing candidate that already passed deterministic reach, opening,
 evidence, and local finger-envelope checks. Cosmos confidence is a ranking
 signal, not a calibrated probability of retaining the object through release.
@@ -156,7 +158,8 @@ differ when equivalent L40S instances execute different cells.
   the two commanded screw slots, or a destination load exceeds the nine cube
   grid slots. This tag is not proof that a physical bin is full.
 - Seed-55 YOLO has measured held-out cube performance but no held-out physical
-  screw evidence. Screw results are experimental.
+  screw evidence. It therefore gates cubes only; screw perception remains the
+  deterministic geometry baseline in every cell.
 - The screw detector needs three distinct frames before publishing a stable
   executable track; early abstentions are logged.
 - Only the table camera drives this revision. Side/wrist evidence is a future

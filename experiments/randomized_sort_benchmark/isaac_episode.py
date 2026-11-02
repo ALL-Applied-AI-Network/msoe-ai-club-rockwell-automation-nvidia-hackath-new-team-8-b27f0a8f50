@@ -797,7 +797,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ai_provider=ai_provider,
             receipt_directory=(run_dir / "ai_receipts") if ai_provider else None,
             minimum_confidence=0.60,
-            minimum_score_margin=0.03,
+            # The experiment compares the provider's highest-ranked feasible
+            # grasp, including close rankings. Deterministic feasibility gates
+            # still apply; score margin remains a reported diagnostic.
+            minimum_score_margin=0.0,
             timeout_s=20.0,
         )
 
