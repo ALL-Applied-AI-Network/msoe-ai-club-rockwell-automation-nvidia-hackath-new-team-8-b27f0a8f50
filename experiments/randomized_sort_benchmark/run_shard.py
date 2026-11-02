@@ -124,11 +124,19 @@ def main() -> int:
         )
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "launcher.log").write_text(completed.stdout, encoding="utf-8")
+        report_exists = report_path.is_file()
+        failure_exists = (run_dir / "episode_failure.json").is_file()
         status_rows.append(
             {
                 "condition_id": condition_id,
-                "status": "complete" if completed.returncode == 0 else "failed",
+                "status": (
+                    "complete"
+                    if completed.returncode == 0 and report_exists
+                    else "failed"
+                ),
                 "returncode": completed.returncode,
+                "episode_report_exists": report_exists,
+                "episode_failure_exists": failure_exists,
                 "wall_time_s": time.perf_counter() - started,
             }
         )

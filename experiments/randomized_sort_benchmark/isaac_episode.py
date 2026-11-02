@@ -826,10 +826,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
         def capture_for_decision(tag: str) -> tuple[SceneObservation | None, str | None]:
             nonlocal frame_index
-            world.step(render=True)
-            rgba = camera.get_rgba()
+            rgba = None
+            for _ in range(8):
+                world.step(render=True)
+                candidate = camera.get_rgba()
+                if (
+                    candidate is not None
+                    and candidate.ndim == 3
+                    and candidate.shape[:2] == (RENDER_RESOLUTION[1], RENDER_RESOLUTION[0])
+                    and candidate.shape[2] >= 3
+                ):
+                    rgba = candidate
+                    break
             if rgba is None:
-                raise RuntimeError("table camera returned no image")
+                raise RuntimeError("table camera returned no valid image after 8 render ticks")
             raw_rgb = rgba[:, :, :3].astype(np.uint8)
             sensor_result = augment_sensor_rgb(
                 raw_rgb,
@@ -1324,6 +1334,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return report
     finally:
         if report is None:
+            active_error = sys.exc_info()[1]
             failure = {
                 "schema_version": "randomized-sort-episode-failure-v1",
                 "condition_id": manifest.condition_id,
@@ -1333,6 +1344,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "wall_time_s": time.perf_counter() - wall_started,
                 "runtime_provenance": runtime_provenance,
                 "vision_runtime_provenance": vision_runtime_provenance,
+                "error_type": (
+                    None if active_error is None else type(active_error).__name__
+                ),
+                "error": None if active_error is None else str(active_error)[:2000],
             }
             _atomic_report(run_dir / "episode_failure.json", failure)
         app.close()
