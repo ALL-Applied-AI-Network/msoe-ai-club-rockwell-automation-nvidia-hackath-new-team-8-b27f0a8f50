@@ -645,6 +645,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             screw_config=ScrewDetectorConfig(
                 expected_image_size=RENDER_RESOLUTION,
                 require_expected_image_size=True,
+                # The randomized oblique camera under-measures the supplied
+                # 12 mm countersunk head as low as 8.5 mm in the calibrated
+                # table plane. Keep this tolerance benchmark-local; the
+                # production hardware profile remains unchanged.
+                minimum_width_m=0.0075,
+                maximum_length_m=0.036,
                 minimum_track_observations=STABILIZATION_FRAMES,
             ),
             maximum_frame_age_s=0.2,
