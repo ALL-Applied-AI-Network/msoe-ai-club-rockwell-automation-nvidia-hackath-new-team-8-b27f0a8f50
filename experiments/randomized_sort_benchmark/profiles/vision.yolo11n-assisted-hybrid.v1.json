@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "profile_id": "randomized-benchmark-yolo11n-assisted-hybrid-v1",
+  "vision": {
+    "mode": "yolo_assisted_hybrid",
+    "camera_id": "table",
+    "expected_image_size": [1920, 1080],
+    "crop_xyxy": [500, 400, 1500, 1050],
+    "inference_image_size": 960,
+    "confidence_threshold": 0.6596596596596597,
+    "iou_threshold": 0.7,
+    "roi_margin_px": 4,
+    "checkpoint_sha256": "010bb71b1b07fc77490a2bc2bd774102205640bdf9ba07d6fa8b3bd758788fbb"
+  }
+}

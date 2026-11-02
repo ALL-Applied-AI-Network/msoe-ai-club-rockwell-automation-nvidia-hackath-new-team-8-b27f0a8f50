@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "profile_id": "randomized-benchmark-deterministic-hybrid-v1",
+  "vision": {
+    "mode": "deterministic_hybrid",
+    "camera_id": "table",
+    "expected_image_size": [1920, 1080],
+    "crop_xyxy": [500, 400, 1500, 1050],
+    "inference_image_size": 960,
+    "confidence_threshold": 0.6596596596596597,
+    "iou_threshold": 0.7,
+    "roi_margin_px": 4
+  }
+}
