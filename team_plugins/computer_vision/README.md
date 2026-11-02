@@ -64,6 +64,15 @@ outside this provider. It also does not segment arbitrary hands, cables, or all
 occluded image regions: only screw-like dark ambiguities become
 `unknown_obstacle`. Unknown clear space is therefore not proven.
 
+The shared Isaac/hardware adapters may preprocess the fixed **table-camera**
+inference copy in physical-bin scenes by projecting and inpainting the three
+configured bin cuboids. That preprocessing is provider-independent: baseline,
+hybrid, and YOLO receive the same masked pixels. It does not modify raw/sensor
+training frames, does not run for virtual-table mode, and does not make this
+provider a bucket detector. Extra or moved containers remain outside the fixed
+mask, so the screw table-context guard and cube size/geometry gates must not be
+removed.
+
 The shared task adapter still executes only class `cube`. A correctly reported
 screw remains visible but unsupported until the grasp/task/executor work is
 merged. Never rename a screw to `cube` to bypass that boundary.

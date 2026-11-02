@@ -32,6 +32,12 @@ CURRENT VERIFIED PROJECT STATE
 - Table RGB is the only camera currently trusted for motion coordinates. Side
   and wrist cameras are diagnostic until their bias/timing/calibration and hose
   occlusion are resolved.
+- In physical `bins` mode, the policy projects the three configured bin
+  cuboids into the calibrated table image and inpaints those pixels only on the
+  detector's private input copy. Raw camera evidence and post-placement
+  verification remain unchanged, and `virtual-table` mode is never masked.
+  This assumes the bins are at their configured coordinates; it does not hide
+  extra or moved containers.
 
 CURRENT LIVE LIMIT NOTE
 

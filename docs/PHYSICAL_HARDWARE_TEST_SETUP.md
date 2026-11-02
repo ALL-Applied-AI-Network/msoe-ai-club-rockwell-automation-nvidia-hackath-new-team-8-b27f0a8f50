@@ -28,6 +28,16 @@ your coding AI when a step or term is unclear; do not guess at the robot.
 - Table RGB is currently the only camera trusted for motion coordinates. Side
   and wrist images are valuable diagnostic evidence, but their detector bias,
   wrist transform/timing, and hose occlusion are not yet validated for motion.
+- In physical `bins` mode, the table-camera inference copy now ignores the
+  three configured bin silhouettes. Their 3-D cuboids are projected through
+  the pinned calibration and inpainted before baseline, hybrid, or YOLO
+  inference. The original camera observation remains unchanged, and the raw
+  image is used again for post-place checking. `virtual-table` mode is never
+  masked.
+- This mask assumes the bins are actually at the configured robot-base
+  coordinates. It does not cover a moved or extra container. Check the
+  `configured_bucket_pixel_mask_applied`, polygon, and pixel-count fields in
+  each `camera_scene` log rather than assuming the mask was aligned.
 - Use the no-motion vision diagnostic's `--capture-camera table|side|wrist`
   option to collect each stream separately at its configured resolution. Side
   and wrist runs are capture-only and do not publish motion coordinates.
@@ -74,6 +84,11 @@ Write down:
 - requested objects, positions, and number of rollouts;
 - supported and explicitly unsupported conditions; and
 - the expected observation, action, and success evidence.
+
+For a physical-bin run, also record that the three bins were placed at the
+configured centres `(0.24, -0.19)`, `(0.24, 0.00)`, and `(0.24, 0.19)` metres
+in robot base. If they are elsewhere, use an updated reviewed configuration or
+bucket perception; the fixed mask does not discover their new positions.
 
 Do not silently change any of these after the submission is approved. Create a
 new submission or get explicit organizer agreement if the scene or behavior

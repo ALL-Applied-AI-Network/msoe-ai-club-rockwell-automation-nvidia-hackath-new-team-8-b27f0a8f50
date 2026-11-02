@@ -37,6 +37,7 @@ from sorting_core import (  # noqa: E402
     LegacyFeatureExtractor,
     LegacyGeometricChecker,
     LegacyTopDownCubeGenerator,
+    build_configured_bucket_pixel_mask,
     load_config,
 )
 
@@ -236,6 +237,85 @@ class IsaacCameraSortAdapterTests(unittest.TestCase):
         self.assertEqual(result.observation.provider_name, "fake-team-model")
         self.assertEqual(len(result.plans), 3)
         self.assertEqual(provider.request.scene_id, "external-model-scene")
+
+    def test_all_providers_receive_same_bucket_neutralized_table_frame(self):
+        class CaptureProvider:
+            request = None
+
+            def observe(self, request):
+                self.request = request
+                return SceneObservation(
+                    scene_id=request.scene_id,
+                    capture_time_s=request.capture_time_s,
+                    objects=(),
+                    provider_name="capture-provider",
+                    provider_version="1",
+                    calibration_ids=(request.frame("table").calibration_id,),
+                )
+
+        provider = CaptureProvider()
+        adapter = IsaacCameraSortAdapter(
+            self.camera, self.config, perception_provider=provider
+        )
+        width, height = self.camera.resolution_px
+        image = np.full((height, width, 3), 210, dtype=np.uint8)
+        bucket_mask, _ = build_configured_bucket_pixel_mask(
+            image.shape[:2], self.camera, self.config
+        )
+        image[bucket_mask != 0] = (20, 80, 180)
+        red_spawn = self.config.task.cube_spawns_base_xy_yaw_deg["red"]
+        pickup_uv = np.rint(
+            self.camera.project(
+                (red_spawn[0], red_spawn[1], self.config.cube_top_base_z_m)
+            )
+        ).astype(int)
+        image[pickup_uv[1], pickup_uv[0]] = (1, 2, 3)
+        source = image.copy()
+
+        adapter.observe_generic(
+            image, scene_id="bucket-mask-isaac", capture_time_s=8.25
+        )
+
+        np.testing.assert_array_equal(image, source)
+        received = provider.request.frame("table").rgb
+        self.assertFalse(
+            np.array_equal(received[bucket_mask != 0], source[bucket_mask != 0])
+        )
+        np.testing.assert_array_equal(
+            received[pickup_uv[1], pickup_uv[0]], (1, 2, 3)
+        )
+        evidence = provider.request.metadata["configured_bucket_pixel_mask"]
+        self.assertTrue(evidence["applied"])
+        self.assertGreater(evidence["masked_pixel_count"], 0)
+
+    def test_external_table_frame_must_match_mask_camera_resolution(self):
+        class CaptureProvider:
+            called = False
+
+            def observe(self, request):
+                self.called = True
+                raise AssertionError("provider must not receive a miscalibrated frame")
+
+        provider = CaptureProvider()
+        adapter = IsaacCameraSortAdapter(
+            self.camera, self.config, perception_provider=provider
+        )
+        request = PerceptionRequest(
+            scene_id="wrong-table-resolution",
+            capture_time_s=8.5,
+            frames=(
+                CameraFrame(
+                    camera_id="table",
+                    capture_time_s=8.5,
+                    calibration_id="isaac-live-camera-metadata",
+                    rgb=np.zeros((400, 500, 3), dtype=np.uint8),
+                ),
+            ),
+        )
+
+        with self.assertRaisesRegex(IsaacObservationError, "resolution"):
+            adapter.observe_request(request)
+        self.assertFalse(provider.called)
 
     def test_observe_request_exposes_multi_camera_provider_seam(self):
         config = self.config

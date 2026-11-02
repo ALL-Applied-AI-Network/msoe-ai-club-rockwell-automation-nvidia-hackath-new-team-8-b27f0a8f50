@@ -90,6 +90,33 @@ Isaac adapter, or the hardware policy. The nested `AGENTS.md` in each team
 directory is the canonical human-and-agent onboarding guide. Do not scatter
 provider-selection conditionals through the backends.
 
+### Configured physical-bin pixel suppression
+
+Physical `bins` mode removes the three known destination-bin silhouettes from
+the **table-camera inference copy** before invoking any baseline, hybrid, or
+YOLO provider. `sorting_core/destination_mask.py` projects the complete
+50 x 50 x 55 mm configured cuboids through the active camera calibration,
+adds an 8-pixel raster margin, and inpaints only those regions from nearby
+table pixels. It never edits the source observation, side/wrist frames,
+recorded training images, or evaluator labels.
+
+The Isaac camera-sort adapter applies the same projector-based preprocessing,
+so the providers see the same semantics in simulation and hardware. In the
+reviewed 1920 x 1080 Isaac table frame, the projected red/yellow/blue bounds
+matched the visible bin pixels within approximately 0--2 pixels.
+
+Hardware `virtual-table` mode remains unmasked because no bins are present and
+positive destination-cube visibility is required. Physical-bin post-placement
+verification also uses the unmodified table frame. Runtime `camera_scene`
+events record whether masking was applied, the projected polygons, and the
+masked-pixel count.
+
+This is a fixed-layout optimization, not bucket perception. A moved or extra
+container outside the configured coordinates is not covered; provider size,
+context, uncertainty, and obstacle rules must remain active. Any future wrist
+implementation must project from the timestamp-matched flange pose rather than
+reuse the fixed table-camera polygons.
+
 ## Drop-in activation
 
 An integration profile selects either team independently or both together:

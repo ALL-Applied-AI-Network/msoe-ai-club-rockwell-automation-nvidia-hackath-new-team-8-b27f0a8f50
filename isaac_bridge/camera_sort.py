@@ -16,7 +16,7 @@ with local ``+Y`` up.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import math
 from pathlib import Path
@@ -25,11 +25,13 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from sorting_core import (
+    DestinationMaskError,
     PickPlacePlan,
     SceneDetections,
     SortConfig,
     build_colour_sort_plans,
     filter_scene_to_pickup_region,
+    ignore_configured_bucket_pixels,
 )
 from sorting_core.grasping import GraspPlanningPipeline
 from sorting_core.perception import (
@@ -364,9 +366,13 @@ class IsaacCameraSortAdapter:
         grasp_pipeline: GraspPlanningPipeline | None = None,
         vision_checkpoint: str | None = None,
         grasp_checkpoint: str | None = None,
+        ignore_bucket_pixels: bool = True,
     ):
         self.camera = camera
         self.config = config.validate()
+        if not isinstance(ignore_bucket_pixels, bool):
+            raise TypeError("ignore_bucket_pixels must be a bool")
+        self.ignore_bucket_pixels = ignore_bucket_pixels
         self.perception_provider = (
             perception_provider
             if perception_provider is not None
@@ -398,14 +404,70 @@ class IsaacCameraSortAdapter:
         if not isinstance(request, PerceptionRequest):
             raise TypeError("request must be a PerceptionRequest")
         try:
-            result = self.perception_provider.observe(request)
-            return validate_scene_for_request(request, result)
+            provider_request = self._request_with_bucket_pixels_ignored(request)
+            result = self.perception_provider.observe(provider_request)
+            return validate_scene_for_request(provider_request, result)
         except IsaacObservationError:
             raise
         except Exception as exc:
             raise IsaacObservationError(
                 f"vision provider failed: {type(exc).__name__}: {exc}"
             ) from exc
+
+    def _request_with_bucket_pixels_ignored(
+        self, request: PerceptionRequest
+    ) -> PerceptionRequest:
+        """Replace only configured-bin pixels in the table frame.
+
+        The Isaac colour-sort scene always contains the configured physical
+        bins.  Side/wrist frames and the caller's source arrays remain
+        byte-identical.  Evaluator truth is not consumed: the mask comes only
+        from the task configuration and the runtime camera calibration.
+        """
+
+        if not self.ignore_bucket_pixels:
+            return request
+        try:
+            table_frame = request.frame("table")
+        except KeyError:
+            return request
+        if table_frame.rgb is None:
+            return request
+        # ``observe_request`` is also the generic plugin seam.  A specialized
+        # provider may carry an opaque test/service payload instead of a local
+        # decoded array; only the native RGB path can apply this image mask.
+        if not isinstance(table_frame.rgb, np.ndarray):
+            return request
+        image = np.asarray(table_frame.rgb)
+        width, height = self.camera.resolution_px
+        if image.shape != (height, width, 3):
+            raise IsaacObservationError(
+                "table RGB resolution does not match camera calibration: "
+                f"got {image.shape}, expected {(height, width, 3)}"
+            )
+        try:
+            mask_result = ignore_configured_bucket_pixels(
+                image, self.camera, self.config
+            )
+        except DestinationMaskError as exc:
+            raise IsaacObservationError(
+                f"configured bucket pixel mask failed: {exc}"
+            ) from exc
+        frames = tuple(
+            replace(frame, rgb=mask_result.rgb)
+            if frame.camera_id == "table"
+            else frame
+            for frame in request.frames
+        )
+        metadata = dict(request.metadata)
+        metadata["configured_bucket_pixel_mask"] = mask_result.metadata()
+        return PerceptionRequest(
+            scene_id=request.scene_id,
+            capture_time_s=request.capture_time_s,
+            frames=frames,
+            robot_state=request.robot_state,
+            metadata=metadata,
+        )
 
     def plan_observation(
         self,

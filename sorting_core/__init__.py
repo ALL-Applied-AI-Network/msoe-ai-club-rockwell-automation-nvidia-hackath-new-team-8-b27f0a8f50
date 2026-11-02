@@ -91,6 +91,22 @@ _LAZY_EXPORTS = {
         ".vision",
         "filter_scene_to_pickup_region",
     ),
+    "DestinationMaskError": (
+        ".destination_mask",
+        "DestinationMaskError",
+    ),
+    "DestinationMaskResult": (
+        ".destination_mask",
+        "DestinationMaskResult",
+    ),
+    "build_configured_bucket_pixel_mask": (
+        ".destination_mask",
+        "build_configured_bucket_pixel_mask",
+    ),
+    "ignore_configured_bucket_pixels": (
+        ".destination_mask",
+        "ignore_configured_bucket_pixels",
+    ),
     "SyntheticDataError": (".synthetic_data", "SyntheticDataError"),
     "augment_sensor_rgb": (".synthetic_data", "augment_sensor_rgb"),
     "build_synchronized_frame_record": (
@@ -155,6 +171,8 @@ __all__ = [
     "DEFAULT_CONFIG_PATH",
     "DetectedObject",
     "DepthEncoding",
+    "DestinationMaskError",
+    "DestinationMaskResult",
     "EvaluatedGrasp",
     "FeasibilityResult",
     "GraspCandidate",
@@ -187,6 +205,7 @@ __all__ = [
     "VisionProvider",
     "base_tip_pose_to_uf0_tcp",
     "build_colour_sort_plans",
+    "build_configured_bucket_pixel_mask",
     "build_trajectory_chunks",
     "build_synchronized_frame_record",
     "camera_neutral_region_masks",
@@ -200,6 +219,7 @@ __all__ = [
     "augment_sensor_rgb",
     "finalize_application_status",
     "interpolate_tcp_rows",
+    "ignore_configured_bucket_pixels",
     "load_config",
     "load_capture_calibration",
     "load_camera_appearance_profiles",

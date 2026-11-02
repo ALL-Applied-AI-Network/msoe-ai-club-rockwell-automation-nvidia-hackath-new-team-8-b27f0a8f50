@@ -37,10 +37,12 @@ for path in (HERE, REPOSITORY_ROOT):
 
 from calibration.geometry import load as load_calibration  # noqa: E402
 from calibration.geometry import pixel_to_base  # noqa: E402
+from calibration.geometry import project as project_camera_points  # noqa: E402
 from sorting_core import (  # noqa: E402
     ActionValidationError,
     BinTarget,
     CubeDetection,
+    DestinationMaskError,
     MotionPhase,
     PickPlacePlan,
     PlanningError,
@@ -51,6 +53,7 @@ from sorting_core import (  # noqa: E402
     build_colour_sort_plans,
     detection_in_pickup_region,
     detect_coloured_cubes,
+    ignore_configured_bucket_pixels,
     interpolate_tcp_rows,
     load_config,
     semantic_phase_plan,
@@ -789,6 +792,35 @@ class Policy:
                     f"{camera_id} depth must be uint16 with shape "
                     f"{expected_shape}, got {depth.dtype} {depth.shape}"
                 )
+
+        # Empty physical bins occupy known, fixed robot-base footprints. Hide
+        # their complete projected cuboids from target inference so coloured
+        # walls, dark pockets, and labels cannot become cube/screw candidates.
+        # The source observation is never mutated. Post-place verification
+        # deliberately receives the raw image so a placed or misplaced cube
+        # remains observable. Virtual-table mode has no physical bins and is
+        # therefore never masked.
+        bucket_mask_result = None
+        bucket_mask_reason = "destination mode is virtual-table"
+        if self._destination_mode == "bins":
+            bucket_mask_reason = "post-place verification requires raw pixels"
+            if self._pending_verification_colour is None and "table" in images:
+                try:
+                    bucket_mask_result = ignore_configured_bucket_pixels(
+                        np.asarray(images["table"]),
+                        lambda point: project_camera_points(
+                            self._table_camera, np.asarray([point], dtype=float)
+                        )[0],
+                        self.config,
+                    )
+                except DestinationMaskError as exc:
+                    raise VisionError(
+                        f"configured bucket pixel mask failed: {exc}"
+                    ) from exc
+                bucket_mask_reason = (
+                    "configured physical bins hidden for inference"
+                )
+
         frame_camera_ids = tuple(
             dict.fromkeys((*self.CAMERAS, *self.DEPTH))
         )
@@ -799,6 +831,8 @@ class Policy:
                 if camera_id not in images
                 else np.asarray(images[camera_id])
             )
+            if camera_id == "table" and bucket_mask_result is not None:
+                rgb = bucket_mask_result.rgb
             depth = (
                 None
                 if camera_id not in depth_images
@@ -838,7 +872,17 @@ class Policy:
             capture_time_s=capture_time,
             frames=frames,
             robot_state=robot_state,
-            metadata={"trial_id": trial_id},
+            metadata={
+                "trial_id": trial_id,
+                "configured_bucket_pixel_mask": (
+                    {
+                        "applied": False,
+                        "reason": bucket_mask_reason,
+                    }
+                    if bucket_mask_result is None
+                    else bucket_mask_result.metadata()
+                ),
+            },
         )
         self._latest_robot_state = request.robot_state
         try:
@@ -981,6 +1025,22 @@ class Policy:
                 colour: len(detections)
                 for colour, detections in destination_detections.items()
             },
+            configured_bucket_pixel_mask_applied=(
+                bucket_mask_result is not None
+            ),
+            configured_bucket_masked_pixel_count=(
+                0
+                if bucket_mask_result is None
+                else bucket_mask_result.masked_pixel_count
+            ),
+            configured_bucket_mask_polygons_uv=(
+                {}
+                if bucket_mask_result is None
+                else {
+                    colour: [list(point) for point in polygon]
+                    for colour, polygon in bucket_mask_result.polygons_uv.items()
+                }
+            ),
         )
         return _SceneViews(
             unplaced=unplaced_scene,

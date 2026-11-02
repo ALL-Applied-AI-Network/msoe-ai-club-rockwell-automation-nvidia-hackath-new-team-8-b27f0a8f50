@@ -187,6 +187,23 @@ Unknown, occluded, unsupported, or missing objects must not silently become
 clear free space. Simulator truth may evaluate perception but may never repair
 a runtime scene.
 
+Configured physical-bin pixels
+------------------------------
+
+When the active destination mode is `bins`, the shared hardware and Isaac
+camera adapters project the three configured bin cuboids through the calibrated
+table camera and inpaint those pixels on a private inference copy. Baseline,
+hybrid, and YOLO providers therefore see the same bucket-suppressed table
+image. The original observation, saved training frames, side/wrist images, and
+post-placement verification remain raw. `virtual-table` mode is never masked.
+
+This is a narrowly scoped false-positive guard, not bucket detection or free-
+space proof. It assumes the physical bins remain at the configured robot-base
+coordinates. An extra or moved container, cable, hand, or other obstruction is
+not removed and must still be handled as scene evidence. If wrist-camera motion
+coordinates are enabled later, its mask must be projected from its own
+time-matched calibration rather than reusing table-image pixels.
+
 ===============================================================================
 5. COMPUTER-VISION WORK PLAN
 ===============================================================================

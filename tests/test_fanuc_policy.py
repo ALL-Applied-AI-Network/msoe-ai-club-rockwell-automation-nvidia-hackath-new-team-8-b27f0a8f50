@@ -31,6 +31,7 @@ from sorting_core import (  # noqa: E402
     TipPoseBase,
     VisionError,
     base_tip_pose_to_uf0_tcp,
+    build_configured_bucket_pixel_mask,
     uf0_tcp_to_base_tip,
 )
 
@@ -179,6 +180,96 @@ class FanucPolicyTests(unittest.TestCase):
         self.assertAlmostEqual(
             provider.request.robot_state.tcp_pose_base_m_wpr_rad[2],
             (float(obs["tcp_pose"][2]) + 330.0) / 1000.0,
+        )
+
+    def test_bins_mode_masks_only_provider_copy_of_table_image(self):
+        class CaptureProvider:
+            request = None
+
+            def observe(self, request):
+                self.request = request
+                return SceneObservation(
+                    scene_id=request.scene_id,
+                    capture_time_s=request.capture_time_s,
+                    objects=(),
+                    provider_name="capture-provider",
+                    provider_version="1",
+                    calibration_ids=(request.frame("table").calibration_id,),
+                )
+
+        provider = CaptureProvider()
+        policy = Policy(perception_provider=provider)
+        obs = _observation(policy._scan_tcp[:6])
+        image = np.full((1080, 1920, 3), 210, dtype=np.uint8)
+        bucket_mask, _ = build_configured_bucket_pixel_mask(
+            image.shape[:2],
+            lambda point: policy_module.project_camera_points(
+                policy._table_camera, np.asarray([point], dtype=float)
+            )[0],
+            policy.config,
+        )
+        image[bucket_mask != 0] = (20, 80, 180)
+        obs["images"]["table"] = image
+        source = image.copy()
+
+        policy._detect_scene_views(obs)
+
+        np.testing.assert_array_equal(obs["images"]["table"], source)
+        received = provider.request.frame("table").rgb
+        self.assertFalse(
+            np.array_equal(received[bucket_mask != 0], source[bucket_mask != 0])
+        )
+        evidence = provider.request.metadata["configured_bucket_pixel_mask"]
+        self.assertTrue(evidence["applied"])
+        self.assertGreater(evidence["masked_pixel_count"], 0)
+
+    def test_virtual_table_and_post_place_verification_keep_raw_pixels(self):
+        class CaptureProvider:
+            requests = None
+
+            def __init__(self):
+                self.requests = []
+
+            def observe(self, request):
+                self.requests.append(request)
+                return SceneObservation(
+                    scene_id=request.scene_id,
+                    capture_time_s=request.capture_time_s,
+                    objects=(),
+                    provider_name="capture-provider",
+                    provider_version="1",
+                    calibration_ids=(request.frame("table").calibration_id,),
+                )
+
+        provider = CaptureProvider()
+        with mock.patch.dict(
+            os.environ, {Policy.DESTINATION_MODE_ENV: "virtual-table"}
+        ):
+            virtual_policy = Policy(perception_provider=provider)
+        virtual_obs = _observation(virtual_policy._scan_tcp[:6])
+        virtual_obs["images"]["table"][:] = (12, 34, 56)
+        virtual_policy._detect_scene_views(virtual_obs)
+        np.testing.assert_array_equal(
+            provider.requests[-1].frame("table").rgb,
+            virtual_obs["images"]["table"],
+        )
+        self.assertFalse(
+            provider.requests[-1]
+            .metadata["configured_bucket_pixel_mask"]["applied"]
+        )
+
+        bins_policy = Policy(perception_provider=provider)
+        bins_policy._pending_verification_colour = "red"
+        bins_obs = _observation(bins_policy._scan_tcp[:6])
+        bins_obs["images"]["table"][:] = (65, 43, 21)
+        bins_policy._detect_scene_views(bins_obs)
+        np.testing.assert_array_equal(
+            provider.requests[-1].frame("table").rgb,
+            bins_obs["images"]["table"],
+        )
+        self.assertFalse(
+            provider.requests[-1]
+            .metadata["configured_bucket_pixel_mask"]["applied"]
         )
 
     def test_hardware_feedback_is_converted_to_typed_si_robot_state(self):
