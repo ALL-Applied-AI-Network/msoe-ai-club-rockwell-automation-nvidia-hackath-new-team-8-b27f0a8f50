@@ -79,7 +79,11 @@ from experiments.randomized_sort_benchmark.vision import (  # noqa: E402
     YOLO_ASSISTED_HYBRID,
     YoloHttpSidecarModel,
 )
-from isaac_bridge import CalibratedPinholeCamera, IsaacCameraSortAdapter  # noqa: E402
+from isaac_bridge import (  # noqa: E402
+    CalibratedPinholeCamera,
+    IsaacCameraSortAdapter,
+    IsaacObservationError,
+)
 from isaac_bridge.sim_validation import (  # noqa: E402
     isaac_camera_config_from_calibration,
 )
@@ -936,13 +940,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     _complete_benchmark_screw_evidence(observation), config
                 )
                 reason = None
-            except BenchmarkVisionAbstention as exc:
-                report_row = exc.report.as_dict()
+            except (BenchmarkVisionAbstention, IsaacObservationError) as exc:
+                abstention_report = vision_provider.last_report
+                if (
+                    abstention_report is None
+                    or abstention_report.status != "abstained"
+                ):
+                    raise
+                report_row = abstention_report.as_dict()
                 report_row["decision_frame"] = f"decision_frames/{filename}"
                 report_row["sensor_processing"] = dict(sensor_result.processing)
                 vision_reports.append(report_row)
                 result = None
-                reason = str(exc)
+                reason = abstention_report.failure_reason or str(exc)
             frame_index += 1
             return result, reason
 
