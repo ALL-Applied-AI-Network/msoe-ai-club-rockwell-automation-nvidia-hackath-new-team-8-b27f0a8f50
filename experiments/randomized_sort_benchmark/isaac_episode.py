@@ -196,6 +196,53 @@ def _filtered_pickup_observation(observation: SceneObservation, config: Any) -> 
     )
 
 
+def _complete_benchmark_screw_evidence(
+    observation: SceneObservation,
+) -> SceneObservation:
+    """Supply a labeled visibility proxy for strictly accepted screw silhouettes.
+
+    The hybrid screw detector only publishes the screw class after full image
+    boundary, catalog geometry, head/tip polarity, and isolated-table-context
+    gates pass, but its shared provider leaves ``visibility`` unset. The grasp
+    contract requires a finite visibility value. This benchmark-only adapter
+    uses the smaller of confidence and pose quality and records that it is a
+    proxy rather than a measured visible fraction.
+    """
+
+    objects = []
+    for item in observation.objects:
+        if (
+            item.class_id == "screw_iso10642_m6x30"
+            and item.visibility is None
+            and item.attributes.get("detector_family")
+            == "dark_silhouette_width_profile_v1"
+            and item.attributes.get("occlusion_status")
+            == "not_estimated_geometry_gate_only"
+        ):
+            pose_quality = (
+                item.confidence if item.pose_quality is None else item.pose_quality
+            )
+            attributes = dict(item.attributes)
+            attributes.update(
+                {
+                    "benchmark_visibility_proxy": min(
+                        float(item.confidence), float(pose_quality)
+                    ),
+                    "benchmark_visibility_proxy_basis": (
+                        "accepted full catalog silhouette after boundary, geometry, "
+                        "polarity, and isolated-context gates; not a measured fraction"
+                    ),
+                }
+            )
+            item = replace(
+                item,
+                visibility=attributes["benchmark_visibility_proxy"],
+                attributes=attributes,
+            )
+        objects.append(item)
+    return replace(observation, objects=tuple(objects))
+
+
 def _target_sort_key(item: Any) -> tuple[float, str, str]:
     x_m, y_m = item.pose.position_base_m[:2]
     return (math.hypot(x_m - 0.30, y_m), item.class_id, item.track_id)
@@ -885,7 +932,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 report_row["decision_frame"] = f"decision_frames/{filename}"
                 report_row["sensor_processing"] = dict(sensor_result.processing)
                 vision_reports.append(report_row)
-                result = _filtered_pickup_observation(observation, config)
+                result = _filtered_pickup_observation(
+                    _complete_benchmark_screw_evidence(observation), config
+                )
                 reason = None
             except BenchmarkVisionAbstention as exc:
                 report_row = exc.report.as_dict()

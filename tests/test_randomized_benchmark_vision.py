@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import json
 import unittest
@@ -16,6 +17,9 @@ from experiments.randomized_sort_benchmark.vision import (
     YOLO_ASSISTED_HYBRID,
     YoloHttpSidecarModel,
     load_benchmark_vision_profile,
+)
+from experiments.randomized_sort_benchmark.isaac_episode import (
+    _complete_benchmark_screw_evidence,
 )
 from sorting_core.perception import (
     CameraFrame,
@@ -219,6 +223,37 @@ class RandomizedBenchmarkVisionTests(unittest.TestCase):
         self.assertEqual(
             result.observation.objects[2].attributes["neural_gate_status"],
             "geometry_only_non_target_obstacle",
+        )
+
+    def test_benchmark_screw_visibility_proxy_is_explicit_and_bounded(self):
+        screw = replace(
+            self.screw,
+            pose_quality=0.72,
+            visibility=None,
+            attributes={
+                **self.screw.attributes,
+                "detector_family": "dark_silhouette_width_profile_v1",
+                "occlusion_status": "not_estimated_geometry_gate_only",
+            },
+        )
+        scene = SceneObservation(
+            scene_id=self.request.scene_id,
+            capture_time_s=self.request.capture_time_s,
+            objects=(screw,),
+            provider_name="test",
+            provider_version="1",
+            calibration_ids=("cal-table",),
+        )
+
+        result = _complete_benchmark_screw_evidence(scene)
+
+        self.assertAlmostEqual(result.objects[0].visibility, 0.72)
+        self.assertEqual(
+            result.objects[0].attributes["benchmark_visibility_proxy"], 0.72
+        )
+        self.assertIn(
+            "not a measured fraction",
+            result.objects[0].attributes["benchmark_visibility_proxy_basis"],
         )
 
     def test_localhost_sidecar_facade_validates_health_and_returns_boxes(self):
