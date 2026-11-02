@@ -138,6 +138,8 @@ These are process findings, not excuses for the measured limitations. They expla
 - Schedule hardware access early and freeze a tested version before the session. Simulation development should continue, but it should not substitute for calibration and supervised physical evidence.
 - Treat every AI component as an experiment against a simpler baseline. Keep it only when the measured benefit justifies the added integration and debugging burden.
 
+We will participate in another hackathon in mid-November and use it as an immediate opportunity to apply these lessons. We will begin work at kickoff, delegate bounded workstreams earlier, give contributors code-complete integration points, resolve setup problems before team meetings, and schedule physical validation as early as the event permits.
+
 ## Conclusion
 
 Our initial idea was to improve grasp selection with pretrained AI. The more important result was learning to test that idea honestly. In the matched Isaac Sim pilot, deterministic perception and deterministic grasp selection produced the highest object-completion rate, the most complete scenes, and the highest correctly sorted throughput. We therefore retained the consistent baseline instead of forcing an AI component into the deployed path.
