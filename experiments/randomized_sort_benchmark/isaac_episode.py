@@ -11,12 +11,13 @@ outcome labels and metrics after a decision has been made.
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 from typing import Any, Mapping, Sequence
@@ -76,6 +77,7 @@ from experiments.randomized_sort_benchmark.vision import (  # noqa: E402
     DETERMINISTIC_HYBRID,
     PINNED_YOLO11N_SHA256,
     YOLO_ASSISTED_HYBRID,
+    YoloHttpSidecarModel,
 )
 from isaac_bridge import CalibratedPinholeCamera, IsaacCameraSortAdapter  # noqa: E402
 from isaac_bridge.sim_validation import (  # noqa: E402
@@ -109,6 +111,7 @@ FPS = 30
 RENDER_RESOLUTION = (1920, 1080)
 SUPPORTED_CLASSES = {"cube", "screw_iso10642_m6x30"}
 STABILIZATION_FRAMES = 3
+ATTEMPTED_TARGET_ASSOCIATION_RADIUS_M = 0.004
 
 
 def parse_args() -> argparse.Namespace:
@@ -122,6 +125,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--grasp", choices=("deterministic", "ai"), required=True)
     parser.add_argument("--yolo-checkpoint")
+    parser.add_argument(
+        "--yolo-endpoint",
+        help="localhost YOLO sidecar endpoint; preferred in Isaac's pinned Python",
+    )
     parser.add_argument("--ai-endpoint")
     parser.add_argument("--ai-model", default="nvidia/Cosmos3-Nano")
     parser.add_argument(
@@ -194,15 +201,64 @@ def _target_sort_key(item: Any) -> tuple[float, str, str]:
     return (math.hypot(x_m - 0.30, y_m), item.class_id, item.track_id)
 
 
+@dataclass(frozen=True)
+class _AttemptedTargetSignature:
+    """Camera-derived identity hint for one already attempted target.
+
+    Cube track IDs contain the capture-specific ``scene_id`` and therefore
+    cannot identify the same cube in a later observation. This signature
+    deliberately retains only class, sorting label, and measured planar pose.
+    It is runtime camera evidence, never simulator truth.
+    """
+
+    class_id: str
+    sort_label: str | None
+    position_xy_m: tuple[float, float]
+
+    @classmethod
+    def from_detection(cls, item: Any) -> "_AttemptedTargetSignature":
+        return cls(
+            class_id=str(item.class_id),
+            sort_label=None if item.sort_label is None else str(item.sort_label),
+            position_xy_m=tuple(float(value) for value in item.pose.position_base_m[:2]),
+        )
+
+
+def _matches_attempted_target(
+    item: Any,
+    attempted: Sequence[_AttemptedTargetSignature],
+    *,
+    association_radius_m: float = ATTEMPTED_TARGET_ASSOCIATION_RADIUS_M,
+) -> bool:
+    """Return whether ``item`` is the same stationary target already tried.
+
+    The 4 mm default is below half the 10.5 mm minimum centre separation of
+    two spawned 10 mm cubes, so an adjacent same-colour cube remains eligible.
+    A target that moved farther than this gate is intentionally eligible for a
+    fresh attempt; position-only association cannot honestly prove it is the
+    same object after a material movement.
+    """
+
+    radius = float(association_radius_m)
+    if not math.isfinite(radius) or radius <= 0.0:
+        raise ValueError("association_radius_m must be finite and positive")
+    candidate = _AttemptedTargetSignature.from_detection(item)
+    return any(
+        previous.class_id == candidate.class_id
+        and previous.sort_label == candidate.sort_label
+        and math.dist(previous.position_xy_m, candidate.position_xy_m) <= radius
+        for previous in attempted
+    )
+
+
 def _match_reference(
     detected: Any,
     references: Sequence[BenchmarkObject],
     truth: Mapping[str, Mapping[str, Any]],
-    excluded: set[str],
 ) -> tuple[str | None, float | None]:
     candidates = []
     for reference in references:
-        if reference.instance_id in excluded or _object_class(reference) != detected.class_id:
+        if _object_class(reference) != detected.class_id:
             continue
         if detected.class_id == "cube" and reference.colour != detected.sort_label:
             continue
@@ -224,6 +280,110 @@ def _placement_slot(destination_index: int, *, screw: bool) -> tuple[float, floa
         return (0.0, (-1.0 if destination_index % 2 == 0 else 1.0) * 0.004)
     grid = (-0.008, 0.0, 0.008)
     return (grid[destination_index % 3], grid[(destination_index // 3) % 3])
+
+
+def _destination_colour(reference: BenchmarkObject) -> str:
+    return "red" if reference.class_name == "screw_iso10642_m6x30" else str(reference.colour)
+
+
+def _final_destination_containment(
+    reference: BenchmarkObject,
+    truth_row: Mapping[str, Any],
+    *,
+    bin_centre_xy_m: Sequence[float],
+    pocket_m: float,
+    floor_z_m: float,
+    rim_z_m: float,
+    cube_edge_m: float,
+) -> dict[str, Any]:
+    """Evaluate the object's final pose in its assigned destination bin.
+
+    This deliberately runs after every action is complete.  Immediate release
+    success is useful diagnostic evidence, but a later placement can collide
+    with and eject an earlier object, especially in red-bin capacity stress
+    scenes.
+    """
+
+    bin_x, bin_y = (float(value) for value in bin_centre_xy_m)
+    if reference.class_name == "cube_10mm":
+        x_m, y_m, z_m = (float(value) for value in truth_row["reference_base_m"])
+        half = float(pocket_m) / 2.0 - float(cube_edge_m) / 2.0
+        inside_pocket_xy = bool(
+            abs(x_m - bin_x) <= half + 0.002
+            and abs(y_m - bin_y) <= half + 0.002
+        )
+        above_floor = bool(z_m >= float(floor_z_m) - 0.002)
+        below_rim = bool(z_m <= float(rim_z_m) + 0.01)
+        return {
+            "class_name": reference.class_name,
+            "destination_colour": _destination_colour(reference),
+            "inside_pocket_xy": inside_pocket_xy,
+            "above_floor": above_floor,
+            "below_rim": below_rim,
+            "passed": bool(inside_pocket_xy and above_floor and below_rim),
+        }
+
+    containment = verify_vertices_inside_bin(
+        truth_row["vertices_base_m"],
+        bin_centre_xy_m=(bin_x, bin_y),
+        pocket_m=float(pocket_m),
+        floor_z_m=float(floor_z_m),
+        rim_z_m=float(rim_z_m),
+        corner_radius_m=0.004,
+        tolerance_m=0.002,
+    )
+    record = containment.as_dict()
+    record.update(
+        {
+            "class_name": reference.class_name,
+            "destination_colour": _destination_colour(reference),
+            "passed": bool(
+                containment.inside_pocket_xy
+                and containment.above_floor
+                and containment.below_rim
+            ),
+        }
+    )
+    return record
+
+
+def _command_text(command: Sequence[str]) -> str | None:
+    try:
+        completed = subprocess.run(
+            list(command),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    result = completed.stdout.strip()
+    return result or None
+
+
+def _runtime_provenance(synthetic_spec: Any) -> dict[str, Any]:
+    isaac_root = Path(os.environ.get("ISAAC", "/isaac-sim")).expanduser()
+    isaac_version_path = isaac_root / "VERSION"
+    try:
+        isaac_version = isaac_version_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        isaac_version = None
+    return {
+        "git_commit_sha": _command_text(("git", "-C", str(ROOT), "rev-parse", "HEAD")),
+        "benchmark_entrypoint_sha256": _sha256_file(Path(__file__).resolve()),
+        "benchmark_runtime_identifier": "randomized-sort-episode-v2-final-containment",
+        "synthetic_data_spec_sha256": synthetic_spec.source_sha256,
+        "camera_calibration_sha256": synthetic_spec.capture.calibration_sha256,
+        "isaac_version": isaac_version,
+        "isaac_root": str(isaac_root),
+        "twin_runtime_identifier": Path(
+            os.environ.get("ROCKWELL_TWIN_RUNTIME", "unset")
+        ).name,
+        "gpu_name": _command_text(
+            ("nvidia-smi", "--query-gpu=name", "--format=csv,noheader")
+        ),
+    }
 
 
 def _yaw_from_orientation_xyzw(quaternion: Sequence[float]) -> float:
@@ -250,6 +410,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     mixed_config = load_scenario_config()
     synthetic_spec = load_synthetic_data_spec()
     capture_calibration = load_capture_calibration(synthetic_spec)
+    runtime_provenance = _runtime_provenance(synthetic_spec)
+    vision_runtime_provenance: dict[str, Any] = {
+        "runtime": (
+            "not_initialized"
+            if args.vision == YOLO_ASSISTED_HYBRID
+            else "not_requested"
+        ),
+        "checkpoint_sha256": (
+            PINNED_YOLO11N_SHA256
+            if args.vision == YOLO_ASSISTED_HYBRID
+            else None
+        ),
+    }
     matched = build_matched_randomization(
         synthetic_spec,
         condition_id=manifest.condition_id,
@@ -483,17 +656,33 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         yolo_model = None
         if args.vision == YOLO_ASSISTED_HYBRID:
-            if not args.yolo_checkpoint:
-                raise RuntimeError("YOLO-assisted mode requires --yolo-checkpoint")
-            checkpoint = Path(args.yolo_checkpoint).expanduser().resolve()
-            digest = _sha256_file(checkpoint)
-            if digest != PINNED_YOLO11N_SHA256:
-                raise RuntimeError(
-                    f"YOLO checkpoint mismatch: {digest} != {PINNED_YOLO11N_SHA256}"
+            if args.yolo_endpoint:
+                yolo_model = YoloHttpSidecarModel(
+                    args.yolo_endpoint,
+                    expected_checkpoint_sha256=PINNED_YOLO11N_SHA256,
                 )
-            from ultralytics import YOLO
+                vision_runtime_provenance = {
+                    "runtime": "localhost_http_sidecar",
+                    **dict(yolo_model.health),
+                }
+            else:
+                if not args.yolo_checkpoint:
+                    raise RuntimeError(
+                        "YOLO-assisted mode requires --yolo-endpoint or --yolo-checkpoint"
+                    )
+                checkpoint = Path(args.yolo_checkpoint).expanduser().resolve()
+                digest = _sha256_file(checkpoint)
+                if digest != PINNED_YOLO11N_SHA256:
+                    raise RuntimeError(
+                        f"YOLO checkpoint mismatch: {digest} != {PINNED_YOLO11N_SHA256}"
+                    )
+                from ultralytics import YOLO
 
-            yolo_model = YOLO(str(checkpoint), task="detect")
+                yolo_model = YOLO(str(checkpoint), task="detect")
+                vision_runtime_provenance = {
+                    "runtime": "in_process_ultralytics",
+                    "checkpoint_sha256": PINNED_YOLO11N_SHA256,
+                }
         vision_config = BenchmarkVisionConfig(
             mode=args.vision,
             checkpoint_sha256=(
@@ -728,8 +917,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             video_index += 1
 
         initial_truth = all_truth()
-        attempted_reference_ids: set[str] = set()
-        attempted_track_ids: set[str] = set()
+        attempted_target_signatures: list[_AttemptedTargetSignature] = []
         destination_counts = {colour: 0 for colour in config.task.colour_order}
         events: list[dict[str, Any]] = []
         screw_jaw_target = screw_jaw_half_target(
@@ -755,7 +943,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 item
                 for item in observation.objects
                 if item.class_id in SUPPORTED_CLASSES
-                and item.track_id not in attempted_track_ids
+                and not _matches_attempted_target(item, attempted_target_signatures)
             )
             if not supported:
                 events.append(
@@ -772,11 +960,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 target,
                 manifest.objects,
                 truth_before,
-                attempted_reference_ids,
             )
-            attempted_track_ids.add(target.track_id)
-            if reference_id is not None:
-                attempted_reference_ids.add(reference_id)
+            target_signature = _AttemptedTargetSignature.from_detection(target)
+            attempted_target_signatures.append(target_signature)
 
             destination_colour = target.sort_label
             destination_index = destination_counts[destination_colour]
@@ -814,6 +1000,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "target_sort_label": target.sort_label,
                 "associated_reference_id_evaluator_only": reference_id,
                 "association_distance_m_evaluator_only": association_distance,
+                "attempted_target_signature": {
+                    "class_id": target_signature.class_id,
+                    "sort_label": target_signature.sort_label,
+                    "position_xy_m": list(target_signature.position_xy_m),
+                    "association_radius_m": ATTEMPTED_TARGET_ASSOCIATION_RADIUS_M,
+                    "source": "camera-derived detection; no simulator truth",
+                },
                 "runtime_target_pose": {
                     "position_base_m": list(target.pose.position_base_m),
                     "orientation_xyzw": list(target.pose.orientation_xyzw),
@@ -1046,12 +1239,31 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             events.append(event)
 
         final_truth = all_truth()
-        correct_ids = {
+        immediate_success_ids = {
             event.get("associated_reference_id_evaluator_only")
             for event in events
             if event.get("complete_grasp_success") is True
         }
-        correct_ids.discard(None)
+        immediate_success_ids.discard(None)
+        final_containment_by_object: dict[str, dict[str, Any]] = {}
+        correct_ids: set[str] = set()
+        for reference in manifest.objects:
+            destination_colour = _destination_colour(reference)
+            containment = _final_destination_containment(
+                reference,
+                final_truth[reference.instance_id],
+                bin_centre_xy_m=bin_centres[destination_colour],
+                pocket_m=config.bin.pocket_m,
+                floor_z_m=config.frames.surface_base_z_m + config.bin.floor_m,
+                rim_z_m=config.frames.surface_base_z_m + config.bin.height_m,
+                cube_edge_m=config.cube_edge_m,
+            )
+            containment["immediate_release_success"] = (
+                reference.instance_id in immediate_success_ids
+            )
+            final_containment_by_object[reference.instance_id] = containment
+            if containment["passed"]:
+                correct_ids.add(reference.instance_id)
         unresolved_ids = sorted(
             {reference.instance_id for reference in manifest.objects} - correct_ids
         )
@@ -1061,7 +1273,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         ledger = classify_application(randomization, applied=sorted(applied_randomization))
         write_json_atomic(run_dir / "randomization_application.json", ledger)
         report = {
-            "schema_version": "randomized-sort-episode-v1",
+            "schema_version": "randomized-sort-episode-v2",
             "condition_id": manifest.condition_id,
             "condition_manifest_sha256": manifest.sha256,
             "policy_cell": {
@@ -1077,6 +1289,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "simulator_truth_use": "outcome evaluation and metrics only",
             "object_count": manifest.object_count,
             "reference_object_ids": [item.instance_id for item in manifest.objects],
+            "immediate_release_success_object_ids": sorted(immediate_success_ids),
             "correctly_sorted_object_ids": sorted(correct_ids),
             "correctly_sorted_objects": correct,
             "unresolved_object_ids": unresolved_ids,
@@ -1090,12 +1303,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "wall_time_s": time.perf_counter() - wall_started,
             "vision_reports": vision_reports,
+            "vision_runtime_provenance": vision_runtime_provenance,
             "events": events,
             "initial_truth_evaluator_only": initial_truth,
             "final_truth_evaluator_only": final_truth,
+            "final_destination_containment_evaluator_only": final_containment_by_object,
             "appearance_profile": appearance_profile,
             "randomization_manifest_sha256": randomization.sha256,
             "randomization_application_relpath": "randomization_application.json",
+            "runtime_provenance": runtime_provenance,
             "limitations": [
                 "YOLO is a box-level corroborator; calibrated geometry supplies pose.",
                 "Seed-55 YOLO has no held-out physical screw evaluation.",
@@ -1115,6 +1331,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "vision": args.vision,
                 "grasp": args.grasp,
                 "wall_time_s": time.perf_counter() - wall_started,
+                "runtime_provenance": runtime_provenance,
+                "vision_runtime_provenance": vision_runtime_provenance,
             }
             _atomic_report(run_dir / "episode_failure.json", failure)
         app.close()

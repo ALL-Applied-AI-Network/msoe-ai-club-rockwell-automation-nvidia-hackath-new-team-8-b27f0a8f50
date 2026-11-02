@@ -92,7 +92,27 @@ source "$ROCKWELL_RUNTIME_ROOT/$(git rev-parse HEAD)/env.sh"
 ```
 
 YOLO cells also need the external, SHA-pinned seed-55 `best.pt` via
-`--yolo-checkpoint`. AI cells need the separately running Cosmos3-Nano
+`--yolo-endpoint` (recommended) or `--yolo-checkpoint`. Isaac Sim 6.0.1's
+pinned Python does not contain PyTorch/Ultralytics, so do not inject another
+environment's packages into it. Start the persistent localhost sidecar with a
+Python environment that has the pinned YOLO runtime:
+
+```bash
+export YOLO_PYTHON=/workspace/rockwell-hackathon/team_plugins/computer_vision/fastsam_env/.venv/bin/python
+export YOLO_CHECKPOINT=/workspace/yolo-detector-finetune-pilot/runs/train-seed-55/weights/best.pt
+
+PYTHONPATH="$PWD" "$YOLO_PYTHON" \
+  -m experiments.randomized_sort_benchmark.yolo_sidecar \
+  --checkpoint "$YOLO_CHECKPOINT" \
+  --host 127.0.0.1 \
+  --port 18080
+```
+
+Check `http://127.0.0.1:18080/health`, then pass
+`--yolo-endpoint http://127.0.0.1:18080`. The client revalidates the model hash,
+class map, and lossless input-image hash for every result.
+
+AI cells need the separately running Cosmos3-Nano
 OpenAI-compatible endpoint via `--ai-endpoint`; each decision has a durable
 receipt. A provider failure is recorded as deterministic fallback and must not
 be counted as an AI-bound result.
@@ -105,20 +125,36 @@ inference/wall latency separately.
 
 ```bash
 python -m experiments.randomized_sort_benchmark.summarize \
+  --suite /workspace/randomized-sort-suite/suite_index.json \
   --runs /workspace/randomized-sort-runs \
   --out /workspace/randomized-sort-comparison
 ```
 
-The summary reports object completion, full-scene completion, correctly sorted
-objects per simulated minute, vision abstention/latency, outcome causes, AI
-binding/fallback/changed-selection counts, Wilson intervals, and paired
-bootstrap intervals against DD.
+The suite index is required so a crashed or missing run cannot silently vanish
+from the denominator. By default the command writes a diagnostic summary but
+returns exit code 2 until every condition has a valid report in every cell and
+the matched randomization/runtime provenance agrees. Use `--allow-partial`
+only for progress monitoring; partial results are explicitly ineligible for a
+policy conclusion.
+
+The completed summary reports object and full-scene completion, correctly
+sorted objects per simulated minute, vision abstention/latency, outcome causes,
+AI binding/fallback/changed-selection counts, class/destination opportunities,
+capacity-stress strata, and all six pairwise policy comparisons. Object and
+throughput intervals resample whole scene conditions so objects sharing one
+scene are not incorrectly treated as independent trials. The 2×2 interaction
+is also reported. Runtime reports must include a stable `runtime_provenance`
+comparison key; host/instance metadata may be recorded separately and may
+differ when equivalent L40S instances execute different cells.
 
 ## Interpretation limits
 
 - The 35 mm pocket can be physically capacity-limited in high red-destination
   loads. Those cases are retained and should be reported as capacity stress,
-  not relabeled as perception failure.
+  not relabeled as perception failure. The summarizer conservatively tags a
+  condition as a capacity-stress candidate when more than two screws must reuse
+  the two commanded screw slots, or a destination load exceeds the nine cube
+  grid slots. This tag is not proof that a physical bin is full.
 - Seed-55 YOLO has measured held-out cube performance but no held-out physical
   screw evidence. Screw results are experimental.
 - The screw detector needs three distinct frames before publishing a stable

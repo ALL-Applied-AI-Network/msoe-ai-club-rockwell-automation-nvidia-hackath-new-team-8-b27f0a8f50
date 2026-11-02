@@ -22,7 +22,11 @@ import json
 import math
 from pathlib import Path
 import time
+from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Sequence
+import urllib.error
+import urllib.parse
+import urllib.request
 
 import numpy as np
 
@@ -240,6 +244,153 @@ class YoloBox:
     class_name: str
     confidence: float
     xyxy_full: tuple[float, float, float, float]
+
+
+class YoloHttpSidecarModel:
+    """Ultralytics-compatible facade for an isolated YOLO runtime.
+
+    Isaac Sim's pinned Python environment intentionally does not contain
+    PyTorch or Ultralytics.  Loading those packages into that interpreter can
+    disturb Isaac's pinned NumPy/CUDA stack, so benchmark inference runs in a
+    small localhost sidecar and returns only boxes.  PNG transport is lossless.
+    """
+
+    names = YOLO_CLASS_NAMES
+
+    def __init__(
+        self,
+        endpoint: str,
+        *,
+        expected_checkpoint_sha256: str = PINNED_YOLO11N_SHA256,
+        timeout_s: float = 30.0,
+    ) -> None:
+        parsed = urllib.parse.urlsplit(str(endpoint))
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname not in {"127.0.0.1", "localhost"}
+            or parsed.port is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("YOLO benchmark sidecar must use a localhost HTTP endpoint")
+        self.endpoint = f"http://{parsed.hostname}:{parsed.port}"
+        self.timeout_s = _finite(timeout_s, "timeout_s")
+        if self.timeout_s <= 0.0:
+            raise ValueError("timeout_s must be positive")
+        self.expected_checkpoint_sha256 = str(expected_checkpoint_sha256).lower()
+        health = self._request_json("GET", "/health")
+        if health.get("schema_version") != "randomized-yolo-sidecar-v1":
+            raise ValueError("YOLO sidecar returned an unsupported schema")
+        if health.get("checkpoint_sha256") != self.expected_checkpoint_sha256:
+            raise ValueError("YOLO sidecar checkpoint hash does not match the benchmark pin")
+        if _normalise_model_names(health.get("names")) != YOLO_CLASS_NAMES:
+            raise ValueError("YOLO sidecar class map does not match the benchmark")
+        self.health = health
+        self.last_inference: Mapping[str, Any] | None = None
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> Mapping[str, Any]:
+        request = urllib.request.Request(
+            self.endpoint + path,
+            data=body,
+            headers=dict(headers or {}),
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+                payload = response.read()
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                error_payload = json.loads(exc.read(2048))
+                if isinstance(error_payload, Mapping):
+                    detail = str(error_payload.get("error", ""))[:500]
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                pass
+            suffix = f": {detail}" if detail else ""
+            raise RuntimeError(
+                f"YOLO sidecar HTTP {exc.code} for {path}{suffix}"
+            ) from exc
+        except (OSError, urllib.error.URLError) as exc:
+            raise RuntimeError(
+                f"YOLO sidecar transport failure for {path}: {type(exc).__name__}"
+            ) from exc
+        try:
+            value = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("YOLO sidecar returned invalid JSON") from exc
+        if not isinstance(value, Mapping):
+            raise RuntimeError("YOLO sidecar response must be an object")
+        return value
+
+    def predict(
+        self,
+        *,
+        source: np.ndarray,
+        imgsz: int,
+        conf: float,
+        iou: float,
+        verbose: bool = False,
+    ) -> tuple[Any, ...]:
+        del verbose
+        import cv2
+
+        image = np.asarray(source)
+        if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError("YOLO sidecar source must be a BGR uint8 image")
+        encoded_ok, encoded = cv2.imencode(".png", image)
+        if not encoded_ok:
+            raise RuntimeError("could not encode YOLO sidecar input")
+        encoded_bytes = encoded.tobytes()
+        response = self._request_json(
+            "POST",
+            "/predict",
+            body=encoded_bytes,
+            headers={
+                "Content-Type": "image/png",
+                "X-Yolo-Image-Size": str(int(imgsz)),
+                "X-Yolo-Confidence": repr(float(conf)),
+                "X-Yolo-Iou": repr(float(iou)),
+            },
+        )
+        if response.get("schema_version") != "randomized-yolo-prediction-v1":
+            raise RuntimeError("YOLO sidecar prediction schema mismatch")
+        if response.get("checkpoint_sha256") != self.expected_checkpoint_sha256:
+            raise RuntimeError("YOLO sidecar prediction checkpoint hash mismatch")
+        expected_input_hash = hashlib.sha256(encoded_bytes).hexdigest()
+        if response.get("input_png_sha256") != expected_input_hash:
+            raise RuntimeError("YOLO sidecar prediction input hash mismatch")
+        raw_boxes = response.get("boxes")
+        if not isinstance(raw_boxes, list):
+            raise RuntimeError("YOLO sidecar boxes must be a list")
+        xyxy: list[list[float]] = []
+        confidence: list[float] = []
+        classes: list[float] = []
+        for index, row in enumerate(raw_boxes):
+            if not isinstance(row, Mapping):
+                raise RuntimeError(f"YOLO sidecar box {index} must be an object")
+            coordinates = row.get("xyxy")
+            if not isinstance(coordinates, list) or len(coordinates) != 4:
+                raise RuntimeError(f"YOLO sidecar box {index} has invalid xyxy")
+            xyxy.append([float(value) for value in coordinates])
+            confidence.append(float(row.get("confidence")))
+            classes.append(float(row.get("class_id")))
+        self.last_inference = response
+        boxes = SimpleNamespace(
+            xyxy=np.asarray(xyxy, dtype=np.float32).reshape((-1, 4)),
+            conf=np.asarray(confidence, dtype=np.float32),
+            cls=np.asarray(classes, dtype=np.float32),
+        )
+        return (SimpleNamespace(boxes=boxes),)
 
 
 @dataclass(frozen=True)
@@ -501,7 +652,10 @@ class BenchmarkVisionProvider:
                 )
             )
         except Exception as exc:
-            raise VisionError("YOLO11n benchmark inference failed") from exc
+            raise VisionError(
+                "YOLO11n benchmark inference failed: "
+                f"{type(exc).__name__}: {str(exc)[:500]}"
+            ) from exc
         if len(raw_results) != 1:
             raise VisionError("single-image YOLO inference must return one result")
         raw_boxes = getattr(raw_results[0], "boxes", None)

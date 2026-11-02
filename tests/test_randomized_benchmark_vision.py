@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -12,6 +14,7 @@ from experiments.randomized_sort_benchmark.vision import (
     DETERMINISTIC_HYBRID,
     PINNED_YOLO11N_SHA256,
     YOLO_ASSISTED_HYBRID,
+    YoloHttpSidecarModel,
     load_benchmark_vision_profile,
 )
 from sorting_core.perception import (
@@ -84,6 +87,20 @@ class _Model:
     def predict(self, **kwargs):
         self.calls.append(kwargs)
         return [_Result(self.values)]
+
+
+class _UrlResponse:
+    def __init__(self, value: dict[str, object]) -> None:
+        self.payload = json.dumps(value).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self) -> bytes:
+        return self.payload
 
 
 def _object(
@@ -203,6 +220,64 @@ class RandomizedBenchmarkVisionTests(unittest.TestCase):
             result.observation.objects[2].attributes["neural_gate_status"],
             "geometry_only_non_target_obstacle",
         )
+
+    def test_localhost_sidecar_facade_validates_health_and_returns_boxes(self):
+        calls = 0
+
+        def reply(request, **kwargs):
+            nonlocal calls
+            del kwargs
+            calls += 1
+            if calls == 1:
+                return _UrlResponse(
+                    {
+                        "schema_version": "randomized-yolo-sidecar-v1",
+                        "checkpoint_sha256": PINNED_YOLO11N_SHA256,
+                        "names": {"0": "cube", "1": "screw_iso10642_m6x30"},
+                    }
+                )
+            return _UrlResponse(
+                {
+                    "schema_version": "randomized-yolo-prediction-v1",
+                    "checkpoint_sha256": PINNED_YOLO11N_SHA256,
+                    "input_png_sha256": hashlib.sha256(request.data).hexdigest(),
+                    "boxes": [
+                        {
+                            "class_id": 0,
+                            "confidence": 0.9,
+                            "xyxy": [1.0, 2.0, 20.0, 30.0],
+                        }
+                    ],
+                }
+            )
+
+        with patch(
+            "experiments.randomized_sort_benchmark.vision.urllib.request.urlopen",
+            side_effect=reply,
+        ):
+            model = YoloHttpSidecarModel("http://127.0.0.1:18080")
+            result = model.predict(
+                source=np.zeros((64, 64, 3), dtype=np.uint8),
+                imgsz=960,
+                conf=0.65,
+                iou=0.7,
+            )
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].boxes.xyxy.shape, (1, 4))
+        self.assertAlmostEqual(float(result[0].boxes.conf[0]), 0.9, places=5)
+        self.assertEqual(int(result[0].boxes.cls[0]), 0)
+
+    def test_sidecar_rejects_nonlocal_or_credentialed_endpoint(self):
+        for endpoint in (
+            "http://example.com:18080",
+            "http://localhost:18080@attacker.invalid:80",
+            "http://user:password@localhost:18080",
+            "http://localhost:18080/path",
+        ):
+            with self.subTest(endpoint=endpoint):
+                with self.assertRaises(ValueError):
+                    YoloHttpSidecarModel(endpoint)
 
     def test_missing_screw_box_abstains_with_structured_report(self):
         model = _Model(((0, 0.86, (80.0, 80.0, 120.0, 120.0)),))

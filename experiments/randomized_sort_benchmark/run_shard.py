@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--isaac", default=os.environ.get("ISAAC"))
     parser.add_argument("--reference-assets", default=os.environ.get("ROCKWELL_REFERENCE_ASSETS"))
     parser.add_argument("--yolo-checkpoint", default=os.environ.get("ROCKWELL_VISION_CHECKPOINT"))
+    parser.add_argument("--yolo-endpoint", default=os.environ.get("ROCKWELL_YOLO_ENDPOINT"))
     parser.add_argument("--ai-endpoint", default=os.environ.get("ROCKWELL_AI_GRASP_ENDPOINT"))
     parser.add_argument("--start-index", type=int, default=0)
     parser.add_argument("--stride", type=int, default=1)
@@ -54,8 +55,8 @@ def main() -> int:
     if not runtime.is_dir() or not (isaac / "python.sh").is_file():
         raise SystemExit("source the commit-specific env.sh or pass --runtime and --isaac")
     vision, grasp = CELLS[args.cell]
-    if vision.startswith("yolo") and not args.yolo_checkpoint:
-        raise SystemExit("YOLO cells require --yolo-checkpoint")
+    if vision.startswith("yolo") and not (args.yolo_checkpoint or args.yolo_endpoint):
+        raise SystemExit("YOLO cells require --yolo-endpoint or --yolo-checkpoint")
     if grasp == "ai" and not args.ai_endpoint:
         raise SystemExit("AI cells require --ai-endpoint")
     run_root = Path(args.runs).expanduser().resolve() / args.cell
@@ -99,7 +100,9 @@ def main() -> int:
                     str(Path(args.reference_assets) / "models/ISO10642-M6x30-countersunk-screw.stl"),
                 ]
             )
-        if args.yolo_checkpoint and vision.startswith("yolo"):
+        if args.yolo_endpoint and vision.startswith("yolo"):
+            command.extend(["--yolo-endpoint", str(args.yolo_endpoint)])
+        elif args.yolo_checkpoint and vision.startswith("yolo"):
             command.extend(["--yolo-checkpoint", str(args.yolo_checkpoint)])
         if args.ai_endpoint and grasp == "ai":
             command.extend(["--ai-endpoint", str(args.ai_endpoint)])
